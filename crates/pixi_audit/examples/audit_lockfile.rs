@@ -2,7 +2,8 @@
 //! prints the report as JSON.
 //!
 //! ```shell
-//! cargo run --example audit_lockfile -- /path/to/pixi.lock | jq .summary
+//! cargo run -p pixi_audit --example audit_lockfile -- \
+//!   crates/pixi_audit/examples/pixi.lock | jq .summary
 //! ```
 //!
 //! Progress goes to stderr, the report to stdout, so the output pipes
