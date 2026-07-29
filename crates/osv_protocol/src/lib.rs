@@ -8,6 +8,8 @@
 //! be shared between OSV clients (which serialize queries and deserialize
 //! responses) and OSV-compatible servers (which do the reverse).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Identity part of an OSV query.
@@ -54,22 +56,37 @@ pub struct BatchResponse {
     pub results: Vec<BatchResult>,
 }
 
-/// Minimal OSV vulnerability document (`GET /v1/vulns/{id}`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// OSV vulnerability document (`GET /v1/vulns/{id}`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OsvVulnerability {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<String>,
+    /// When set, the advisory has been withdrawn and should not be reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub severity: Vec<OsvSeverity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affected: Vec<OsvAffected>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<OsvReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_specific: Option<serde_json::Value>,
+    /// OSV fields this crate does not model (`related`, `credits`, ...),
+    /// preserved so documents round-trip losslessly.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +104,12 @@ pub struct OsvAffected {
     pub ranges: Vec<OsvRange>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub versions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_specific: Option<serde_json::Value>,
+    /// Unmodeled OSV fields (`severity`, `ecosystem_specific`, ...),
+    /// preserved so documents round-trip losslessly.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +118,8 @@ pub struct OsvAffectedPackage {
     pub ecosystem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purl: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,15 +223,82 @@ mod tests {
     fn serialize_vulnerability_is_compact() {
         let vuln = OsvVulnerability {
             id: "X".to_string(),
-            modified: None,
-            aliases: Vec::new(),
-            summary: None,
-            severity: Vec::new(),
-            affected: Vec::new(),
-            references: Vec::new(),
+            ..Default::default()
         };
         let json = serde_json::to_value(&vuln).unwrap();
         assert_eq!(json, serde_json::json!({"id": "X"}));
+    }
+
+    #[test]
+    fn deserialize_basilisk_document_metadata_fields() {
+        // Shape taken from basilisk's document builder: conda-forge affected
+        // entries carry `versions` + `database_specific` (no ranges); the
+        // document itself carries schema_version/published/withdrawn/details.
+        let json = r#"{
+            "schema_version": "1.6.0",
+            "id": "CVE-2026-1234",
+            "modified": "2026-01-01T00:00:00Z",
+            "published": "2025-12-01T00:00:00Z",
+            "withdrawn": "2026-02-01T00:00:00Z",
+            "summary": "Buffer overflow",
+            "details": "Long-form description.",
+            "affected": [{
+                "package": {
+                    "ecosystem": "conda-forge",
+                    "name": "pillow",
+                    "purl": "pkg:conda/conda-forge/pillow"
+                },
+                "versions": ["10.1.0", "10.2.0"],
+                "database_specific": {"basilisk": {"applicability": "evaluated"}}
+            }],
+            "database_specific": {"source": "nvd"}
+        }"#;
+        let vuln: OsvVulnerability = serde_json::from_str(json).unwrap();
+        assert_eq!(vuln.schema_version.as_deref(), Some("1.6.0"));
+        assert_eq!(vuln.published.as_deref(), Some("2025-12-01T00:00:00Z"));
+        assert_eq!(vuln.withdrawn.as_deref(), Some("2026-02-01T00:00:00Z"));
+        assert_eq!(vuln.details.as_deref(), Some("Long-form description."));
+        assert!(vuln.database_specific.is_some());
+
+        let affected = &vuln.affected[0];
+        assert_eq!(
+            affected.package.as_ref().unwrap().purl.as_deref(),
+            Some("pkg:conda/conda-forge/pillow")
+        );
+        assert_eq!(
+            affected.database_specific.as_ref().unwrap()["basilisk"]["applicability"],
+            "evaluated"
+        );
+
+        // Round-tripping must not lose the new fields.
+        let round_tripped = serde_json::to_value(&vuln).unwrap();
+        assert_eq!(round_tripped["withdrawn"], "2026-02-01T00:00:00Z");
+        assert_eq!(round_tripped["schema_version"], "1.6.0");
+        assert_eq!(
+            round_tripped["affected"][0]["database_specific"]["basilisk"]["applicability"],
+            "evaluated"
+        );
+        assert_eq!(round_tripped["database_specific"]["source"], "nvd");
+    }
+
+    #[test]
+    fn unmodeled_fields_round_trip_via_catch_all() {
+        // OSV fields we don't model yet (credits, related, severity on an
+        // affected entry, ...) must survive a deserialize/serialize cycle so
+        // an OSV-compatible server built on these types is lossless.
+        let json = serde_json::json!({
+            "id": "CVE-2026-1",
+            "related": ["CVE-2026-2"],
+            "credits": [{"name": "someone", "type": "FINDER"}],
+            "affected": [{
+                "package": {"ecosystem": "PyPI", "name": "pillow"},
+                "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+                "ecosystem_specific": {"functions": ["foo"]}
+            }]
+        });
+        let vuln: OsvVulnerability = serde_json::from_value(json.clone()).unwrap();
+        let round_tripped = serde_json::to_value(&vuln).unwrap();
+        assert_eq!(round_tripped, json);
     }
 
     #[test]

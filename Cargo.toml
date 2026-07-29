@@ -15,9 +15,11 @@ rust-version = "1.90"
 axum = "0.8"
 cvss = "2.0"
 futures = "0.3.31"
-insta = "1.42.1"
 miette = "7.6.0"
 osv_protocol = { path = "crates/osv_protocol", version = "0.1.0" }
+# Same version pixi pins, so the `LockFile` type identity unifies when pixi
+# consumes these crates.
+rattler_lock = { version = "0.31", default-features = false }
 # Same middleware crate pixi uses (its workspace renames `astral-reqwest-middleware`
 # to `reqwest-middleware`), so the `ClientWithMiddleware` type identity unifies
 # when pixi consumes these crates.
