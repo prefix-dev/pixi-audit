@@ -108,18 +108,21 @@ struct ResolvedTargets {
 fn resolve_targets(cli_lockfile: Option<PathBuf>) -> miette::Result<ResolvedTargets> {
     match cli_lockfile {
         Some(lockfile) => {
-            let manifest = lockfile
+            let manifest = match lockfile
                 .canonicalize()
                 .ok()
                 .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-                .and_then(|dir| config::find_manifest_in(&dir));
+            {
+                Some(dir) => config::find_manifest_in(&dir)?,
+                None => None,
+            };
             Ok(ResolvedTargets { lockfile, manifest })
         }
         None => {
             let cwd = std::env::current_dir()
                 .into_diagnostic()
                 .wrap_err("cannot determine the current directory")?;
-            let manifest = config::discover_workspace(&cwd).ok_or_else(|| {
+            let manifest = config::discover_workspace(&cwd)?.ok_or_else(|| {
                 miette::miette!(
                     "no pixi workspace found; pass a lockfile path or run inside a pixi workspace"
                 )

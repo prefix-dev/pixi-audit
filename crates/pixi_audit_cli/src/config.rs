@@ -17,33 +17,44 @@ const KNOWN_KEYS: &[&str] = &["ignore", "ignore-until-fixed", "severity"];
 
 /// The workspace manifest in `dir`: `pixi.toml`, or `pyproject.toml` that
 /// contains a `[tool.pixi]` table.
-pub fn find_manifest_in(dir: &Path) -> Option<PathBuf> {
+///
+/// A `pyproject.toml` that exists but cannot be read or parsed as TOML is
+/// an error naming the file — silently skipping it as "not a manifest"
+/// could let discovery walk past the intended workspace to an ancestor,
+/// or drop an explicit lockfile's sibling config. A `pyproject.toml`
+/// that parses fine but has no `[tool.pixi]` table is `Ok(None)`.
+pub fn find_manifest_in(dir: &Path) -> miette::Result<Option<PathBuf>> {
     let pixi = dir.join("pixi.toml");
     if pixi.is_file() {
-        return Some(pixi);
+        return Ok(Some(pixi));
     }
     let pyproject = dir.join("pyproject.toml");
-    if pyproject.is_file()
-        && let Ok(content) = std::fs::read_to_string(&pyproject)
-        && let Ok(value) = content.parse::<toml::Value>()
-        && value.get("tool").and_then(|t| t.get("pixi")).is_some()
-    {
-        return Some(pyproject);
+    if pyproject.is_file() {
+        let content = std::fs::read_to_string(&pyproject)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to read '{}'", pyproject.display()))?;
+        let value: toml::Value = content
+            .parse()
+            .into_diagnostic()
+            .wrap_err_with(|| format!("'{}' is not valid TOML", pyproject.display()))?;
+        if value.get("tool").and_then(|t| t.get("pixi")).is_some() {
+            return Ok(Some(pyproject));
+        }
     }
-    None
+    Ok(None)
 }
 
 /// Walks up from `start` to the first directory containing a workspace
 /// manifest and returns the manifest path.
-pub fn discover_workspace(start: &Path) -> Option<PathBuf> {
+pub fn discover_workspace(start: &Path) -> miette::Result<Option<PathBuf>> {
     let mut dir = Some(start);
     while let Some(current) = dir {
-        if let Some(manifest) = find_manifest_in(current) {
-            return Some(manifest);
+        if let Some(manifest) = find_manifest_in(current)? {
+            return Ok(Some(manifest));
         }
         dir = current.parent();
     }
-    None
+    Ok(None)
 }
 
 /// Parses `[tool.pixi-audit]` from `manifest`. A missing table is an empty
@@ -215,7 +226,7 @@ severity = "high"
             "pyproject.toml",
             "[tool.pixi]\n[tool.pixi-audit]\nignore = [\"CVE-9\"]\n",
         );
-        let manifest = find_manifest_in(dir.path()).unwrap();
+        let manifest = find_manifest_in(dir.path()).unwrap().unwrap();
         assert!(manifest.ends_with("pyproject.toml"));
         assert_eq!(load_config(&manifest).unwrap().ignore, vec!["CVE-9"]);
     }
@@ -224,7 +235,14 @@ severity = "high"
     fn pyproject_without_tool_pixi_is_not_a_manifest() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "pyproject.toml", "[project]\nname = \"x\"\n");
-        assert_eq!(find_manifest_in(dir.path()), None);
+        assert_eq!(find_manifest_in(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn unparsable_pyproject_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "pyproject.toml", "not toml [");
+        assert!(find_manifest_in(dir.path()).is_err());
     }
 
     #[test]
@@ -232,7 +250,25 @@ severity = "high"
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "pixi.toml", "[workspace]\n");
         write(dir.path(), "pyproject.toml", "[tool.pixi]\n");
-        assert!(find_manifest_in(dir.path()).unwrap().ends_with("pixi.toml"));
+        assert!(
+            find_manifest_in(dir.path())
+                .unwrap()
+                .unwrap()
+                .ends_with("pixi.toml")
+        );
+    }
+
+    #[test]
+    fn pixi_toml_wins_over_pyproject_even_if_pyproject_is_unparsable() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "pixi.toml", "[workspace]\n");
+        write(dir.path(), "pyproject.toml", "not toml [");
+        assert!(
+            find_manifest_in(dir.path())
+                .unwrap()
+                .unwrap()
+                .ends_with("pixi.toml")
+        );
     }
 
     #[test]
@@ -241,7 +277,7 @@ severity = "high"
         write(dir.path(), "pixi.toml", "[workspace]\n");
         let nested = dir.path().join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
-        let manifest = discover_workspace(&nested).unwrap();
+        let manifest = discover_workspace(&nested).unwrap().unwrap();
         assert!(manifest.ends_with("pixi.toml"));
         assert_eq!(manifest.parent().unwrap(), dir.path());
     }
@@ -249,7 +285,16 @@ severity = "high"
     #[test]
     fn discovery_fails_outside_any_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(discover_workspace(dir.path()), None);
+        assert_eq!(discover_workspace(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn discovery_errors_on_unparsable_pyproject_along_the_way() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "pyproject.toml", "not toml [");
+        let nested = dir.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(discover_workspace(&nested).is_err());
     }
 
     #[test]
