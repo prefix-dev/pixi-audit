@@ -157,9 +157,9 @@ Flow in `fix.rs`:
    "--fix requires a pixi workspace (no pixi.toml/pyproject.toml next to
    <lockfile>)".
 4. Run `pixi update --manifest-path <manifest> <name>...` as a
-   subprocess (`pixi` from `PATH`; stdout/stderr stream to our stderr).
-   Missing `pixi` binary or non-zero exit → exit 2 with the underlying
-   error.
+   subprocess (`pixi` from `PATH`; stdout/stderr are captured and
+   relayed to our stderr after completion). Missing `pixi` binary or
+   non-zero exit → exit 2 with the underlying error.
 5. Reload the lockfile, re-audit with the same filters/ignores.
 6. Render the post-fix report (human or `--json` — the JSON document is
    the post-fix `AuditReport`), preceded on stderr by a summary line:
