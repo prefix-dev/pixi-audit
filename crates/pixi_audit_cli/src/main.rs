@@ -9,6 +9,7 @@ use pixi_audit::{
 };
 
 mod config;
+mod fix;
 mod render;
 
 const EXIT_VULNERABLE: u8 = 1;
@@ -207,7 +208,48 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     .await
     .map_err(miette::Report::new)?;
 
-    Ok(RunOutcome { report, threshold })
+    if !cli.fix {
+        return Ok(RunOutcome { report, threshold });
+    }
+
+    let names = fix::vulnerable_package_names(&report);
+    if names.is_empty() {
+        return Ok(RunOutcome { report, threshold });
+    }
+    let manifest = targets.manifest.as_deref().ok_or_else(|| {
+        miette::miette!(
+            "--fix requires a pixi workspace (no pixi.toml/pyproject.toml next to '{}')",
+            targets.lockfile.display()
+        )
+    })?;
+    fix::run_pixi_update(manifest, &names)?;
+
+    let lock_file = pixi_audit::rattler_lock::LockFile::from_path(&targets.lockfile)
+        .into_diagnostic()
+        .wrap_err_with(|| {
+            format!(
+                "failed to re-read lock file '{}' after pixi update",
+                targets.lockfile.display()
+            )
+        })?;
+    let after = audit_lock_file(
+        &client,
+        &lock_file,
+        &cli.environments,
+        &cli.platforms,
+        ignore_spec,
+    )
+    .await
+    .map_err(miette::Report::new)?;
+
+    let before_count = report.summary.vulnerable;
+    let resolved = before_count.saturating_sub(after.summary.vulnerable);
+    eprintln!("fixed: resolved {resolved} of {before_count} vulnerabilities via pixi update");
+
+    Ok(RunOutcome {
+        report: after,
+        threshold,
+    })
 }
 
 #[cfg(test)]
