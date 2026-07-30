@@ -86,7 +86,7 @@ openssl 3.1.0 (conda-forge) — default, prod
 requests 2.32.0 (PyPI) — default
   GHSA-xxxx-yyyy  MEDIUM    fixed in: 2.32.4
 
-2 package(s) could not be checked:
+1 package(s) could not be checked:
   samtools 1.19 (bioconda) — default
 
 2 vulnerabilities in 2 package(s) (140 audited, 0 ignored, 1 unchecked)
