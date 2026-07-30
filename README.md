@@ -32,6 +32,26 @@ prefix.dev's conda-forge vulnerability database).
     without a known version reported as unchecked instead of queried, and an
     `AuditReport` ready for rendering.
 
+## `pixi audit` (CLI extension)
+
+`pixi_audit_cli` ships a `pixi-audit` binary. pixi discovers any executable
+named `pixi-<cmd>` on `PATH` (or in `$PIXI_HOME/bin`) as an extension, so once
+installed it runs as `pixi audit`:
+
+```shell
+pixi audit pixi.lock
+pixi audit pixi.lock --environment prod --platform linux-64
+pixi audit pixi.lock --ignore CVE-2026-1234 --json
+```
+
+Exit codes: `0` no vulnerabilities, `1` vulnerabilities found, `2` execution
+error. Set `PIXI_AUDIT_BASE_URL` to audit against a different OSV-compatible
+instance. Install from a checkout with:
+
+```shell
+cargo install --path crates/pixi_audit_cli
+```
+
 ## Development
 
 ```shell
