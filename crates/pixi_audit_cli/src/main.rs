@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+mod render;
+
 /// Audit a pixi.lock file for known vulnerabilities.
 ///
 /// Exit codes: 0 = no vulnerabilities, 1 = vulnerabilities found,
@@ -34,6 +36,7 @@ struct Cli {
 }
 
 fn main() {
+    let _ = render::render_human;
     let cli = Cli::parse();
     // Wired up in a later task.
     let _ = cli;
