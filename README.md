@@ -1,64 +1,73 @@
 # pixi-audit
 
-Library crates for auditing locked packages against an OSV-compatible
-vulnerability database (such as [basilisk](https://github.com/prefix-dev/basilisk),
-prefix.dev's conda-forge vulnerability database).
+Rust crates for checking packages in a `pixi.lock` file against an
+[OSV](https://ossf.github.io/osv-schema/)-compatible vulnerability database.
+By default, audits use [basilisk](https://github.com/prefix-dev/basilisk),
+prefix.dev's conda-forge vulnerability database.
+
+## Try it
+
+Run the example against the included lock file:
+
+```shell
+cargo run -p pixi_audit --example audit_lockfile -- \
+  crates/pixi_audit/examples/pixi.lock | jq .
+```
+
+The report is written to stdout as JSON. Progress goes to stderr, so it is safe
+to pipe the output. To use another OSV-compatible API:
+
+```shell
+PIXI_AUDIT_BASE_URL=https://example.com \
+  cargo run -p pixi_audit --example audit_lockfile -- path/to/pixi.lock
+```
 
 ## Crates
 
-- **`osv_protocol`** — serde types for the OSV wire format: `POST /v1/querybatch`
-  queries and responses, and OSV vulnerability documents (including
-  `schema_version`, `published`, `withdrawn`, `details`, and
-  `database_specific` payloads as emitted by basilisk). Unlike the upstream
-  `osv` crate, the ecosystem is an open `String`, so ecosystems the OSV schema
-  doesn't enumerate (e.g. `conda-forge`) are representable. All types are
-  bidirectional (`Serialize` + `Deserialize`) with compact serialization
-  (absent options and empty arrays are omitted), so the same crate serves both
-  OSV clients and OSV-compatible servers. Depends only on `serde`/`serde_json`.
+### `pixi_audit`
 
-- **`pixi_audit`** — the client side used by `pixi audit`:
-  - `BasiliskClient`: batched `POST /v1/querybatch` (chunks of ≤1000,
-    order-preserving, defensive pagination cap) and concurrent
-    `GET /v1/vulns/{id}` detail fetches. Server error bodies
-    (`{"error": "..."}`) are surfaced in error messages.
-  - `lock` module (default-on `lock` feature, via `rattler_lock`):
-    `collect_packages` deduplicates a `pixi.lock` file's packages across
-    environments/platforms with optional filters, and `audit_lock_file`
-    composes collection with the audit — lock file in, report out.
-  - Audit orchestration: CVSS v2/v3/v4 severity bands (critical ≥9.0,
-    high ≥7.0, medium ≥4.0; v2 caps at high), withdrawn advisories skipped,
-    ignore-list matching by vulnerability id or alias, ecosystem-aware
-    fixed-version extraction (upstream fixes reported separately), packages
-    without a known version reported as unchecked instead of queried, and an
-    `AuditReport` ready for rendering.
+The audit client and report model. Its main entry points are:
+
+- `audit_lock_file` to audit a `rattler_lock::LockFile`
+- `collect_packages` to inspect and filter lock-file packages
+- `audit` to audit an explicit list of packages
+- `BasiliskClient` for batched OSV queries and vulnerability details
+
+The default `lock` feature enables `pixi.lock` support through `rattler_lock`.
+Disable default features if you only need the client and report types.
+
+### `osv_protocol`
+
+Serde types for OSV queries, batch responses, and vulnerability documents. The
+ecosystem is stored as a `String`, so the types also support ecosystems such as
+`conda-forge` that are not covered by the upstream `osv` crate's enum.
+
+## Audit behavior
+
+- Packages are deduplicated across selected environments and platforms.
+- Basilisk currently audits conda-forge packages. Unsupported ecosystems and
+  packages without a known version are listed as unchecked.
+- Withdrawn advisories are skipped. Vulnerability IDs and aliases can be
+  ignored explicitly.
+- Severity is derived from CVSS v2, v3, or v4 data.
+- Fixed versions from the audited ecosystem are kept separate from upstream
+  fixes.
+- A failed vulnerability detail request fails the audit. A missing detail
+  document is kept as a finding with unknown severity.
 
 ## Development
 
 ```shell
-cargo test
-cargo clippy --all-targets
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo test -p pixi_audit --no-default-features
 ```
 
-The test suite runs entirely against in-process mock HTTP servers; no network
-access or credentials are required.
-
-## Breaking changes vs the pixi `audit-command` branch
-
-The crates were extracted from prefix-dev/pixi#6682; consumers written
-against that branch need three adjustments:
-
-- `AuditPackage.version` is now `Option<String>` (`None` = version unknown;
-  such packages are reported unchecked instead of queried), and
-  `UncheckedPackage.version` is optional and omitted from JSON when absent.
-- `Finding` gained `upstream_fixed_versions`; `fixed_versions` now only
-  contains fixes from the package's own ecosystem.
-- `AuditError::Status` gained a `message` field, and the lock-file collection
-  previously in the pixi CLI (`collect_packages`, `classify_channel`) now
-  lives here as `pixi_audit::lock::collect_packages` and
-  `PackageEcosystem::from_channel_url`.
+Tests use local mock servers and do not need network access or credentials.
 
 ## Origin
 
-Extracted from the [pixi](https://github.com/prefix-dev/pixi) repository
-(branch `pixi-audit-crates`, prefix-dev/pixi#6682) to develop the audit
-library independently of the pixi CLI.
+These crates were extracted from the
+[pixi audit work](https://github.com/prefix-dev/pixi/pull/6682) so the audit
+library can be developed independently from the pixi CLI.
