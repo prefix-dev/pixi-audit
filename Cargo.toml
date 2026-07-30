@@ -13,10 +13,13 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 axum = "0.8"
+clap = "4.6"
+console = "0.16"
 cvss = "2.0"
 futures = "0.3.31"
 miette = "7.6.0"
 osv_protocol = { path = "crates/osv_protocol", version = "0.1.0" }
+pixi_audit = { path = "crates/pixi_audit", version = "0.1.0" }
 # Same version pixi pins, so the `LockFile` type identity unifies when pixi
 # consumes these crates.
 rattler_lock = { version = "0.31", default-features = false }
