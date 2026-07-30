@@ -1,13 +1,8 @@
-//! Human-readable rendering of an [`AuditReport`].
-
 use std::fmt::Write as _;
 
 use console::style;
 use pixi_audit::{AuditReport, Finding, SeverityBand};
 
-/// Renders the report for terminal consumption. Colors are applied by
-/// `console`, which disables styling automatically when stdout is not a
-/// terminal, so the output is plain text in pipes and tests.
 pub fn render_human(report: &AuditReport) -> String {
     let mut out = String::new();
 
@@ -65,10 +60,16 @@ pub fn render_human(report: &AuditReport) -> String {
 
     let summary = &report.summary;
     if summary.vulnerable > 0 {
-        let packages: std::collections::BTreeSet<(&str, &str)> = report
+        let packages: std::collections::BTreeSet<(&str, &str, &str)> = report
             .vulnerabilities
             .iter()
-            .map(|f| (f.package.as_str(), f.version.as_str()))
+            .map(|finding| {
+                (
+                    finding.package.as_str(),
+                    finding.version.as_str(),
+                    finding.ecosystem.as_str(),
+                )
+            })
             .collect();
         writeln!(
             out,
@@ -94,13 +95,16 @@ pub fn render_human(report: &AuditReport) -> String {
     out
 }
 
-/// Groups findings by (package, version) preserving first-appearance order
-/// (the library sorts highest severity first, so groups appear by their most
-/// severe finding).
 fn grouped(findings: &[Finding]) -> Vec<(String, Vec<&Finding>)> {
-    let mut groups: Vec<((&str, &str), String, Vec<&Finding>)> = Vec::new();
+    type Group<'a> = ((&'a str, &'a str, &'a str), String, Vec<&'a Finding>);
+
+    let mut groups: Vec<Group<'_>> = Vec::new();
     for finding in findings {
-        let key = (finding.package.as_str(), finding.version.as_str());
+        let key = (
+            finding.package.as_str(),
+            finding.version.as_str(),
+            finding.ecosystem.as_str(),
+        );
         match groups.iter_mut().find(|(k, _, _)| *k == key) {
             Some((_, _, members)) => members.push(finding),
             None => {
@@ -121,7 +125,6 @@ fn grouped(findings: &[Finding]) -> Vec<(String, Vec<&Finding>)> {
         .collect()
 }
 
-/// Uppercased severity, left-aligned to 8 columns, colored by band.
 fn severity_cell(band: SeverityBand) -> String {
     let text = format!("{:<8}", band.to_string().to_uppercase());
     let styled = match band {
@@ -202,7 +205,6 @@ mod tests {
             ..Default::default()
         };
         let text = render_human(&report);
-        // One header for both findings of the same package+version.
         assert_eq!(
             text.matches("openssl 3.1.0 (conda-forge) — default, prod")
                 .count(),
@@ -214,6 +216,28 @@ mod tests {
         assert!(
             text.contains("2 vulnerabilities in 1 package(s) (10 audited, 0 ignored, 0 unchecked)")
         );
+    }
+
+    #[test]
+    fn findings_from_different_ecosystems_are_separate_packages() {
+        let conda = finding("openssl", "CVE-2026-0001", SeverityBand::High);
+        let mut pypi = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
+        pypi.ecosystem = "PyPI".to_string();
+        pypi.environments = vec!["docs".to_string()];
+        let report = AuditReport {
+            vulnerabilities: vec![conda, pypi],
+            summary: AuditSummary {
+                audited: 2,
+                vulnerable: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let text = render_human(&report);
+        assert!(text.contains("openssl 3.1.0 (conda-forge) — default, prod"));
+        assert!(text.contains("openssl 3.1.0 (PyPI) — docs"));
+        assert!(text.contains("2 vulnerabilities in 2 package(s)"));
     }
 
     #[test]

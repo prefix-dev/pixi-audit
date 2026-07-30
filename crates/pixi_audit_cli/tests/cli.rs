@@ -1,6 +1,3 @@
-//! End-to-end tests: run the compiled `pixi-audit` binary against a local
-//! mock of the OSV API and assert on output and exit codes.
-
 use std::path::Path;
 use std::process::Output;
 
@@ -32,7 +29,6 @@ fn vuln_doc() -> serde_json::Value {
     })
 }
 
-/// Mock server: openssl has BSLK-1 when `vulnerable`, everything else clean.
 async fn spawn_mock(vulnerable: bool) -> String {
     let app = Router::new()
         .route(
@@ -88,7 +84,6 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     assert!(stdout.contains("CRITICAL"));
     assert!(stdout.contains("fixed in: 3.1.1"));
     assert!(stdout.contains("https://example.com/adv"));
-    // samtools (bioconda) and requests (PyPI) are outside covered ecosystems.
     assert!(stdout.contains("2 package(s) could not be checked:"));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -150,7 +145,6 @@ async fn environment_filter_limits_the_audit() {
     )
     .await;
 
-    // prod only contains openssl: nothing unchecked.
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(!stdout.contains("could not be checked"), "stdout: {stdout}");

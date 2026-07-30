@@ -20,7 +20,6 @@ clap = { workspace = true, features = ["derive"] }
 console = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 pixi_audit = { workspace = true }
-# rustls so the binary can talk to the real HTTPS API.
 reqwest = { workspace = true, features = ["json", "rustls"] }
 reqwest-middleware = { workspace = true, features = ["json"] }
 serde_json = { workspace = true }

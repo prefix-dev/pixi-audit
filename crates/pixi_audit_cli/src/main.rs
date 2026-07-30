@@ -1,6 +1,3 @@
-//! `pixi-audit` — a pixi extension (`pixi audit`) that audits a `pixi.lock`
-//! file for known vulnerabilities against an OSV-compatible API.
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -16,9 +13,6 @@ mod render;
 const EXIT_VULNERABLE: u8 = 1;
 const EXIT_ERROR: u8 = 2;
 
-/// Maximum time to wait on any single HTTP request to the OSV API before
-/// failing with an error, so a stalled connection can't hang the tool
-/// indefinitely.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Audit a pixi.lock file for known vulnerabilities.
