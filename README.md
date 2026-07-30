@@ -112,6 +112,32 @@ $ cargo run -p pixi_audit --example audit_lockfile -- \
     crates/pixi_audit/examples/pixi.lock | jq .
 ```
 
+`pixi audit` can also be invoked bare inside a workspace — it walks up from
+the current directory to find `pixi.toml` (or `pyproject.toml` with
+`[tool.pixi]`) and audits the workspace's `pixi.lock`:
+
+```shell
+pixi audit                                # discover the workspace
+pixi audit --severity high                # fail CI only for high/critical
+pixi audit --ignore-until-fixed CVE-2026-7777
+pixi audit --fix                          # pixi update vulnerable packages, re-audit
+```
+
+Persistent configuration lives in the workspace manifest:
+
+```toml
+[tool.pixi-audit]
+ignore = ["CVE-2023-0464"]              # always suppress
+ignore-until-fixed = ["CVE-2026-7777"]  # suppress until a fix is released
+severity = "high"                       # low | medium | high | critical
+```
+
+Ignore lists from the config and the command line are combined;
+`--severity` on the command line overrides the config. Findings with
+unknown severity always fail the threshold. `--fix` re-locks vulnerable
+packages via `pixi update` within your existing manifest constraints (it
+never edits the manifest) and reports what was resolved.
+
 ## Development
 
 The workspace requires Rust 1.90 or newer. Run the same checks as CI with:
