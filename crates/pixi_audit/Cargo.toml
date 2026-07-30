@@ -9,11 +9,21 @@ readme.workspace = true
 repository.workspace = true
 version = "0.1.0"
 
+[features]
+default = ["lock"]
+# Collecting auditable packages straight from a `pixi.lock` file.
+lock = ["dep:rattler_lock"]
+
+[[example]]
+name = "audit_lockfile"
+required-features = ["lock"]
+
 [dependencies]
 cvss = { workspace = true }
 futures = { workspace = true }
 miette = { workspace = true }
 osv_protocol = { workspace = true }
+rattler_lock = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json"] }
 reqwest-middleware = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
@@ -23,5 +33,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "json"] }
-insta = { workspace = true, features = ["json"] }
+# TLS for the `audit_lockfile` example, which talks to the real API; library
+# consumers bring their own configured client.
+reqwest = { workspace = true, features = ["json", "rustls"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

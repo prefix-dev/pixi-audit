@@ -29,10 +29,15 @@ pub enum AuditError {
         #[source]
         source: reqwest_middleware::Error,
     },
-    #[error("the vulnerability database at {url} returned HTTP {status}")]
+    #[error(
+        "the vulnerability database at {url} returned HTTP {status}{}",
+        .message.as_ref().map(|m| format!(": {m}")).unwrap_or_default()
+    )]
     Status {
         url: Url,
         status: reqwest::StatusCode,
+        /// The server's `{"error": "..."}` body, when present.
+        message: Option<String>,
     },
     #[error("failed to parse the response from {url}")]
     InvalidResponse {
@@ -61,7 +66,12 @@ pub struct BasiliskClient {
 }
 
 impl BasiliskClient {
-    pub fn new(client: ClientWithMiddleware, base_url: Url) -> Self {
+    pub fn new(client: ClientWithMiddleware, mut base_url: Url) -> Self {
+        // `Url::join` treats a path without a trailing slash as a file:
+        // https://host/prefix + "v1/querybatch" would drop "prefix".
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
         Self { client, base_url }
     }
 
@@ -127,7 +137,7 @@ impl BasiliskClient {
             })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(AuditError::Status { url, status });
+            return Err(status_error(url, status, response).await);
         }
         let body: BatchResponse =
             response
@@ -149,7 +159,12 @@ impl BasiliskClient {
 
     /// Fetches the full OSV document for a vulnerability id.
     pub async fn get_vuln(&self, id: &str) -> Result<OsvVulnerability, AuditError> {
-        let url = self.endpoint(&format!("v1/vulns/{id}"))?;
+        let mut url = self.endpoint("v1/vulns")?;
+        // Push the id as a single percent-encoded segment so an id like
+        // `../health` cannot redirect the fetch to a different path.
+        url.path_segments_mut()
+            .expect("an http(s) URL is never cannot-be-a-base")
+            .push(id);
         let response = self
             .client
             .get(url.clone())
@@ -161,12 +176,33 @@ impl BasiliskClient {
             })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(AuditError::Status { url, status });
+            return Err(status_error(url, status, response).await);
         }
         response
             .json()
             .await
             .map_err(|source| AuditError::InvalidResponse { url, source })
+    }
+}
+
+/// Builds a `Status` error, extracting the server's `{"error": "..."}` body
+/// (basilisk's error format) when there is one.
+async fn status_error(
+    url: Url,
+    status: reqwest::StatusCode,
+    response: reqwest::Response,
+) -> AuditError {
+    let message = response.text().await.ok().and_then(|body| {
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()?
+            .get("error")?
+            .as_str()
+            .map(str::to_string)
+    });
+    AuditError::Status {
+        url,
+        status,
+        message,
     }
 }
 
@@ -303,6 +339,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_vuln_percent_encodes_the_id() {
+        // Ids come from the server's own querybatch response, but a hostile
+        // or buggy server must not be able to redirect the detail fetch to a
+        // different path via an id like `../health`.
+        let app = Router::new()
+            .route(
+                "/v1/vulns/{id}",
+                get(
+                    |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                        Json(serde_json::json!({"id": id}))
+                    },
+                ),
+            )
+            .route(
+                "/health",
+                get(|| async { Json(serde_json::json!({"id": "WRONG"})) }),
+            );
+        let base = spawn(app).await;
+
+        let vuln = client(base).get_vuln("../health").await.unwrap();
+        assert_eq!(vuln.id, "../health");
+    }
+
+    #[tokio::test]
+    async fn base_url_with_deep_path_keeps_all_segments() {
+        let app = Router::new().route(
+            "/a/b/v1/querybatch",
+            post(|| async { Json(serde_json::json!({"results": [{}]})) }),
+        );
+        let base = spawn(app).await;
+        let deep = base.join("a/b").unwrap();
+        assert!(!deep.path().ends_with('/'));
+
+        let results = client(deep)
+            .query_batch(&[query("openssl", "3.1.0")])
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
     async fn get_vuln_fetches_full_document() {
         let app = Router::new().route(
             "/v1/vulns/{id}",
@@ -332,6 +409,54 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("500"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn server_error_body_message_is_surfaced() {
+        // basilisk returns structured {"error": "..."} bodies on 4xx/5xx.
+        let app = Router::new().route(
+            "/v1/querybatch",
+            post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "querybatch accepts at most 1000 queries"
+                    })),
+                )
+            }),
+        );
+        let base = spawn(app).await;
+
+        let err = client(base)
+            .query_batch(&[query("openssl", "3.1.0")])
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("400"), "unexpected error: {message}");
+        assert!(
+            message.contains("querybatch accepts at most 1000 queries"),
+            "server message missing from: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_url_without_trailing_slash_keeps_its_path() {
+        // Url::join treats "prefix" as a file segment: https://host/prefix
+        // joined with "v1/querybatch" would silently drop "prefix".
+        let app = Router::new().route(
+            "/prefix/v1/querybatch",
+            post(|| async { Json(serde_json::json!({"results": [{}]})) }),
+        );
+        let base = spawn(app).await;
+        let no_slash = Url::parse(base.as_str().trim_end_matches('/')).unwrap();
+        assert!(!no_slash.path().ends_with('/') || no_slash.path() == "/");
+        let base = no_slash.join("prefix").unwrap();
+
+        let results = client(base)
+            .query_batch(&[query("openssl", "3.1.0")])
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[tokio::test]
