@@ -72,22 +72,28 @@ Human mode (default):
   counts
 - colors via the `console` crate, auto-disabled when stdout is not a TTY
 
-Example:
+Example (the progress line is written to stderr; everything else below the
+blank line is stdout):
 
 ```
 $ pixi audit pixi.lock
-Audited 142 packages (2 environments)
+Auditing pixi.lock against https://api.osv.dev ...
 
 openssl 3.1.0 (conda-forge) — default, prod
-  CVE-2023-XXXX  HIGH   fixed in: 3.1.4
+  CVE-2023-XXXX  HIGH      fixed in: 3.1.4
   https://osv.dev/CVE-2023-XXXX
 
 requests 2.32.0 (PyPI) — default
-  GHSA-xxxx-yyyy MEDIUM fixed in: 2.32.4
+  GHSA-xxxx-yyyy  MEDIUM    fixed in: 2.32.4
 
-2 vulnerabilities in 2 packages (140 ok, 3 unchecked)
-error: audit found vulnerabilities (exit 1)
+2 package(s) could not be checked:
+  samtools 1.19 (bioconda) — default
+
+2 vulnerabilities in 2 package(s) (140 audited, 0 ignored, 1 unchecked)
+error: audit found vulnerabilities
 ```
+
+(exit code 1; the `error: ...` line above is written to stderr, not stdout.)
 
 JSON mode (`--json`): pretty-printed `AuditReport` is the only thing written
 to stdout, so output pipes cleanly; progress stays on stderr.
