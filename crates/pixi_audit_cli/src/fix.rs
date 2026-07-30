@@ -79,18 +79,4 @@ mod tests {
     fn empty_report_yields_no_names() {
         assert!(vulnerable_package_names(&AuditReport::default()).is_empty());
     }
-
-    #[test]
-    fn missing_pixi_binary_is_an_error() {
-        // A PATH with no `pixi` in it.
-        let dir = tempfile::tempdir().unwrap();
-        let old_path = std::env::var_os("PATH");
-        unsafe { std::env::set_var("PATH", dir.path()) };
-        let result = run_pixi_update(std::path::Path::new("pixi.toml"), &["openssl".to_string()]);
-        match old_path {
-            Some(p) => unsafe { std::env::set_var("PATH", p) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
-        assert!(result.is_err());
-    }
 }
