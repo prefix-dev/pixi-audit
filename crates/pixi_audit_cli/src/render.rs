@@ -14,7 +14,14 @@ pub fn render_human(report: &AuditReport) -> String {
     for (header, findings) in grouped(&report.vulnerabilities) {
         writeln!(out, "{header}").unwrap();
         for finding in findings {
-            writeln!(out, "  {}  {}{}", finding.id, severity_cell(finding.severity), fix_note(finding)).unwrap();
+            writeln!(
+                out,
+                "  {}  {}{}",
+                finding.id,
+                severity_cell(finding.severity),
+                fix_note(finding)
+            )
+            .unwrap();
             if let Some(url) = &finding.url {
                 writeln!(out, "  {}", style(url).dim()).unwrap();
             }
@@ -25,13 +32,23 @@ pub fn render_human(report: &AuditReport) -> String {
     if !report.ignored.is_empty() {
         writeln!(out, "Ignored {} finding(s):", report.ignored.len()).unwrap();
         for finding in &report.ignored {
-            writeln!(out, "  {} ({} {})", finding.id, finding.package, finding.version).unwrap();
+            writeln!(
+                out,
+                "  {} ({} {})",
+                finding.id, finding.package, finding.version
+            )
+            .unwrap();
         }
         out.push('\n');
     }
 
     if !report.unchecked.is_empty() {
-        writeln!(out, "{} package(s) could not be checked:", report.unchecked.len()).unwrap();
+        writeln!(
+            out,
+            "{} package(s) could not be checked:",
+            report.unchecked.len()
+        )
+        .unwrap();
         for package in &report.unchecked {
             writeln!(
                 out,
@@ -160,7 +177,10 @@ mod tests {
             ..Default::default()
         };
         let text = render_human(&report);
-        assert_eq!(text, "No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)\n");
+        assert_eq!(
+            text,
+            "No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)\n"
+        );
     }
 
     #[test]
@@ -183,11 +203,17 @@ mod tests {
         };
         let text = render_human(&report);
         // One header for both findings of the same package+version.
-        assert_eq!(text.matches("openssl 3.1.0 (conda-forge) — default, prod").count(), 1);
+        assert_eq!(
+            text.matches("openssl 3.1.0 (conda-forge) — default, prod")
+                .count(),
+            1
+        );
         assert!(text.contains("CVE-2026-0001  HIGH      fixed in: 3.1.4"));
         assert!(text.contains("https://osv.dev/CVE-2026-0001"));
         assert!(text.contains("CVE-2026-0002  MEDIUM    fix released upstream: 3.2.0"));
-        assert!(text.contains("2 vulnerabilities in 1 package(s) (10 audited, 0 ignored, 0 unchecked)"));
+        assert!(
+            text.contains("2 vulnerabilities in 1 package(s) (10 audited, 0 ignored, 0 unchecked)")
+        );
     }
 
     #[test]

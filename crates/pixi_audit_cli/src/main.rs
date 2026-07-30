@@ -6,7 +6,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use miette::{Context, IntoDiagnostic};
-use pixi_audit::{AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, audit_lock_file};
+use pixi_audit::{
+    AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, audit_lock_file,
+};
 
 mod render;
 
@@ -84,9 +86,15 @@ async fn run(cli: Cli) -> miette::Result<AuditReport> {
     let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
     let client = BasiliskClient::new(http, base_url);
 
-    audit_lock_file(&client, &lock_file, &cli.environments, &cli.platforms, &cli.ignore)
-        .await
-        .map_err(miette::Report::new)
+    audit_lock_file(
+        &client,
+        &lock_file,
+        &cli.environments,
+        &cli.platforms,
+        &cli.ignore,
+    )
+    .await
+    .map_err(miette::Report::new)
 }
 
 #[cfg(test)]
