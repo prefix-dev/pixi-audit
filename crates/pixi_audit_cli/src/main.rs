@@ -2,10 +2,16 @@
 //! file for known vulnerabilities against an OSV-compatible API.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
+use miette::{Context, IntoDiagnostic};
+use pixi_audit::{AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, audit_lock_file};
 
 mod render;
+
+const EXIT_VULNERABLE: u8 = 1;
+const EXIT_ERROR: u8 = 2;
 
 /// Audit a pixi.lock file for known vulnerabilities.
 ///
@@ -35,11 +41,52 @@ struct Cli {
     json: bool,
 }
 
-fn main() {
-    let _ = render::render_human;
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
-    // Wired up in a later task.
-    let _ = cli;
+    let json = cli.json;
+    match run(cli).await {
+        Ok(report) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).expect("report serializes")
+                );
+            } else {
+                print!("{}", render::render_human(&report));
+            }
+            if report.summary.vulnerable > 0 {
+                eprintln!("error: audit found vulnerabilities");
+                ExitCode::from(EXIT_VULNERABLE)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(error) => {
+            eprintln!("{error:?}");
+            ExitCode::from(EXIT_ERROR)
+        }
+    }
+}
+
+async fn run(cli: Cli) -> miette::Result<AuditReport> {
+    let lock_file = pixi_audit::rattler_lock::LockFile::from_path(&cli.lockfile)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read lock file '{}'", cli.lockfile.display()))?;
+
+    let base_url = std::env::var(BASE_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    let base_url = url::Url::parse(&base_url)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("invalid {BASE_URL_ENV_VAR} value '{base_url}'"))?;
+
+    eprintln!("Auditing {} against {base_url} ...", cli.lockfile.display());
+
+    let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
+    let client = BasiliskClient::new(http, base_url);
+
+    audit_lock_file(&client, &lock_file, &cli.environments, &cli.platforms, &cli.ignore)
+        .await
+        .map_err(miette::Report::new)
 }
 
 #[cfg(test)]
