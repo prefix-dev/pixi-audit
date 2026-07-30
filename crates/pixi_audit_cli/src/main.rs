@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use miette::{Context, IntoDiagnostic};
@@ -14,6 +15,11 @@ mod render;
 
 const EXIT_VULNERABLE: u8 = 1;
 const EXIT_ERROR: u8 = 2;
+
+/// Maximum time to wait on any single HTTP request to the OSV API before
+/// failing with an error, so a stalled connection can't hang the tool
+/// indefinitely.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Audit a pixi.lock file for known vulnerabilities.
 ///
@@ -83,7 +89,12 @@ async fn run(cli: Cli) -> miette::Result<AuditReport> {
 
     eprintln!("Auditing {} against {base_url} ...", cli.lockfile.display());
 
-    let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
+    let http_client = reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .into_diagnostic()
+        .wrap_err("failed to construct the HTTP client")?;
+    let http = reqwest_middleware::ClientBuilder::new(http_client).build();
     let client = BasiliskClient::new(http, base_url);
 
     audit_lock_file(
