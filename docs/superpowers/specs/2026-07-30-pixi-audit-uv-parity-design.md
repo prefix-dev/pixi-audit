@@ -129,7 +129,7 @@ pub ignore_reason: Option<IgnoreReason>, // enum: Always | UntilFixed
 
 serialized kebab-case (`"always"` / `"until-fixed"`), set only on
 findings in the ignored bucket. The renderer suffixes until-fixed entries
-in the ignored section with `(until a fix is released)`.
+in the ignored section with ` — until a fix is released`.
 
 ## `--severity` (CLI)
 
