@@ -28,7 +28,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
     let client = BasiliskClient::new(http, base_url);
 
-    let report = audit_lock_file(&client, &lock_file, &[], &[], &[]).await?;
+    let report = audit_lock_file(
+        &client,
+        &lock_file,
+        &[],
+        &[],
+        pixi_audit::IgnoreSpec::default(),
+    )
+    .await?;
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

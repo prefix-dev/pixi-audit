@@ -96,7 +96,10 @@ async fn run(cli: Cli) -> miette::Result<AuditReport> {
         &lock_file,
         &cli.environments,
         &cli.platforms,
-        &cli.ignore,
+        pixi_audit::IgnoreSpec {
+            ignore: &cli.ignore,
+            ignore_until_fixed: &[],
+        },
     )
     .await
     .map_err(miette::Report::new)

@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     client::{AuditError, BasiliskClient},
-    report::{AuditPackage, AuditReport, PackageEcosystem, audit},
+    report::{AuditPackage, AuditReport, IgnoreSpec, PackageEcosystem, audit},
 };
 
 #[derive(Debug, Error, Diagnostic)]
@@ -123,7 +123,7 @@ pub async fn audit_lock_file(
     lock_file: &LockFile,
     environment_filter: &[String],
     platform_filter: &[String],
-    ignore: &[String],
+    ignore: IgnoreSpec<'_>,
 ) -> Result<AuditReport, LockFileAuditError> {
     let packages = collect_packages(lock_file, environment_filter, platform_filter)?;
     Ok(audit(client, packages, ignore).await?)
@@ -305,7 +305,7 @@ packages:
         let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
         let client = BasiliskClient::new(http, base);
 
-        let report = audit_lock_file(&client, &fixture(), &[], &[], &[])
+        let report = audit_lock_file(&client, &fixture(), &[], &[], IgnoreSpec::default())
             .await
             .unwrap();
 

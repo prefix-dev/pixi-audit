@@ -167,6 +167,7 @@ mod tests {
             upstream_fixed_versions: vec![],
             summary: None,
             url: Some(format!("https://osv.dev/{id}")),
+            ignore_reason: None,
         }
     }
 

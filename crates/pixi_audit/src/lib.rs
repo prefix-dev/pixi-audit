@@ -16,6 +16,6 @@ pub use osv_protocol::*;
 #[cfg(feature = "lock")]
 pub use rattler_lock;
 pub use report::{
-    AuditPackage, AuditReport, AuditSummary, Finding, PackageEcosystem, SeverityBand,
-    UncheckedPackage, audit,
+    AuditPackage, AuditReport, AuditSummary, Finding, IgnoreReason, IgnoreSpec, PackageEcosystem,
+    SeverityBand, UncheckedPackage, audit,
 };
