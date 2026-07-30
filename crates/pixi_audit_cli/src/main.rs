@@ -8,6 +8,7 @@ use pixi_audit::{
     AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, audit_lock_file,
 };
 
+mod config;
 mod render;
 
 const EXIT_VULNERABLE: u8 = 1;
@@ -45,6 +46,15 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // TODO(task 3): remove once discover_workspace/load_config/parse_band/
+    // find_manifest_in gain real call sites.
+    let _ = (
+        config::discover_workspace,
+        config::load_config,
+        config::parse_band,
+        config::find_manifest_in,
+    );
+
     let cli = Cli::parse();
     let json = cli.json;
     match run(cli).await {
