@@ -1,0 +1,31 @@
+[package]
+authors.workspace = true
+description = "pixi extension that audits a pixi.lock file for known vulnerabilities"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "pixi_audit_cli"
+readme.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+# pixi discovers extensions as `pixi-<cmd>` executables on PATH, so the
+# binary name must be `pixi-audit` even though the package is snake_case.
+[[bin]]
+name = "pixi-audit"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+console = { workspace = true }
+miette = { workspace = true, features = ["fancy"] }
+pixi_audit = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+reqwest-middleware = { workspace = true, features = ["json"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+url = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["http1", "tokio", "json"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
