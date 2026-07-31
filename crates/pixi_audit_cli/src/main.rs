@@ -5,7 +5,8 @@ use std::time::Duration;
 use clap::Parser;
 use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
-    AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, SeverityBand, audit_lock_file,
+    AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,
+    PYPI_BASE_URL_ENV_VAR, PypiAuditClient, SeverityBand, audit_lock_file,
 };
 
 mod config;
@@ -46,9 +47,9 @@ struct Cli {
     #[arg(long = "ignore-until-fixed", value_name = "ID")]
     ignore_until_fixed: Vec<String>,
 
-    /// Fail (exit 1) only for findings at or above this severity band.
-    /// Findings with unknown severity always fail. Overrides the config
-    /// file's `severity`.
+    /// Fail (exit 1) only for conda findings at or above this severity band.
+    /// Severity filtering does not apply to PyPI findings. Overrides the
+    /// config file's `severity`.
     #[arg(long, value_name = "BAND", value_parser = config::parse_band)]
     severity: Option<SeverityBand>,
 
@@ -183,9 +184,14 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let base_url = url::Url::parse(&base_url)
         .into_diagnostic()
         .wrap_err_with(|| format!("invalid {BASE_URL_ENV_VAR} value '{base_url}'"))?;
+    let pypi_base_url =
+        std::env::var(PYPI_BASE_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_PYPI_BASE_URL.to_string());
+    let pypi_base_url = url::Url::parse(&pypi_base_url)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("invalid {PYPI_BASE_URL_ENV_VAR} value '{pypi_base_url}'"))?;
 
     eprintln!(
-        "Auditing {} against {base_url} ...",
+        "Auditing {} against {base_url} and {pypi_base_url} ...",
         targets.lockfile.display()
     );
 
@@ -196,6 +202,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         .wrap_err("failed to construct the HTTP client")?;
     let http = reqwest_middleware::ClientBuilder::new(http_client).build();
     let client = BasiliskClient::new(http, base_url);
+    let pypi_client = PypiAuditClient::new(pypi_base_url).map_err(miette::Report::new)?;
 
     let ignore_spec = pixi_audit::IgnoreSpec {
         ignore: &ignore,
@@ -203,6 +210,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     };
     let report = audit_lock_file(
         &client,
+        &pypi_client,
         &lock_file,
         &cli.environments,
         &cli.platforms,
@@ -237,6 +245,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         })?;
     let after = audit_lock_file(
         &client,
+        &pypi_client,
         &lock_file,
         &cli.environments,
         &cli.platforms,

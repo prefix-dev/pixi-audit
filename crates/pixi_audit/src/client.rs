@@ -2,6 +2,11 @@ use miette::Diagnostic;
 use reqwest_middleware::ClientWithMiddleware;
 use thiserror::Error;
 use url::Url;
+use uv_audit::osv;
+use uv_cache::Cache;
+use uv_client::{BaseClientBuilder, CachedClient};
+use uv_configuration::Concurrency;
+use uv_redacted::DisplaySafeUrl;
 
 use crate::types::{BatchResponse, BatchResult, OsvQuery, OsvVulnerability};
 
@@ -11,6 +16,12 @@ pub const DEFAULT_BASE_URL: &str = "https://api.basilisk.prefix.dev";
 /// Environment variable to override the audit API base URL (tests,
 /// self-hosted basilisk instances).
 pub const BASE_URL_ENV_VAR: &str = "PIXI_AUDIT_BASE_URL";
+
+/// The default OSV API used to audit PyPI packages.
+pub const DEFAULT_PYPI_BASE_URL: &str = "https://api.osv.dev";
+
+/// Environment variable to override the PyPI vulnerability API.
+pub const PYPI_BASE_URL_ENV_VAR: &str = "PIXI_AUDIT_PYPI_BASE_URL";
 
 /// Maximum number of queries per `querybatch` request (basilisk/OSV limit).
 const MAX_BATCH_SIZE: usize = 1000;
@@ -57,6 +68,50 @@ pub enum AuditError {
         "the vulnerability database at {url} returned more than {MAX_PAGINATION_ROUNDS} result pages for one batch"
     )]
     TooManyPages { url: Url },
+    #[error("failed to construct the PyPI audit HTTP client")]
+    PypiClient(#[source] uv_client::ClientBuildError),
+    #[error("failed to create the PyPI audit cache")]
+    PypiCache(#[source] std::io::Error),
+    #[error("invalid PyPI audit API base URL '{url}'")]
+    InvalidPypiBaseUrl {
+        url: Url,
+        #[source]
+        source: uv_redacted::DisplaySafeUrlError,
+    },
+    #[error("failed to audit PyPI packages")]
+    PypiAudit(#[source] osv::Error),
+}
+
+/// Client for auditing PyPI packages through uv-audit.
+pub struct PypiAuditClient {
+    inner: osv::Osv,
+}
+
+impl PypiAuditClient {
+    pub fn new(base_url: Url) -> Result<Self, AuditError> {
+        let display_url = DisplaySafeUrl::parse(base_url.as_str()).map_err(|source| {
+            AuditError::InvalidPypiBaseUrl {
+                url: base_url,
+                source,
+            }
+        })?;
+        let base_client = BaseClientBuilder::default()
+            .build()
+            .map_err(AuditError::PypiClient)?;
+        let cache = Cache::temp().map_err(AuditError::PypiCache)?;
+        Ok(Self {
+            inner: osv::Osv::new(
+                CachedClient::new(base_client),
+                Some(display_url),
+                Concurrency::default(),
+                cache,
+            ),
+        })
+    }
+
+    pub(crate) fn inner(&self) -> &osv::Osv {
+        &self.inner
+    }
 }
 
 /// Client for an OSV-protocol vulnerability API (basilisk).

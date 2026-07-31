@@ -2,10 +2,10 @@
 
 Audit packages in a [`pixi.lock`](https://pixi.sh/latest/workspace/lockfile/) file for known vulnerabilities.
 
-`pixi-audit` queries [basilisk](https://github.com/prefix-dev/basilisk), prefix.dev's OSV-compatible vulnerability database, and reports affected packages, severity, available fixes, and packages that could not be checked. It can be used as either a `pixi audit` extension or a Rust library.
+`pixi-audit` queries [basilisk](https://github.com/prefix-dev/basilisk) for conda-forge packages and [OSV](https://osv.dev) through `uv-audit` for PyPI packages. It reports affected packages, severity, available fixes, and packages that could not be checked. It can be used as either a `pixi audit` extension or a Rust library.
 
 > [!NOTE]
-> The default service currently audits packages from conda-forge. Packages from PyPI, bioconda, custom channels, and source dependencies are listed as unchecked rather than silently treated as safe.
+> Conda-forge packages are audited against basilisk, while PyPI packages are audited against OSV through Astral's `uv-audit` crate. Packages from bioconda, custom channels, and source dependencies are listed as unchecked rather than silently treated as safe.
 
 ## Install
 
@@ -82,7 +82,7 @@ Progress and diagnostics are written to stderr. Human-readable or JSON results a
 
 ### API endpoint
 
-The default endpoint is `https://api.basilisk.prefix.dev`. Override it for a self-hosted OSV-compatible service with `PIXI_AUDIT_BASE_URL`:
+The default conda endpoint is `https://api.basilisk.prefix.dev`. Override it for a self-hosted OSV-compatible service with `PIXI_AUDIT_BASE_URL`:
 
 ```console
 $ PIXI_AUDIT_BASE_URL=https://audit.example.com pixi audit pixi.lock
@@ -90,11 +90,17 @@ $ PIXI_AUDIT_BASE_URL=https://audit.example.com pixi audit pixi.lock
 
 The service must implement `POST /v1/querybatch` and `GET /v1/vulns/{id}`.
 
+PyPI auditing uses `uv-audit` with `https://api.osv.dev` by default. Override that endpoint with `PIXI_AUDIT_PYPI_BASE_URL`:
+
+```console
+$ PIXI_AUDIT_PYPI_BASE_URL=https://osv.example.com pixi audit pixi.lock
+```
+
 ## Audit behavior
 
 - Packages are deduplicated across the selected environments and platforms.
 - Withdrawn advisories are skipped.
-- Severity is derived from CVSS v2, v3, or v4 data.
+- Severity is derived from CVSS v2, v3, or v4 data for basilisk findings. Severity filtering applies only to conda findings.
 - A failed vulnerability detail request fails the audit. A missing detail document is kept as a finding with unknown severity.
 
 ## Rust crates
@@ -118,7 +124,7 @@ the current directory to find `pixi.toml` (or `pyproject.toml` with
 
 ```shell
 pixi audit                                # discover the workspace
-pixi audit --severity high                # fail CI only for high/critical
+pixi audit --severity high                # filter conda findings to high/critical
 pixi audit --ignore-until-fixed CVE-2026-7777
 pixi audit --fix                          # pixi update vulnerable packages, re-audit
 ```
@@ -133,14 +139,14 @@ severity = "high"                       # low | medium | high | critical
 ```
 
 Ignore lists from the config and the command line are combined;
-`--severity` on the command line overrides the config. Findings with
-unknown severity always fail the threshold. `--fix` re-locks vulnerable
-packages via `pixi update` within your existing manifest constraints (it
-never edits the manifest) and reports what was resolved.
+`--severity` on the command line overrides the config. Severity filtering applies
+only to conda findings. `--fix` re-locks vulnerable packages via `pixi update`
+within your existing manifest constraints (it never edits the manifest) and
+reports what was resolved.
 
 ## Development
 
-The workspace requires Rust 1.90 or newer. Run the same checks as CI with:
+The workspace requires Rust 1.95 or newer, matching `uv-audit`'s MSRV. Run the same checks as CI with:
 
 ```console
 $ cargo fmt --all --check

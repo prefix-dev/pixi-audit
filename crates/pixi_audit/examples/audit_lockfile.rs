@@ -12,7 +12,10 @@
 
 use std::path::Path;
 
-use pixi_audit::{BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, audit_lock_file};
+use pixi_audit::{
+    BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,
+    PYPI_BASE_URL_ENV_VAR, PypiAuditClient, audit_lock_file,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,12 +27,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url = url::Url::parse(
         &std::env::var(BASE_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_BASE_URL.to_string()),
     )?;
-    eprintln!("Auditing {path} against {base_url} ...");
+    let pypi_base_url = url::Url::parse(
+        &std::env::var(PYPI_BASE_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_PYPI_BASE_URL.to_string()),
+    )?;
+    eprintln!("Auditing {path} against {base_url} and {pypi_base_url} ...");
     let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
     let client = BasiliskClient::new(http, base_url);
+    let pypi_client = PypiAuditClient::new(pypi_base_url)?;
 
     let report = audit_lock_file(
         &client,
+        &pypi_client,
         &lock_file,
         &[],
         &[],

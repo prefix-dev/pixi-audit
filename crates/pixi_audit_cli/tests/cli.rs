@@ -61,7 +61,8 @@ async fn run_cli(base_url: String, args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         std::process::Command::new(BIN)
             .args(&args)
-            .env("PIXI_AUDIT_BASE_URL", base_url)
+            .env("PIXI_AUDIT_BASE_URL", &base_url)
+            .env("PIXI_AUDIT_PYPI_BASE_URL", &base_url)
             .output()
             .expect("binary runs")
     })
@@ -83,8 +84,8 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     assert!(stdout.contains("BSLK-1"));
     assert!(stdout.contains("CRITICAL"));
     assert!(stdout.contains("fixed in: 3.1.1"));
-    assert!(stdout.contains("https://example.com/adv"));
-    assert!(stdout.contains("2 package(s) could not be checked:"));
+    assert!(stdout.contains("https://basilisk.prefix.dev/advisories/BSLK-1"));
+    assert!(stdout.contains("1 package(s) could not be checked:"));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("error: audit found vulnerabilities"),
@@ -270,7 +271,8 @@ async fn run_cli_in(
         let mut cmd = std::process::Command::new(BIN);
         cmd.args(&args)
             .current_dir(&dir)
-            .env("PIXI_AUDIT_BASE_URL", base_url);
+            .env("PIXI_AUDIT_BASE_URL", &base_url)
+            .env("PIXI_AUDIT_PYPI_BASE_URL", &base_url);
         if let Some(path) = path_override {
             cmd.env("PATH", path);
         }

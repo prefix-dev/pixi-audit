@@ -30,6 +30,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
+uv-audit = { workspace = true }
+uv-cache = { workspace = true }
+uv-client = { workspace = true }
+uv-configuration = { workspace = true }
+uv-normalize = { workspace = true }
+uv-pep440 = { workspace = true }
+uv-redacted = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "json"] }
