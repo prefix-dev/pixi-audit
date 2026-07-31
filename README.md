@@ -90,6 +90,13 @@ $ PIXI_AUDIT_BASE_URL=https://audit.example.com pixi audit pixi.lock
 
 The service must implement `POST /v1/querybatch` and `GET /v1/vulns/{id}`.
 
+## Audit behavior
+
+- Packages are deduplicated across the selected environments and platforms.
+- Withdrawn advisories are skipped.
+- Severity is derived from CVSS v2, v3, or v4 data.
+- A failed vulnerability detail request fails the audit. A missing detail document is kept as a finding with unknown severity.
+
 ## Rust crates
 
 This workspace contains three crates:
@@ -97,6 +104,13 @@ This workspace contains three crates:
 - **`pixi_audit_cli`** provides the `pixi-audit` executable and human-readable report renderer.
 - **`pixi_audit`** collects packages from lock files, queries the vulnerability API, applies ignore rules, classifies CVSS v2/v3/v4 severity, and builds an `AuditReport`. Its default `lock` feature enables `rattler_lock` integration.
 - **`osv_protocol`** provides serializable request, response, and vulnerability-document types for OSV-compatible clients and servers. Ecosystem names are represented as strings, allowing values such as `conda-forge` that are not enumerated by the upstream `osv` crate.
+
+Try the library against the included example lock file:
+
+```console
+$ cargo run -p pixi_audit --example audit_lockfile -- \
+    crates/pixi_audit/examples/pixi.lock | jq .
+```
 
 ## Development
 
