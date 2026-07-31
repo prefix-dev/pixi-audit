@@ -53,7 +53,8 @@ struct Cli {
     #[arg(long, value_name = "BAND", value_parser = config::parse_band)]
     severity: Option<SeverityBand>,
 
-    /// Re-lock vulnerable packages via `pixi update`, then re-audit
+    /// Raise direct dependency constraints to known fixed versions, run
+    /// `pixi update`, then re-audit
     #[arg(long)]
     fix: bool,
 
@@ -233,6 +234,13 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
             targets.lockfile.display()
         )
     })?;
+    let bumped = fix::bump_manifest_constraints(manifest, &report)?;
+    if bumped > 0 {
+        eprintln!(
+            "fixed: raised {bumped} manifest constraint{} to known fixed versions",
+            if bumped == 1 { "" } else { "s" }
+        );
+    }
     fix::run_pixi_update(manifest, &names)?;
 
     let lock_file = pixi_audit::rattler_lock::LockFile::from_path(&targets.lockfile)

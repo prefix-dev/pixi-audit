@@ -404,7 +404,10 @@ async fn bare_invocation_outside_a_workspace_exits_2() {
 async fn fix_runs_pixi_update_and_reaudits() {
     use std::os::unix::fs::PermissionsExt;
 
-    let workspace = temp_workspace("pixi.toml", "[workspace]\nname = \"demo\"\n");
+    let workspace = temp_workspace(
+        "pixi.toml",
+        "[workspace]\nname = \"demo\"\n\n[dependencies]\nopenssl = \">=3.1.0,<4\"\n",
+    );
     // "Fixed" lockfile: openssl bumped to 3.1.1 (the mock only flags 3.1.0).
     let fixed_lock = std::fs::read_to_string(lockfile())
         .unwrap()
@@ -441,8 +444,17 @@ async fn fix_runs_pixi_update_and_reaudits() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
     assert!(
+        stderr.contains("fixed: raised 1 manifest constraint to known fixed versions"),
+        "stderr: {stderr}"
+    );
+    assert!(
         stderr.contains("fixed: resolved 1 of 1 vulnerabilities via pixi update"),
         "stderr: {stderr}"
+    );
+    let manifest = std::fs::read_to_string(workspace.path().join("pixi.toml")).unwrap();
+    assert!(
+        manifest.contains("openssl = \">=3.1.1\""),
+        "manifest: {manifest}"
     );
     let args = std::fs::read_to_string(workspace.path().join("pixi-args.txt")).unwrap();
     assert!(args.contains("update"), "pixi argv: {args}");

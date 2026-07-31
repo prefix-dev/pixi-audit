@@ -126,7 +126,7 @@ the current directory to find `pixi.toml` (or `pyproject.toml` with
 pixi audit                                # discover the workspace
 pixi audit --severity high                # filter conda findings to high/critical
 pixi audit --ignore-until-fixed CVE-2026-7777
-pixi audit --fix                          # pixi update vulnerable packages, re-audit
+pixi audit --fix                          # raise constraints, update packages, re-audit
 ```
 
 Persistent configuration lives in the workspace manifest:
@@ -140,9 +140,10 @@ severity = "high"                       # low | medium | high | critical
 
 Ignore lists from the config and the command line are combined;
 `--severity` on the command line overrides the config. Severity filtering applies
-only to conda findings. `--fix` re-locks vulnerable packages via `pixi update`
-within your existing manifest constraints (it never edits the manifest) and
-reports what was resolved.
+only to conda findings. `--fix` raises matching direct dependency constraints in
+`pixi.toml` or `[tool.pixi]` to the highest known fixed version, runs
+`pixi update`, and reports what was resolved. Git, path, URL, and transitive
+dependencies without a matching manifest entry are not added or rewritten.
 
 ## Development
 
