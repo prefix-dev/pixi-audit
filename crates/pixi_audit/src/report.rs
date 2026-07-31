@@ -136,6 +136,28 @@ impl std::fmt::Display for SeverityBand {
     }
 }
 
+/// Which suppression list put a finding into the ignored bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IgnoreReason {
+    /// Listed in the unconditional ignore list.
+    Always,
+    /// Listed in the ignore-until-fixed list and no fix is known yet. The
+    /// finding resurfaces once any fixed version (own ecosystem or
+    /// upstream) is published.
+    UntilFixed,
+}
+
+/// Suppression lists applied during an audit. Ids/aliases match
+/// case-insensitively; `ignore` wins when an id appears in both lists.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IgnoreSpec<'a> {
+    /// Always suppress these vulnerability ids/aliases.
+    pub ignore: &'a [String],
+    /// Suppress these only while no fixed release is known.
+    pub ignore_until_fixed: &'a [String],
+}
+
 /// One (package, vulnerability) pair.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
@@ -155,6 +177,9 @@ pub struct Finding {
     pub upstream_fixed_versions: Vec<String>,
     pub summary: Option<String>,
     pub url: Option<String>,
+    /// Set only on findings in the ignored bucket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore_reason: Option<IgnoreReason>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -263,7 +288,7 @@ fn advisory_url(doc: &OsvVulnerability) -> Option<String> {
 pub async fn audit(
     client: &BasiliskClient,
     packages: Vec<AuditPackage>,
-    ignore: &[String],
+    ignore: IgnoreSpec<'_>,
 ) -> Result<AuditReport, AuditError> {
     // Only packages with a known version are queried; a version-less query
     // would match every version ever affected.
@@ -308,7 +333,12 @@ pub async fn audit(
         .try_collect()
         .await?;
 
-    let ignore_set: BTreeSet<String> = ignore.iter().map(|s| s.to_lowercase()).collect();
+    let ignore_set: BTreeSet<String> = ignore.ignore.iter().map(|s| s.to_lowercase()).collect();
+    let until_fixed_set: BTreeSet<String> = ignore
+        .ignore_until_fixed
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
 
     let mut report = AuditReport::default();
     for (package, result) in packages.iter().zip(&results) {
@@ -346,16 +376,31 @@ pub async fn audit(
                 upstream_fixed_versions,
                 summary: doc.summary.clone(),
                 url: advisory_url(doc),
+                ignore_reason: None,
             };
-            let is_ignored = ignore_set.contains(&finding.id.to_lowercase())
-                || finding
-                    .aliases
-                    .iter()
-                    .any(|a| ignore_set.contains(&a.to_lowercase()));
-            if is_ignored {
-                report.ignored.push(finding);
+            let matches = |set: &BTreeSet<String>| {
+                set.contains(&finding.id.to_lowercase())
+                    || finding
+                        .aliases
+                        .iter()
+                        .any(|a| set.contains(&a.to_lowercase()))
+            };
+            let has_known_fix =
+                !finding.fixed_versions.is_empty() || !finding.upstream_fixed_versions.is_empty();
+            let reason = if matches(&ignore_set) {
+                Some(IgnoreReason::Always)
+            } else if matches(&until_fixed_set) && !has_known_fix {
+                Some(IgnoreReason::UntilFixed)
             } else {
-                report.vulnerabilities.push(finding);
+                None
+            };
+            match reason {
+                Some(reason) => {
+                    let mut finding = finding;
+                    finding.ignore_reason = Some(reason);
+                    report.ignored.push(finding);
+                }
+                None => report.vulnerabilities.push(finding),
             }
         }
         if !found_any && !audited {
@@ -658,10 +703,150 @@ mod tests {
         ]
     }
 
+    /// Like `vuln_doc`, but with no fixed events anywhere (id BSLK-NOFIX).
+    fn vuln_doc_nofix() -> serde_json::Value {
+        serde_json::json!({
+            "id": "BSLK-NOFIX",
+            "aliases": ["CVE-2026-7777"],
+            "summary": "No fix yet",
+            "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+            "affected": [{
+                "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                "versions": ["3.1.0"]
+            }]
+        })
+    }
+
+    /// Mock server serving `doc` for every openssl query.
+    async fn spawn_mock_serving(doc: serde_json::Value) -> Url {
+        let vuln_id = doc["id"].as_str().unwrap().to_string();
+        let doc_for_get = doc.clone();
+        let app = Router::new()
+            .route(
+                "/v1/querybatch",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let vuln_id = vuln_id.clone();
+                    async move {
+                        let results: Vec<serde_json::Value> = body["queries"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|q| {
+                                if q["package"]["name"] == "openssl" {
+                                    serde_json::json!({"vulns": [{"id": vuln_id}]})
+                                } else {
+                                    serde_json::json!({})
+                                }
+                            })
+                            .collect();
+                        Json(serde_json::json!({"results": results}))
+                    }
+                }),
+            )
+            .route(
+                "/v1/vulns/{id}",
+                get(move || {
+                    let doc = doc_for_get.clone();
+                    async move { Json(doc) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Url::parse(&format!("http://{addr}/")).unwrap()
+    }
+
+    fn ignore_until_fixed(ids: &[String]) -> IgnoreSpec<'_> {
+        IgnoreSpec {
+            ignore: &[],
+            ignore_until_fixed: ids,
+        }
+    }
+
+    #[tokio::test]
+    async fn until_fixed_with_no_known_fix_is_ignored_with_reason() {
+        let base = spawn_mock_serving(vuln_doc_nofix()).await;
+        let ids = vec!["BSLK-NOFIX".to_string()];
+        let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
+            .await
+            .unwrap();
+        assert!(report.vulnerabilities.is_empty());
+        assert_eq!(report.ignored.len(), 1);
+        assert_eq!(
+            report.ignored[0].ignore_reason,
+            Some(IgnoreReason::UntilFixed)
+        );
+        // The JSON field serializes kebab-case.
+        let json = serde_json::to_value(&report.ignored[0]).unwrap();
+        assert_eq!(json["ignore_reason"], "until-fixed");
+    }
+
+    #[tokio::test]
+    async fn until_fixed_with_known_fix_stays_vulnerable() {
+        // BSLK-1 has fixed 3.1.1, so suppression does not apply.
+        let base = spawn_mock().await;
+        let ids = vec!["BSLK-1".to_string()];
+        let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
+            .await
+            .unwrap();
+        assert_eq!(report.vulnerabilities.len(), 1);
+        assert!(report.ignored.is_empty());
+        assert_eq!(report.vulnerabilities[0].ignore_reason, None);
+    }
+
+    #[tokio::test]
+    async fn until_fixed_matches_aliases_case_insensitively() {
+        let base = spawn_mock_serving(vuln_doc_nofix()).await;
+        let ids = vec!["cve-2026-7777".to_string()];
+        let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
+            .await
+            .unwrap();
+        assert_eq!(report.ignored.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ignore_wins_over_until_fixed() {
+        // BSLK-1 has a fix; plain ignore still suppresses it, reason Always.
+        let base = spawn_mock().await;
+        let ignore = vec!["BSLK-1".to_string()];
+        let until = vec!["BSLK-1".to_string()];
+        let spec = IgnoreSpec {
+            ignore: &ignore,
+            ignore_until_fixed: &until,
+        };
+        let report = audit(&test_client(base), packages(), spec).await.unwrap();
+        assert!(report.vulnerabilities.is_empty());
+        assert_eq!(report.ignored.len(), 1);
+        assert_eq!(report.ignored[0].ignore_reason, Some(IgnoreReason::Always));
+    }
+
+    #[tokio::test]
+    async fn plain_ignored_findings_carry_reason_always_and_it_serializes() {
+        let base = spawn_mock().await;
+        let ignore = vec!["BSLK-1".to_string()];
+        let spec = IgnoreSpec {
+            ignore: &ignore,
+            ignore_until_fixed: &[],
+        };
+        let report = audit(&test_client(base), packages(), spec).await.unwrap();
+        assert_eq!(report.ignored[0].ignore_reason, Some(IgnoreReason::Always));
+        let json = serde_json::to_value(&report.ignored[0]).unwrap();
+        assert_eq!(json["ignore_reason"], "always");
+        // Vulnerable findings must NOT carry the key at all.
+        let base2 = spawn_mock().await;
+        let clean = audit(&test_client(base2), packages(), IgnoreSpec::default())
+            .await
+            .unwrap();
+        let vuln_json = serde_json::to_value(&clean.vulnerabilities[0]).unwrap();
+        assert!(vuln_json.get("ignore_reason").is_none());
+    }
+
     #[tokio::test]
     async fn audit_reports_findings_and_unchecked() {
         let base = spawn_mock().await;
-        let report = audit(&test_client(base), packages(), &[]).await.unwrap();
+        let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+            .await
+            .unwrap();
 
         assert_eq!(report.vulnerabilities.len(), 1);
         let finding = &report.vulnerabilities[0];
@@ -701,9 +886,12 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base = Url::parse(&format!("http://{addr}/")).unwrap();
 
-        let report = audit(&test_client(base), packages(), &["BSLK-1".to_string()])
-            .await
-            .unwrap();
+        let ignore = vec!["BSLK-1".to_string()];
+        let spec = IgnoreSpec {
+            ignore: &ignore,
+            ignore_until_fixed: &[],
+        };
+        let report = audit(&test_client(base), packages(), spec).await.unwrap();
 
         // Same severity everywhere, so the tie-break is the package name.
         let order: Vec<&str> = report.ignored.iter().map(|f| f.package.as_str()).collect();
@@ -713,13 +901,12 @@ mod tests {
     #[tokio::test]
     async fn ignore_list_matches_id_and_aliases_case_insensitively() {
         let base = spawn_mock().await;
-        let report = audit(
-            &test_client(base),
-            packages(),
-            &["cve-2026-1234".to_string()],
-        )
-        .await
-        .unwrap();
+        let ignore = vec!["cve-2026-1234".to_string()];
+        let spec = IgnoreSpec {
+            ignore: &ignore,
+            ignore_until_fixed: &[],
+        };
+        let report = audit(&test_client(base), packages(), spec).await.unwrap();
 
         assert!(report.vulnerabilities.is_empty());
         assert_eq!(report.ignored.len(), 1);
@@ -794,7 +981,9 @@ mod tests {
                 environments: vec!["default".to_string()],
             },
         ];
-        let report = audit(&test_client(base), packages, &[]).await.unwrap();
+        let report = audit(&test_client(base), packages, IgnoreSpec::default())
+            .await
+            .unwrap();
 
         // Only zlib was queried; mystery is unchecked and not counted audited.
         assert_eq!(*received.lock().unwrap(), 1);
@@ -831,7 +1020,9 @@ mod tests {
         // not yet served (404). The finding must still be reported — never
         // dropped — just without severity/summary detail.
         let base = spawn_broken_details_mock(axum::http::StatusCode::NOT_FOUND).await;
-        let report = audit(&test_client(base), packages(), &[]).await.unwrap();
+        let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+            .await
+            .unwrap();
 
         assert_eq!(report.vulnerabilities.len(), 3);
         let finding = &report.vulnerabilities[0];
@@ -844,7 +1035,7 @@ mod tests {
     #[tokio::test]
     async fn other_detail_fetch_errors_still_fail_the_audit() {
         let base = spawn_broken_details_mock(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
-        let err = audit(&test_client(base), packages(), &[])
+        let err = audit(&test_client(base), packages(), IgnoreSpec::default())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("500"), "unexpected error: {err}");
@@ -853,7 +1044,9 @@ mod tests {
     #[tokio::test]
     async fn withdrawn_vulnerabilities_are_not_reported() {
         let base = spawn_withdrawn_mock().await;
-        let report = audit(&test_client(base), packages(), &[]).await.unwrap();
+        let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+            .await
+            .unwrap();
 
         assert!(report.vulnerabilities.is_empty());
         assert!(report.ignored.is_empty());
@@ -874,7 +1067,9 @@ mod tests {
             ecosystem: PackageEcosystem::Pypi,
             environments: vec!["default".to_string()],
         }];
-        let report = audit(&test_client(base), packages, &[]).await.unwrap();
+        let report = audit(&test_client(base), packages, IgnoreSpec::default())
+            .await
+            .unwrap();
 
         assert_eq!(report.vulnerabilities.len(), 1);
         assert!(report.unchecked.is_empty());

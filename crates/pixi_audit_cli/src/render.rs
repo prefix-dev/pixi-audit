@@ -27,9 +27,13 @@ pub fn render_human(report: &AuditReport) -> String {
     if !report.ignored.is_empty() {
         writeln!(out, "Ignored {} finding(s):", report.ignored.len()).unwrap();
         for finding in &report.ignored {
+            let marker = match finding.ignore_reason {
+                Some(pixi_audit::IgnoreReason::UntilFixed) => " — until a fix is released",
+                _ => "",
+            };
             writeln!(
                 out,
-                "  {} ({} {})",
+                "  {} ({} {}){marker}",
                 finding.id, finding.package, finding.version
             )
             .unwrap();
@@ -167,6 +171,7 @@ mod tests {
             upstream_fixed_versions: vec![],
             summary: None,
             url: Some(format!("https://osv.dev/{id}")),
+            ignore_reason: None,
         }
     }
 
@@ -281,6 +286,25 @@ mod tests {
         assert!(text.contains("1 package(s) could not be checked:"));
         assert!(text.contains("  samtools 1.19 (bioconda) — default"));
         assert!(text.contains("No vulnerabilities found (3 audited, 1 ignored, 1 unchecked)"));
+    }
+
+    #[test]
+    fn until_fixed_ignores_are_marked() {
+        let mut always = finding("openssl", "CVE-2026-0001", SeverityBand::High);
+        always.ignore_reason = Some(pixi_audit::IgnoreReason::Always);
+        let mut until = finding("openssl", "CVE-2026-0002", SeverityBand::High);
+        until.ignore_reason = Some(pixi_audit::IgnoreReason::UntilFixed);
+        let report = AuditReport {
+            ignored: vec![always, until],
+            summary: AuditSummary {
+                ignored: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = render_human(&report);
+        assert!(text.contains("  CVE-2026-0001 (openssl 3.1.0)\n"));
+        assert!(text.contains("  CVE-2026-0002 (openssl 3.1.0) — until a fix is released\n"));
     }
 
     #[test]
