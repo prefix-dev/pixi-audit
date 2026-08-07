@@ -7,7 +7,9 @@ use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
     AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, SeverityBand, audit_lock_file,
 };
+use reqwest::header::{AUTHORIZATION, HeaderMap};
 
+mod auth;
 mod config;
 mod fix;
 mod render;
@@ -189,8 +191,17 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         targets.lockfile.display()
     );
 
+    let mut pixi_executable = None;
+    let mut headers = HeaderMap::new();
+    if auth::should_attach_token(&base_url) {
+        let executable = auth::resolve_pixi_executable()?;
+        let token_provider = auth::PixiTokenProvider::new(executable.clone());
+        headers.insert(AUTHORIZATION, token_provider.bearer_header().await?);
+        pixi_executable = Some(executable);
+    }
     let http_client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
+        .default_headers(headers)
         .build()
         .into_diagnostic()
         .wrap_err("failed to construct the HTTP client")?;
@@ -225,7 +236,11 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
             targets.lockfile.display()
         )
     })?;
-    fix::run_pixi_update(manifest, &names)?;
+    let pixi_executable = match pixi_executable {
+        Some(executable) => executable,
+        None => auth::resolve_pixi_executable()?,
+    };
+    fix::run_pixi_update(&pixi_executable, manifest, &names).await?;
 
     let lock_file = pixi_audit::rattler_lock::LockFile::from_path(&targets.lockfile)
         .into_diagnostic()

@@ -39,6 +39,13 @@ pub enum AuditError {
         /// The server's `{"error": "..."}` body, when present.
         message: Option<String>,
     },
+    #[error(
+        "Basilisk authentication or authorization was rejected at {url} (HTTP {status}). Upgrade to a Pixi release containing PFX-1798 (with `auth token` and `basilisk:query`) first, then run `pixi auth logout prefix.dev` followed by `pixi auth login prefix.dev` and retry. Opaque API keys are unsupported."
+    )]
+    AuthenticationRejected {
+        url: Url,
+        status: reqwest::StatusCode,
+    },
     #[error("failed to parse the response from {url}")]
     InvalidResponse {
         url: Url,
@@ -192,6 +199,14 @@ async fn status_error(
     status: reqwest::StatusCode,
     response: reqwest::Response,
 ) -> AuditError {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        // Do not surface 401/403 bodies: an authentication service could echo
+        // credential material, and the actionable remediation is fixed.
+        return AuditError::AuthenticationRejected { url, status };
+    }
     let message = response.text().await.ok().and_then(|body| {
         serde_json::from_str::<serde_json::Value>(&body)
             .ok()?
@@ -409,6 +424,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("500"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn authentication_errors_are_actionable_without_surfacing_response_bodies() {
+        const SECRET: &str = "must-not-appear-in-errors";
+        for status in [
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::http::StatusCode::FORBIDDEN,
+        ] {
+            let app = Router::new().route(
+                "/v1/querybatch",
+                post(move || async move { (status, Json(serde_json::json!({"error": SECRET}))) }),
+            );
+            let base = spawn(app).await;
+
+            let err = client(base)
+                .query_batch(&[query("openssl", "3.1.0")])
+                .await
+                .unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains(status.as_str()));
+            assert!(message.contains("PFX-1798"));
+            assert!(message.contains("basilisk:query"));
+            assert!(message.contains("pixi auth logout prefix.dev"));
+            assert!(message.contains("pixi auth login prefix.dev"));
+            assert!(
+                message.find("pixi auth logout").unwrap()
+                    < message.find("pixi auth login").unwrap()
+            );
+            assert!(message.contains("Opaque API keys are unsupported"));
+            assert!(!message.contains(SECRET), "secret leaked in: {message}");
+        }
     }
 
     #[tokio::test]

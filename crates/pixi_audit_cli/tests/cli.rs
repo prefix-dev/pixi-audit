@@ -1,5 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
@@ -7,6 +8,7 @@ use axum::{
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_pixi-audit");
+const TEST_TOKEN: &str = "integration-short-lived-token";
 
 fn lockfile() -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,12 +58,46 @@ async fn spawn_mock(vulnerable: bool) -> String {
     format!("http://{addr}/")
 }
 
+fn fake_token_pixi() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.path().join("pixi");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n[ \"$1 $2 $3\" = \"auth token prefix.dev\" ] || exit 64\nprintf '{TEST_TOKEN}\\n'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    #[cfg(windows)]
+    let path = {
+        let path = dir.path().join("pixi.cmd");
+        std::fs::write(
+            &path,
+            format!(
+                "@echo off\r\nif not \"%1 %2 %3\" == \"auth token prefix.dev\" exit /b 64\r\necho {TEST_TOKEN}\r\n"
+            ),
+        )
+        .unwrap();
+        path
+    };
+    (dir, path)
+}
+
 /// Runs the binary without blocking the tokio worker serving the mock.
 async fn run_cli(base_url: String, args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
+        let (_fake_dir, fake_pixi) = fake_token_pixi();
         std::process::Command::new(BIN)
             .args(&args)
             .env("PIXI_AUDIT_BASE_URL", base_url)
+            .env("PIXI_EXE", fake_pixi)
             .output()
             .expect("binary runs")
     })
@@ -115,6 +151,210 @@ async fn json_mode_emits_only_the_report_on_stdout() {
         serde_json::from_slice(&output.stdout).expect("stdout is exactly one JSON document");
     assert_eq!(report["summary"]["vulnerable"], 1);
     assert_eq!(report["vulnerabilities"][0]["id"], "BSLK-1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_non_loopback_origin_stays_anonymous_without_pixi() {
+    let app = Router::new().route(
+        "/v1/querybatch",
+        post(
+            |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                assert!(
+                    headers.get("authorization").is_none(),
+                    "custom service received a prefix.dev credential"
+                );
+                let results: Vec<serde_json::Value> = body["queries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|_| serde_json::json!({}))
+                    .collect();
+                Json(serde_json::json!({"results": results}))
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(BIN)
+            .arg(lockfile())
+            .env("PIXI_AUDIT_BASE_URL", format!("http://0.0.0.0:{port}/"))
+            .env("PIXI_EXE", "definitely-no-such-pixi")
+            .env("PATH", "")
+            .env("NO_PROXY", "*")
+            .env("no_proxy", "*")
+            .output()
+            .expect("binary runs")
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bearer_auth_is_attached_to_query_and_detail_requests() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let query_seen = seen.clone();
+    let detail_seen = seen.clone();
+    let app = Router::new()
+        .route(
+            "/v1/querybatch",
+            post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let seen = query_seen.clone();
+                    async move {
+                        assert_eq!(
+                            headers.get("authorization").unwrap().to_str().unwrap(),
+                            format!("Bearer {TEST_TOKEN}")
+                        );
+                        seen.lock().unwrap().push("querybatch");
+                        let results: Vec<serde_json::Value> = body["queries"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|query| {
+                                if query["package"]["name"] == "openssl" {
+                                    serde_json::json!({"vulns": [{"id": "BSLK-1"}]})
+                                } else {
+                                    serde_json::json!({})
+                                }
+                            })
+                            .collect();
+                        Json(serde_json::json!({"results": results}))
+                    }
+                },
+            ),
+        )
+        .route(
+            "/v1/vulns/{id}",
+            get(move |headers: axum::http::HeaderMap| {
+                let seen = detail_seen.clone();
+                async move {
+                    assert_eq!(
+                        headers.get("authorization").unwrap().to_str().unwrap(),
+                        format!("Bearer {TEST_TOKEN}")
+                    );
+                    seen.lock().unwrap().push("detail");
+                    Json(vuln_doc())
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let output = run_cli(format!("http://{addr}/"), vec![lockfile()]).await;
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(*seen.lock().unwrap(), vec!["querybatch", "detail"]);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(TEST_TOKEN));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(TEST_TOKEN));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_origin_redirect_does_not_forward_authorization() {
+    let redirected_authorization = Arc::new(Mutex::new(None));
+    let redirected_authorization_for_handler = redirected_authorization.clone();
+    let destination_app = Router::new().route(
+        "/v1/querybatch",
+        post(
+            move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                let redirected_authorization = redirected_authorization_for_handler.clone();
+                async move {
+                    *redirected_authorization.lock().unwrap() = headers
+                        .get("authorization")
+                        .map(|value| value.to_str().unwrap().to_string());
+                    let results: Vec<serde_json::Value> = body["queries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|_| serde_json::json!({}))
+                        .collect();
+                    Json(serde_json::json!({"results": results}))
+                }
+            },
+        ),
+    );
+    let destination_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let destination_addr = destination_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(destination_listener, destination_app)
+            .await
+            .unwrap()
+    });
+
+    let redirect_target = format!("http://{destination_addr}/v1/querybatch");
+    let source_app = Router::new().route(
+        "/v1/querybatch",
+        post(move |headers: axum::http::HeaderMap| {
+            let redirect_target = redirect_target.clone();
+            async move {
+                assert_eq!(
+                    headers.get("authorization").unwrap().to_str().unwrap(),
+                    format!("Bearer {TEST_TOKEN}")
+                );
+                axum::response::Redirect::temporary(&redirect_target)
+            }
+        }),
+    );
+    let source_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = source_listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(source_listener, source_app).await.unwrap() });
+
+    let output = run_cli(format!("http://{source_addr}/"), vec![lockfile()]).await;
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        *redirected_authorization.lock().unwrap(),
+        None,
+        "Authorization was forwarded across origins"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn echoed_token_in_forbidden_body_is_not_displayed() {
+    let app = Router::new().route(
+        "/v1/querybatch",
+        post(|headers: axum::http::HeaderMap| async move {
+            assert_eq!(
+                headers.get("authorization").unwrap().to_str().unwrap(),
+                format!("Bearer {TEST_TOKEN}")
+            );
+            (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": TEST_TOKEN})),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let output = run_cli(format!("http://{addr}/"), vec![lockfile()]).await;
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("HTTP 403"), "stderr: {stderr}");
+    assert!(!stderr.contains(TEST_TOKEN), "token leaked in: {stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(TEST_TOKEN));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -255,11 +495,19 @@ async fn run_cli_in(
         let mut cmd = std::process::Command::new(BIN);
         cmd.args(&args)
             .current_dir(&dir)
-            .env("PIXI_AUDIT_BASE_URL", base_url);
+            .env("PIXI_AUDIT_BASE_URL", base_url)
+            .env_remove("PIXI_EXE");
+        let mut fake_dir = None;
         if let Some(path) = path_override {
             cmd.env("PATH", path);
+        } else {
+            let (dir, fake_pixi) = fake_token_pixi();
+            cmd.env("PIXI_EXE", fake_pixi);
+            fake_dir = Some(dir);
         }
-        cmd.output().expect("binary runs")
+        let output = cmd.output().expect("binary runs");
+        drop(fake_dir);
+        output
     })
     .await
     .unwrap()
@@ -383,7 +631,7 @@ async fn fix_runs_pixi_update_and_reaudits() {
     std::fs::write(
         &fake_pixi,
         format!(
-            "#!/bin/sh\necho \"$@\" > '{ws}/pixi-args.txt'\ncp '{ws}/fixed.lock' '{ws}/pixi.lock'\n",
+            "#!/bin/sh\nif [ \"$1 $2 $3\" = \"auth token prefix.dev\" ]; then\n  printf '{TEST_TOKEN}\\n'\n  exit 0\nfi\necho \"$@\" > '{ws}/pixi-args.txt'\ncp '{ws}/fixed.lock' '{ws}/pixi.lock'\n",
             ws = workspace.path().display()
         ),
     )
@@ -423,7 +671,7 @@ async fn fix_runs_pixi_update_and_reaudits() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn fix_without_pixi_on_path_exits_2() {
+async fn pixi_exe_and_path_unavailable_exits_2_with_auth_guidance() {
     let workspace = temp_workspace("pixi.toml", "[workspace]\nname = \"demo\"\n");
     let empty_dir = workspace.path().join("empty");
     std::fs::create_dir(&empty_dir).unwrap();
@@ -437,5 +685,14 @@ async fn fix_without_pixi_on_path_exits_2() {
     .await;
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("is pixi on PATH?"), "stderr: {stderr}");
+    assert!(stderr.contains("PFX-1798"), "stderr: {stderr}");
+    assert!(stderr.contains("PIXI_EXE"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("pixi auth logout prefix.dev"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("pixi auth login prefix.dev"),
+        "stderr: {stderr}"
+    );
 }

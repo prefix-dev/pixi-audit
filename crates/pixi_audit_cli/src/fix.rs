@@ -1,7 +1,8 @@
 //! `--fix`: re-lock vulnerable packages via `pixi update`, then re-audit.
 
 use std::path::Path;
-use std::process::Command;
+
+use tokio::process::Command;
 
 use miette::{IntoDiagnostic, WrapErr, miette};
 use pixi_audit::AuditReport;
@@ -20,15 +21,20 @@ pub fn vulnerable_package_names(report: &AuditReport) -> Vec<String> {
 
 /// Runs `pixi update --manifest-path <manifest> <names...>`. pixi's output
 /// is relayed to our stderr so stdout stays reserved for the report.
-pub fn run_pixi_update(manifest: &Path, names: &[String]) -> miette::Result<()> {
-    let output = Command::new("pixi")
+pub async fn run_pixi_update(
+    pixi_executable: &Path,
+    manifest: &Path,
+    names: &[String],
+) -> miette::Result<()> {
+    let output = Command::new(pixi_executable)
         .arg("update")
         .arg("--manifest-path")
         .arg(manifest)
         .args(names)
         .output()
+        .await
         .into_diagnostic()
-        .wrap_err("failed to run `pixi update` (is pixi on PATH?)")?;
+        .wrap_err("failed to run `pixi update`")?;
     eprint!("{}", String::from_utf8_lossy(&output.stdout));
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
