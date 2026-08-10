@@ -29,12 +29,17 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: linux-64
+            output_dir: ../rattler-build-output
           - runner: macos-15-intel
             target: osx-64
+            output_dir: ../rattler-build-output
           - runner: macos-15
             target: osx-arm64
+            output_dir: ../rattler-build-output
           - runner: windows-latest
             target: win-64
+            # Keep paths short: native dependency builds can exceed MAX_PATH.
+            output_dir: C:/b
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +70,7 @@ jobs:
           pixi exec rattler-build build
           --recipe recipe/recipe.yaml
           --target-platform ${{ matrix.target }}
-          --output-dir ../rattler-build-output
+          --output-dir ${{ matrix.output_dir }}
           --channel conda-forge
 
       - name: Publish to pixi-extensions
@@ -74,4 +79,5 @@ jobs:
           pixi exec rattler-build upload prefix
           --url https://beta.prefix.dev
           --channel pixi-extensions
-          ../rattler-build-output/${{ matrix.target }}/*.conda
+          --skip-existing
+          ${{ matrix.output_dir }}/${{ matrix.target }}/*.conda
