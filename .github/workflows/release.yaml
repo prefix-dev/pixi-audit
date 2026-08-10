@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish (without the leading v)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.target }}
+    if: github.repository == 'prefix-dev/pixi_audit'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: linux-64
+          - runner: macos-15-intel
+            target: osx-64
+          - runner: macos-15
+            target: osx-arm64
+          - runner: windows-latest
+            target: win-64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.3
+        with:
+          run-install: false
+
+      - name: Determine and verify version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 | \
+            jq -r '.packages[] | select(.name == "pixi_audit_cli") | .version')
+          if [[ "$VERSION" != "$CRATE_VERSION" ]]; then
+            echo "Release version $VERSION does not match pixi_audit_cli version $CRATE_VERSION" >&2
+            exit 1
+          fi
+          echo "PIXI_AUDIT_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build conda package
+        shell: bash
+        run: >-
+          pixi exec rattler-build build
+          --recipe recipe/recipe.yaml
+          --target-platform ${{ matrix.target }}
+          --output-dir ../rattler-build-output
+          --channel conda-forge
+
+      - name: Publish to pixi-extensions
+        shell: bash
+        run: >-
+          pixi exec rattler-build upload prefix
+          --url https://beta.prefix.dev
+          --channel pixi-extensions
+          ../rattler-build-output/${{ matrix.target }}/*.conda
