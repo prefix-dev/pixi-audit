@@ -10,7 +10,20 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserializes a JSON array while treating `null` like an omitted field.
+///
+/// Some OSV producers emit nullable arrays even though the OSV schema models
+/// these fields as optional arrays. Treating both representations as empty
+/// keeps clients interoperable without weakening the element types.
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
 
 /// Identity part of an OSV query.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +57,11 @@ pub struct VulnRef {
 /// Per-query result in a `querybatch` response.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BatchResult {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub vulns: Vec<VulnRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_page_token: Option<String>,
@@ -52,7 +69,11 @@ pub struct BatchResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResponse {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub results: Vec<BatchResult>,
 }
 
@@ -69,17 +90,33 @@ pub struct OsvVulnerability {
     /// When set, the advisory has been withdrawn and should not be reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub severity: Vec<OsvSeverity>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub affected: Vec<OsvAffected>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub references: Vec<OsvReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_specific: Option<serde_json::Value>,
@@ -100,9 +137,17 @@ pub struct OsvSeverity {
 pub struct OsvAffected {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<OsvAffectedPackage>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub ranges: Vec<OsvRange>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub versions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_specific: Option<serde_json::Value>,
@@ -126,7 +171,11 @@ pub struct OsvAffectedPackage {
 pub struct OsvRange {
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub events: Vec<OsvEvent>,
 }
 
@@ -227,6 +276,28 @@ mod tests {
         };
         let json = serde_json::to_value(&vuln).unwrap();
         assert_eq!(json, serde_json::json!({"id": "X"}));
+    }
+
+    #[test]
+    fn nullable_osv_arrays_deserialize_as_empty() {
+        let json = serde_json::json!({
+            "id": "GHSA-g75f-g53v-794x",
+            "aliases": null,
+            "severity": null,
+            "references": null,
+            "affected": [{
+                "package": {"ecosystem": "PyPI", "name": "bleach"},
+                "ranges": null,
+                "versions": null
+            }]
+        });
+
+        let vuln: OsvVulnerability = serde_json::from_value(json).unwrap();
+        assert!(vuln.aliases.is_empty());
+        assert!(vuln.severity.is_empty());
+        assert!(vuln.references.is_empty());
+        assert!(vuln.affected[0].ranges.is_empty());
+        assert!(vuln.affected[0].versions.is_empty());
     }
 
     #[test]

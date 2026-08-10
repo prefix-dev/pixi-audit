@@ -33,8 +33,7 @@ pub fn find_manifest_in(dir: &Path) -> miette::Result<Option<PathBuf>> {
         let content = std::fs::read_to_string(&pyproject)
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to read '{}'", pyproject.display()))?;
-        let value: toml::Value = content
-            .parse()
+        let value: toml::Value = toml::from_str(&content)
             .into_diagnostic()
             .wrap_err_with(|| format!("'{}' is not valid TOML", pyproject.display()))?;
         if value.get("tool").and_then(|t| t.get("pixi")).is_some() {
@@ -64,8 +63,7 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
     let content = std::fs::read_to_string(manifest)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read '{}'", manifest.display()))?;
-    let value: toml::Value = content
-        .parse()
+    let value: toml::Value = toml::from_str(&content)
         .into_diagnostic()
         .wrap_err_with(|| format!("'{}' is not valid TOML", manifest.display()))?;
 
@@ -176,6 +174,30 @@ severity = "high"
         let config = load_config(&manifest).unwrap();
         assert_eq!(config.ignore, vec!["CVE-1"]);
         assert_eq!(config.ignore_until_fixed, vec!["CVE-2"]);
+        assert_eq!(config.severity, Some(SeverityBand::High));
+    }
+
+    #[test]
+    fn accepts_toml_1_1_multiline_inline_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write(
+            dir.path(),
+            "pixi.toml",
+            r#"
+[workspace]
+name = "demo"
+
+[tasks]
+insta-review = {
+    cmd = "cargo insta review",
+    depends-on = ["test"],
+}
+
+[tool.pixi-audit]
+severity = "high"
+"#,
+        );
+        let config = load_config(&manifest).unwrap();
         assert_eq!(config.severity, Some(SeverityBand::High));
     }
 
