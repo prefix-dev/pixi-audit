@@ -9,7 +9,7 @@ homepage = "https://github.com/prefix-dev/pixi-audit"
 license = "BSD-3-Clause"
 readme = "README.md"
 repository = "https://github.com/prefix-dev/pixi-audit"
-rust-version = "1.90"
+rust-version = "1.95"
 
 [workspace.dependencies]
 axum = "0.8"
@@ -23,6 +23,7 @@ pixi_audit = { path = "crates/pixi_audit", version = "0.1.0" }
 # Same version pixi pins, so the `LockFile` type identity unifies when pixi
 # consumes these crates.
 rattler_lock = { version = "0.31", default-features = false }
+rattler_conda_types = "0.49"
 # Same middleware crate pixi uses (its workspace renames `astral-reqwest-middleware`
 # to `reqwest-middleware`), so the `ClientWithMiddleware` type identity unifies
 # when pixi consumes these crates.
@@ -34,4 +35,12 @@ tempfile = "3"
 thiserror = "2.0.12"
 tokio = "1.43.0"
 toml = "1.0"
+toml_edit = "0.25"
 url = "2.5"
+uv-audit = { version = "0.0.67", default-features = false }
+uv-cache = "0.0.67"
+uv-client = "0.0.67"
+uv-configuration = "0.0.67"
+uv-normalize = "0.0.67"
+uv-pep440 = "0.0.67"
+uv-redacted = "0.0.67"

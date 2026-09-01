@@ -7,7 +7,7 @@ use rattler_lock::{LockFile, LockedPackage};
 use thiserror::Error;
 
 use crate::{
-    client::{AuditError, BasiliskClient},
+    client::{AuditError, BasiliskClient, PypiAuditClient},
     report::{AuditPackage, AuditReport, IgnoreSpec, PackageEcosystem, audit},
 };
 
@@ -120,13 +120,14 @@ pub fn collect_packages(
 /// platform filters) against the vulnerability database.
 pub async fn audit_lock_file(
     client: &BasiliskClient,
+    pypi_client: &PypiAuditClient,
     lock_file: &LockFile,
     environment_filter: &[String],
     platform_filter: &[String],
     ignore: IgnoreSpec<'_>,
 ) -> Result<AuditReport, LockFileAuditError> {
     let packages = collect_packages(lock_file, environment_filter, platform_filter)?;
-    Ok(audit(client, packages, ignore).await?)
+    Ok(audit(client, pypi_client, packages, ignore).await?)
 }
 
 #[cfg(test)]
@@ -303,11 +304,19 @@ packages:
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let base = url::Url::parse(&format!("http://{addr}/")).unwrap();
         let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
-        let client = BasiliskClient::new(http, base);
+        let client = BasiliskClient::new(http, base.clone());
+        let pypi_client = PypiAuditClient::new(base).unwrap();
 
-        let report = audit_lock_file(&client, &fixture(), &[], &[], IgnoreSpec::default())
-            .await
-            .unwrap();
+        let report = audit_lock_file(
+            &client,
+            &pypi_client,
+            &fixture(),
+            &[],
+            &[],
+            IgnoreSpec::default(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(report.vulnerabilities.len(), 1);
         let finding = &report.vulnerabilities[0];
@@ -316,8 +325,8 @@ packages:
         assert_eq!(finding.severity, crate::report::SeverityBand::Critical);
         assert_eq!(finding.environments, vec!["default", "prod"]);
 
-        // samtools (bioconda) and requests (PyPI) are unchecked.
-        assert_eq!(report.summary.unchecked, 2);
-        assert_eq!(report.summary.audited, 1);
+        // samtools (bioconda) is unchecked; requests is audited through uv-audit.
+        assert_eq!(report.summary.unchecked, 1);
+        assert_eq!(report.summary.audited, 2);
     }
 }

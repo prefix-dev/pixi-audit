@@ -1,10 +1,11 @@
 use std::collections::{BTreeSet, HashMap};
+use std::str::FromStr;
 
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{AuditError, BasiliskClient},
+    client::{AuditError, BasiliskClient, PypiAuditClient},
     types::{BatchResult, OsvQuery, OsvSeverity, OsvVulnerability, QueryPackage},
 };
 
@@ -53,11 +54,10 @@ impl PackageEcosystem {
         }
     }
 
-    /// Whether basilisk can currently answer for this ecosystem. Packages
-    /// outside this set are reported as "not checked" (unless a query for
-    /// them returns a finding anyway).
+    /// Whether an audit backend is configured for this ecosystem. Packages
+    /// outside this set are reported as "not checked".
     pub fn is_audited(&self) -> bool {
-        matches!(self, PackageEcosystem::CondaForge)
+        matches!(self, PackageEcosystem::CondaForge | PackageEcosystem::Pypi)
     }
 }
 
@@ -326,9 +326,9 @@ fn fixed_versions(
 fn advisory_url(doc: &OsvVulnerability) -> Option<String> {
     doc.references
         .iter()
-        .find(|r| r.kind.as_deref() == Some("ADVISORY"))
+        .find(|reference| reference.kind.as_deref() == Some("ADVISORY"))
         .or_else(|| doc.references.first())
-        .map(|r| r.url.clone())
+        .map(|reference| reference.url.clone())
 }
 
 /// Audits `packages` against the vulnerability database, applying `ignore`
@@ -336,20 +336,24 @@ fn advisory_url(doc: &OsvVulnerability) -> Option<String> {
 ///
 /// A security audit must never silently drop findings, so there is
 /// deliberately no partial-report mode: any detail fetch that fails after
-/// retries fails the audit as a whole. The one exception is a 404 — the
-/// batch index can briefly reference a document that is not served yet —
-/// which degrades to an id-only finding (severity unknown) instead.
+/// retries fails the audit as a whole. A missing Basilisk document is the one
+/// exception: its batch index can briefly reference an id that is not served
+/// yet, so a 404 degrades to an id-only finding with unknown severity. PyPI
+/// detail fetches are handled by `uv-audit`, where any error fails the audit.
 pub async fn audit(
     client: &BasiliskClient,
+    pypi_client: &PypiAuditClient,
     packages: Vec<AuditPackage>,
     ignore: IgnoreSpec<'_>,
 ) -> Result<AuditReport, AuditError> {
-    // Only packages with a known version are queried; a version-less query
-    // would match every version ever affected.
+    // Basilisk handles conda packages. PyPI packages are deliberately excluded
+    // here and sent through uv-audit below.
     let queryable: Vec<usize> = packages
         .iter()
         .enumerate()
-        .filter(|(_, package)| package.version.is_some())
+        .filter(|(_, package)| {
+            package.version.is_some() && !matches!(package.ecosystem, PackageEcosystem::Pypi)
+        })
         .map(|(idx, _)| idx)
         .collect();
     let queries: Vec<OsvQuery> = queryable
@@ -362,7 +366,49 @@ pub async fn audit(
         results[idx] = result;
     }
 
-    // Fetch each distinct vulnerability document once.
+    // uv-audit accepts only normalized Python names and PEP 440 versions.
+    // Invalid or version-less PyPI entries remain explicitly unchecked.
+    let mut pypi_dependencies = Vec::new();
+    let mut pypi_indices = HashMap::new();
+    for (idx, package) in packages.iter().enumerate() {
+        if !matches!(package.ecosystem, PackageEcosystem::Pypi) {
+            continue;
+        }
+        let Some(version) = package.version.as_deref() else {
+            continue;
+        };
+        let (Ok(name), Ok(version)) = (
+            uv_normalize::PackageName::from_str(&package.name),
+            uv_pep440::Version::from_str(version),
+        ) else {
+            continue;
+        };
+        pypi_indices.insert((name.to_string(), version.to_string()), idx);
+        pypi_dependencies.push(uv_audit::Dependency::new(name, version));
+    }
+    let pypi_audited_indices: BTreeSet<usize> = pypi_indices.values().copied().collect();
+    let mut pypi_vulnerabilities: HashMap<usize, Vec<uv_audit::Vulnerability>> = HashMap::new();
+    for finding in pypi_client
+        .inner()
+        .query_batch(&pypi_dependencies, uv_audit::osv::Filter::All)
+        .await
+        .map_err(AuditError::PypiAudit)?
+    {
+        if let uv_audit::Finding::Vulnerability(vulnerability) = finding {
+            let key = (
+                vulnerability.dependency.name().to_string(),
+                vulnerability.dependency.version().to_string(),
+            );
+            if let Some(&idx) = pypi_indices.get(&key) {
+                pypi_vulnerabilities
+                    .entry(idx)
+                    .or_default()
+                    .push(*vulnerability);
+            }
+        }
+    }
+
+    // Fetch each distinct conda vulnerability document once.
     let ids: BTreeSet<String> = results
         .iter()
         .flat_map(|r| r.vulns.iter().map(|v| v.id.clone()))
@@ -395,19 +441,57 @@ pub async fn audit(
         .collect();
 
     let mut report = AuditReport::default();
-    for (package, result) in packages.iter().zip(&results) {
-        let audited = package.version.is_some() && package.ecosystem.is_audited();
+    for (idx, (package, result)) in packages.iter().zip(&results).enumerate() {
+        let pypi_audited = pypi_audited_indices.contains(&idx);
+        let audited = package.version.is_some()
+            && package.ecosystem.is_audited()
+            && (!matches!(package.ecosystem, PackageEcosystem::Pypi) || pypi_audited);
         if audited {
             report.summary.audited += 1;
         }
         let mut found_any = false;
+
+        if let Some(vulnerabilities) = pypi_vulnerabilities.remove(&idx) {
+            for vulnerability in vulnerabilities {
+                found_any = true;
+                record_finding(
+                    &mut report,
+                    Finding {
+                        package: package.name.clone(),
+                        version: package
+                            .version
+                            .clone()
+                            .expect("uv-audit requires a version"),
+                        ecosystem: "PyPI".to_string(),
+                        environments: package.environments.clone(),
+                        id: vulnerability.id.as_str().to_string(),
+                        aliases: vulnerability
+                            .aliases
+                            .iter()
+                            .map(|alias| alias.as_str().to_string())
+                            .collect(),
+                        // uv-audit intentionally does not expose OSV severity data.
+                        severity: SeverityBand::Unknown,
+                        fixed_versions: vulnerability
+                            .fix_versions
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                        upstream_fixed_versions: Vec::new(),
+                        summary: vulnerability.summary,
+                        url: vulnerability.link.map(|url| url.to_string()),
+                        ignore_reason: None,
+                    },
+                    &ignore_set,
+                    &until_fixed_set,
+                );
+            }
+        }
+
         for vuln_ref in &result.vulns {
             let doc = docs
                 .get(&vuln_ref.id)
                 .expect("every referenced vulnerability was fetched");
-            // A withdrawn advisory must not be reported. basilisk already
-            // excludes withdrawn advisories from matching; this is a
-            // defensive client-side check.
             if doc.withdrawn.is_some() {
                 continue;
             }
@@ -415,47 +499,28 @@ pub async fn audit(
             let ecosystem = package.ecosystem.osv_ecosystem();
             let (fixed_versions, upstream_fixed_versions) =
                 fixed_versions(doc, &package.name, ecosystem);
-            let finding = Finding {
-                package: package.name.clone(),
-                version: package
-                    .version
-                    .clone()
-                    .expect("only packages with a version are queried"),
-                ecosystem: ecosystem.to_string(),
-                environments: package.environments.clone(),
-                id: doc.id.clone(),
-                aliases: doc.aliases.clone(),
-                severity: SeverityBand::from_severities(&doc.severity),
-                fixed_versions,
-                upstream_fixed_versions,
-                summary: doc.summary.clone(),
-                url: advisory_url(doc),
-                ignore_reason: None,
-            };
-            let matches = |set: &BTreeSet<String>| {
-                set.contains(&finding.id.to_lowercase())
-                    || finding
-                        .aliases
-                        .iter()
-                        .any(|a| set.contains(&a.to_lowercase()))
-            };
-            let has_known_fix =
-                !finding.fixed_versions.is_empty() || !finding.upstream_fixed_versions.is_empty();
-            let reason = if matches(&ignore_set) {
-                Some(IgnoreReason::Always)
-            } else if matches(&until_fixed_set) && !has_known_fix {
-                Some(IgnoreReason::UntilFixed)
-            } else {
-                None
-            };
-            match reason {
-                Some(reason) => {
-                    let mut finding = finding;
-                    finding.ignore_reason = Some(reason);
-                    report.ignored.push(finding);
-                }
-                None => report.vulnerabilities.push(finding),
-            }
+            record_finding(
+                &mut report,
+                Finding {
+                    package: package.name.clone(),
+                    version: package
+                        .version
+                        .clone()
+                        .expect("only packages with a version are queried"),
+                    ecosystem: ecosystem.to_string(),
+                    environments: package.environments.clone(),
+                    id: doc.id.clone(),
+                    aliases: doc.aliases.clone(),
+                    severity: SeverityBand::from_severities(&doc.severity),
+                    fixed_versions,
+                    upstream_fixed_versions,
+                    summary: doc.summary.clone(),
+                    url: advisory_url(doc),
+                    ignore_reason: None,
+                },
+                &ignore_set,
+                &until_fixed_set,
+            );
         }
         if !found_any && !audited {
             report.unchecked.push(UncheckedPackage {
@@ -467,7 +532,6 @@ pub async fn audit(
         }
     }
 
-    // Highest severity first, then by package name, for stable output.
     let order =
         |a: &Finding, b: &Finding| b.severity.cmp(&a.severity).then(a.package.cmp(&b.package));
     report.vulnerabilities.sort_by(order);
@@ -477,6 +541,38 @@ pub async fn audit(
     report.summary.ignored = report.ignored.len();
     report.summary.unchecked = report.unchecked.len();
     Ok(report)
+}
+
+fn record_finding(
+    report: &mut AuditReport,
+    finding: Finding,
+    ignore_set: &BTreeSet<String>,
+    until_fixed_set: &BTreeSet<String>,
+) {
+    let matches = |set: &BTreeSet<String>| {
+        set.contains(&finding.id.to_lowercase())
+            || finding
+                .aliases
+                .iter()
+                .any(|alias| set.contains(&alias.to_lowercase()))
+    };
+    let has_known_fix =
+        !finding.fixed_versions.is_empty() || !finding.upstream_fixed_versions.is_empty();
+    let reason = if matches(ignore_set) {
+        Some(IgnoreReason::Always)
+    } else if matches(until_fixed_set) && !has_known_fix {
+        Some(IgnoreReason::UntilFixed)
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => {
+            let mut finding = finding;
+            finding.ignore_reason = Some(reason);
+            report.ignored.push(finding);
+        }
+        None => report.vulnerabilities.push(finding),
+    }
 }
 
 #[cfg(test)]
@@ -940,6 +1036,31 @@ mod tests {
         BasiliskClient::new(http, base)
     }
 
+    async fn audit(
+        client: &BasiliskClient,
+        packages: Vec<AuditPackage>,
+        ignore: IgnoreSpec<'_>,
+    ) -> Result<AuditReport, AuditError> {
+        let app = Router::new().route(
+            "/v1/querybatch",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let results = body["queries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|_| serde_json::json!({}))
+                    .collect::<Vec<_>>();
+                Json(serde_json::json!({"results": results}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let pypi_client =
+            PypiAuditClient::new(Url::parse(&format!("http://{addr}/")).unwrap()).unwrap();
+        super::audit(client, &pypi_client, packages, ignore).await
+    }
+
     fn packages() -> Vec<AuditPackage> {
         vec![
             AuditPackage {
@@ -1147,13 +1268,12 @@ mod tests {
         assert_eq!(finding.fixed_versions, vec!["3.1.1"]);
         assert_eq!(finding.url.as_deref(), Some("https://example.com/adv"));
 
-        // The PyPI package is unchecked; the clean conda-forge package is not listed.
-        assert_eq!(report.unchecked.len(), 1);
-        assert_eq!(report.unchecked[0].package, "requests");
+        // PyPI and clean conda-forge packages are audited and not listed as unchecked.
+        assert!(report.unchecked.is_empty());
 
-        assert_eq!(report.summary.audited, 2);
+        assert_eq!(report.summary.audited, 3);
         assert_eq!(report.summary.vulnerable, 1);
-        assert_eq!(report.summary.unchecked, 1);
+        assert_eq!(report.summary.unchecked, 0);
         assert_eq!(report.summary.ignored, 0);
     }
 
@@ -1186,7 +1306,7 @@ mod tests {
 
         // Same severity everywhere, so the tie-break is the package name.
         let order: Vec<&str> = report.ignored.iter().map(|f| f.package.as_str()).collect();
-        assert_eq!(order, vec!["openssl", "requests", "zlib"]);
+        assert_eq!(order, vec!["openssl", "zlib"]);
     }
 
     #[tokio::test]
@@ -1315,7 +1435,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(report.vulnerabilities.len(), 3);
+        assert_eq!(report.vulnerabilities.len(), 2);
         let finding = &report.vulnerabilities[0];
         assert_eq!(finding.id, "BSLK-GONE");
         assert_eq!(finding.severity, SeverityBand::Unknown);
@@ -1342,27 +1462,82 @@ mod tests {
         assert!(report.vulnerabilities.is_empty());
         assert!(report.ignored.is_empty());
         assert_eq!(report.summary.vulnerable, 0);
-        // The PyPI package's only match is withdrawn, so it is NOT promoted
-        // to a finding and stays unchecked.
-        assert_eq!(report.unchecked.len(), 1);
-        assert_eq!(report.unchecked[0].package, "requests");
+        // PyPI is audited independently through uv-audit, so a clean package
+        // is audited rather than listed as unchecked.
+        assert!(report.unchecked.is_empty());
+    }
+
+    async fn spawn_uv_audit_mock() -> Url {
+        let app = Router::new()
+            .route(
+                "/v1/querybatch",
+                post(|Json(body): Json<serde_json::Value>| async move {
+                    assert_eq!(body["queries"][0]["package"]["ecosystem"], "PyPI");
+                    Json(serde_json::json!({
+                        "results": [{"vulns": [{"id": "PYSEC-2026-1"}]}]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/vulns/{id}",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "id": "PYSEC-2026-1",
+                        "modified": "2026-07-31T00:00:00Z",
+                        "summary": "Python package vulnerability",
+                        "aliases": ["CVE-2026-9999"],
+                        "affected": [{
+                            "package": {"ecosystem": "PyPI", "name": "requests"},
+                            "ranges": [{
+                                "type": "ECOSYSTEM",
+                                "events": [{"introduced": "0"}, {"fixed": "2.32.1"}]
+                            }]
+                        }],
+                        "references": [{
+                            "type": "ADVISORY",
+                            "url": "https://example.com/pypi-advisory"
+                        }]
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Url::parse(&format!("http://{addr}/")).unwrap()
     }
 
     #[tokio::test]
-    async fn unchecked_package_with_finding_is_promoted() {
-        // A PyPI-named "openssl" package would get the finding, not land in unchecked.
-        let base = spawn_mock().await;
+    async fn pypi_package_is_audited_with_uv_audit() {
+        let conda_base = spawn_mock().await;
+        let pypi_client = PypiAuditClient::new(spawn_uv_audit_mock().await).unwrap();
         let packages = vec![AuditPackage {
-            name: "openssl".to_string(),
-            version: Some("3.1.0".to_string()),
+            name: "requests".to_string(),
+            version: Some("2.32.0".to_string()),
             ecosystem: PackageEcosystem::Pypi,
             environments: vec!["default".to_string()],
         }];
-        let report = audit(&test_client(base), packages, IgnoreSpec::default())
-            .await
-            .unwrap();
+        let report = super::audit(
+            &test_client(conda_base),
+            &pypi_client,
+            packages,
+            IgnoreSpec::default(),
+        )
+        .await
+        .unwrap();
 
+        assert_eq!(report.summary.audited, 1);
         assert_eq!(report.vulnerabilities.len(), 1);
         assert!(report.unchecked.is_empty());
+        let finding = &report.vulnerabilities[0];
+        assert_eq!(finding.package, "requests");
+        assert_eq!(finding.ecosystem, "PyPI");
+        assert_eq!(finding.id, "PYSEC-2026-1");
+        assert_eq!(finding.aliases, ["CVE-2026-9999"]);
+        assert_eq!(finding.fixed_versions, ["2.32.1"]);
+        assert_eq!(finding.severity, SeverityBand::Unknown);
+        assert_eq!(
+            finding.url.as_deref(),
+            Some("https://example.com/pypi-advisory")
+        );
     }
 }

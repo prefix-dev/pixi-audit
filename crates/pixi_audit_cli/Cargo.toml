@@ -20,12 +20,15 @@ clap = { workspace = true, features = ["derive"] }
 console = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 pixi_audit = { workspace = true }
+rattler_conda_types = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 reqwest-middleware = { workspace = true, features = ["json"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml = { workspace = true }
+toml_edit = { workspace = true }
 url = { workspace = true }
+uv-pep440 = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "json"] }

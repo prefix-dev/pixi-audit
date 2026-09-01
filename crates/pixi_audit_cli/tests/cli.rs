@@ -61,7 +61,8 @@ async fn run_cli(base_url: String, args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         std::process::Command::new(BIN)
             .args(&args)
-            .env("PIXI_AUDIT_BASE_URL", base_url)
+            .env("PIXI_AUDIT_BASE_URL", &base_url)
+            .env("PIXI_AUDIT_PYPI_BASE_URL", &base_url)
             .output()
             .expect("binary runs")
     })
@@ -84,7 +85,7 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     assert!(stdout.contains("CRITICAL"));
     assert!(stdout.contains("fixed in: 3.1.1"));
     assert!(stdout.contains("https://example.com/adv"));
-    assert!(stdout.contains("2 package(s) could not be checked:"));
+    assert!(stdout.contains("1 package(s) could not be checked:"));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("error: audit found vulnerabilities"),
@@ -270,7 +271,8 @@ async fn run_cli_in(
         let mut cmd = std::process::Command::new(BIN);
         cmd.args(&args)
             .current_dir(&dir)
-            .env("PIXI_AUDIT_BASE_URL", base_url);
+            .env("PIXI_AUDIT_BASE_URL", &base_url)
+            .env("PIXI_AUDIT_PYPI_BASE_URL", &base_url);
         if let Some(path) = path_override {
             cmd.env("PATH", path);
         }
@@ -288,7 +290,7 @@ async fn basilisk_upstream_fix_is_rendered() {
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("CVE-2026-50219  UNKNOWN   fix released upstream: 2.8.2"),
+        stdout.contains("CVE-2026-50219  fix released upstream: 2.8.2"),
         "stdout: {stdout}"
     );
     assert!(
@@ -402,7 +404,10 @@ async fn bare_invocation_outside_a_workspace_exits_2() {
 async fn fix_runs_pixi_update_and_reaudits() {
     use std::os::unix::fs::PermissionsExt;
 
-    let workspace = temp_workspace("pixi.toml", "[workspace]\nname = \"demo\"\n");
+    let workspace = temp_workspace(
+        "pixi.toml",
+        "[workspace]\nname = \"demo\"\n\n[dependencies]\nopenssl = \">=3.1.0,<4\"\n",
+    );
     // "Fixed" lockfile: openssl bumped to 3.1.1 (the mock only flags 3.1.0).
     let fixed_lock = std::fs::read_to_string(lockfile())
         .unwrap()
@@ -439,9 +444,16 @@ async fn fix_runs_pixi_update_and_reaudits() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
     assert!(
+        stderr.contains("fixed: raised 1 manifest constraint to known fixed versions"),
+        "stderr: {stderr}"
+    );
+    assert!(
         stderr.contains("fixed: resolved 1 of 1 vulnerabilities via pixi update"),
         "stderr: {stderr}"
     );
+    let manifest = std::fs::read_to_string(workspace.path().join("pixi.toml")).unwrap();
+    assert!(manifest.contains(">=3.1.1"), "manifest: {manifest}");
+    assert!(manifest.contains("<4"), "manifest: {manifest}");
     let args = std::fs::read_to_string(workspace.path().join("pixi-args.txt")).unwrap();
     assert!(args.contains("update"), "pixi argv: {args}");
     assert!(args.contains("--manifest-path"), "pixi argv: {args}");

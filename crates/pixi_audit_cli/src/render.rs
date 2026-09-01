@@ -9,14 +9,18 @@ pub fn render_human(report: &AuditReport) -> String {
     for (header, findings) in grouped(&report.vulnerabilities) {
         writeln!(out, "{header}").unwrap();
         for finding in findings {
-            writeln!(
-                out,
-                "  {}  {}{}",
-                finding.id,
-                severity_cell(finding.severity),
-                fix_note(finding)
-            )
-            .unwrap();
+            if finding.severity == SeverityBand::Unknown {
+                writeln!(out, "  {}{}", finding.id, fix_note(finding)).unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "  {}  {}{}",
+                    finding.id,
+                    severity_cell(finding.severity),
+                    fix_note(finding)
+                )
+                .unwrap();
+            }
             if let Some(url) = &finding.url {
                 writeln!(out, "  {}", style(url).dim()).unwrap();
             }
@@ -134,7 +138,8 @@ fn severity_cell(band: SeverityBand) -> String {
     let styled = match band {
         SeverityBand::Critical | SeverityBand::High => style(text).red().bold(),
         SeverityBand::Medium => style(text).yellow(),
-        SeverityBand::Low | SeverityBand::Unknown => style(text).dim(),
+        SeverityBand::Low => style(text).dim(),
+        SeverityBand::Unknown => unreachable!("unknown severity is omitted from human output"),
     };
     styled.to_string()
 }
@@ -259,7 +264,8 @@ mod tests {
             ..Default::default()
         };
         let text = render_human(&report);
-        assert!(text.contains("CVE-2026-0003  UNKNOWN   no known fixed version"));
+        assert!(text.contains("CVE-2026-0003  no known fixed version"));
+        assert!(!text.contains("UNKNOWN"));
     }
 
     #[test]
