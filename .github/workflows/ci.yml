@@ -21,10 +21,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Test (default features)
+      - name: Test
         run: cargo test --workspace
-      - name: Test (all features)
-        run: cargo test --workspace --all-features
       - name: Check and test without default features
         run: |
           cargo check --workspace --no-default-features --all-targets

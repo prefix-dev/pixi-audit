@@ -21,11 +21,15 @@ pub enum LockFileAuditError {
     #[error("the lock file contains no environment named '{name}'")]
     UnknownEnvironment { name: String },
     /// A filter named a platform no selected environment contains.
-    #[error("the lock file contains no platform named '{name}'")]
+    #[error("the selected environments contain no platform named '{name}'")]
     UnknownPlatform { name: String },
     #[error(transparent)]
     #[diagnostic(transparent)]
     Audit(#[from] AuditError),
+}
+
+fn is_selected(filter: &[String], name: &str) -> bool {
+    filter.is_empty() || filter.iter().any(|candidate| candidate == name)
 }
 
 /// Collects deduplicated packages to audit from the lock file, together with
@@ -48,11 +52,14 @@ pub fn collect_packages(
         }
     }
     for name in platform_filter {
-        let known = lock_file.environments().any(|(_, environment)| {
-            environment
-                .packages_by_platform()
-                .any(|(platform, _)| platform.name().as_str() == name.as_str())
-        });
+        let known = lock_file
+            .environments()
+            .any(|(environment_name, environment)| {
+                is_selected(environment_filter, environment_name)
+                    && environment
+                        .packages_by_platform()
+                        .any(|(platform, _)| platform.name().as_str() == name.as_str())
+            });
         if !known {
             return Err(LockFileAuditError::UnknownPlatform { name: name.clone() });
         }
@@ -65,17 +72,11 @@ pub fn collect_packages(
     let mut dedup: BTreeMap<DedupKey, BTreeSet<String>> = BTreeMap::new();
 
     for (environment_name, environment) in lock_file.environments() {
-        if !environment_filter.is_empty()
-            && !environment_filter.iter().any(|e| e == environment_name)
-        {
+        if !is_selected(environment_filter, environment_name) {
             continue;
         }
         for (platform, packages) in environment.packages_by_platform() {
-            if !platform_filter.is_empty()
-                && !platform_filter
-                    .iter()
-                    .any(|p| p.as_str() == platform.name().as_str())
-            {
+            if !is_selected(platform_filter, platform.name().as_str()) {
                 continue;
             }
             for package in packages {
@@ -133,6 +134,7 @@ pub async fn audit_lock_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{basilisk_client, spawn_router};
 
     /// A small but realistic lock file: two environments sharing an openssl
     /// build from conda-forge, plus a bioconda package and a PyPI wheel in
@@ -248,6 +250,20 @@ packages:
     }
 
     #[test]
+    fn environment_and_platform_filters_must_intersect() {
+        let err = collect_packages(
+            &fixture(),
+            &["prod".to_string()],
+            &["osx-arm64".to_string()],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, LockFileAuditError::UnknownPlatform { name } if name == "osx-arm64"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn empty_lock_file_is_an_error() {
         let empty = LockFile::default();
         let err = collect_packages(&empty, &[], &[]).unwrap_err();
@@ -299,12 +315,8 @@ packages:
                     }))
                 }),
             );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let base = url::Url::parse(&format!("http://{addr}/")).unwrap();
-        let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
-        let client = BasiliskClient::new(http, base.clone());
+        let base = spawn_router(app).await;
+        let client = basilisk_client(base.clone());
         let pypi_client = PypiAuditClient::new(base).unwrap();
 
         let report = audit_lock_file(
@@ -325,7 +337,7 @@ packages:
         assert_eq!(finding.severity, crate::report::SeverityBand::Critical);
         assert_eq!(finding.environments, vec!["default", "prod"]);
 
-        // samtools (bioconda) is unchecked; requests is audited through uv-audit.
+        // samtools (bioconda) is unchecked; requests is audited through OSV.
         assert_eq!(report.summary.unchecked, 1);
         assert_eq!(report.summary.audited, 2);
     }

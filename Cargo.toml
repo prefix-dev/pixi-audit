@@ -5,10 +5,10 @@ resolver = "3"
 [workspace.package]
 authors = ["pixi contributors <hi@prefix.dev>"]
 edition = "2024"
-homepage = "https://github.com/prefix-dev/pixi-audit"
+homepage = "https://github.com/prefix-dev/pixi_audit"
 license = "BSD-3-Clause"
 readme = "README.md"
-repository = "https://github.com/prefix-dev/pixi-audit"
+repository = "https://github.com/prefix-dev/pixi_audit"
 rust-version = "1.95"
 
 [workspace.dependencies]
@@ -37,10 +37,5 @@ tokio = "1.43.0"
 toml = "1.0"
 toml_edit = "0.25"
 url = "2.5"
-uv-audit = { version = "0.0.67", default-features = false }
-uv-cache = "0.0.67"
-uv-client = "0.0.67"
-uv-configuration = "0.0.67"
 uv-normalize = "0.0.67"
 uv-pep440 = "0.0.67"
-uv-redacted = "0.0.67"
