@@ -159,6 +159,8 @@ Install the current checkout with Cargo through the Pixi environment using:
 pixi run install
 ```
 
+Release automation and trusted-publisher setup are documented in [RELEASING.md](RELEASING.md).
+
 ## License
 
 BSD-3-Clause. See [LICENSE](LICENSE).
