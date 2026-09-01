@@ -193,6 +193,21 @@ fn vuln_doc_nofix_medium() -> serde_json::Value {
     })
 }
 
+fn vuln_doc_basilisk_upstream_fix() -> serde_json::Value {
+    serde_json::json!({
+        "id": "CVE-2026-50219",
+        "summary": "Known upstream fix",
+        "affected": [{
+            "package": {"ecosystem": "conda-forge", "name": "openssl"},
+            "versions": ["3.1.0"],
+            "database_specific": {"basilisk": {
+                "fix_version": "2.8.2",
+                "conda_publication": "not_published"
+            }}
+        }]
+    })
+}
+
 /// Mock that serves `doc` for openssl at `vulnerable_version` only.
 async fn spawn_mock_versioned(doc: serde_json::Value, vulnerable_version: &str) -> String {
     let vuln_id = doc["id"].as_str().unwrap().to_string();
@@ -263,6 +278,23 @@ async fn run_cli_in(
     })
     .await
     .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn basilisk_upstream_fix_is_rendered() {
+    let base = spawn_mock_versioned(vuln_doc_basilisk_upstream_fix(), "3.1.0").await;
+    let output = run_cli(base, vec![lockfile()]).await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("CVE-2026-50219  UNKNOWN   fix released upstream: 2.8.2"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("no known fixed version"),
+        "stdout: {stdout}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
