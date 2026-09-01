@@ -1,176 +1,163 @@
 # pixi-audit
 
-Audit packages in a [`pixi.lock`](https://pixi.sh/latest/workspace/lockfile/) file for known vulnerabilities.
+`pixi-audit` checks the packages in a [`pixi.lock`](https://pixi.sh/latest/workspace/lockfile/) for known vulnerabilities. It audits conda-forge packages with [Basilisk](https://github.com/prefix-dev/basilisk) and PyPI packages with [OSV](https://osv.dev).
 
-`pixi-audit` queries [basilisk](https://github.com/prefix-dev/basilisk) for conda-forge packages and [OSV](https://osv.dev) through `uv-audit` for PyPI packages. It reports affected packages, severity, available fixes, and packages that could not be checked. It can be used as either a `pixi audit` extension or a Rust library.
-
-> [!NOTE]
-> Conda-forge packages are audited against basilisk, while PyPI packages are audited against OSV through Astral's `uv-audit` crate. Packages from bioconda, custom channels, and source dependencies are listed as unchecked rather than silently treated as safe.
+It works as both a `pixi audit` extension and a standalone CLI.
 
 ## Install
 
-Install the CLI from a checkout:
+From a local checkout, Pixi can build and install the extension directly:
 
 ```console
-$ cargo install --path crates/pixi_audit_cli
+pixi global install --path .
 ```
 
-Cargo places the `pixi-audit` executable on `PATH`. pixi discovers executables named `pixi-<command>` as extensions, so both forms work:
+Or install it with Cargo:
 
 ```console
-$ pixi audit pixi.lock
-$ pixi-audit pixi.lock
+cargo install --path crates/pixi_audit_cli --locked
 ```
 
-## Usage
-
-Audit every environment and platform in a lock file:
+Both commands install `pixi-audit`. Pixi discovers executables named `pixi-<command>` as extensions, so these are equivalent:
 
 ```console
-$ pixi audit pixi.lock
+pixi audit --help
+pixi-audit --help
 ```
 
-Limit the audit to one or more environments or platforms:
+## Use
+
+Run the command inside a Pixi workspace to discover its manifest and lock file:
 
 ```console
-$ pixi audit pixi.lock \
-    --environment default \
-    --environment production \
-    --platform linux-64
+pixi audit
 ```
 
-Ignore an advisory by its vulnerability ID or any alias. Matching is case-insensitive, and ignored findings remain visible in the report:
+You can also pass a lock file explicitly:
 
 ```console
-$ pixi audit pixi.lock --ignore CVE-2026-1234 --ignore GHSA-xxxx-yyyy-zzzz
+pixi audit path/to/pixi.lock
 ```
 
-Emit the complete report as JSON:
+Filter by environment or platform when a lock file contains more than you want to check:
 
 ```console
-$ pixi audit pixi.lock --json > audit-report.json
+pixi audit \
+  --environment production \
+  --platform linux-64
 ```
 
-### Options
+Unknown environment and platform names are errors. A typo should not produce an empty, clean-looking audit.
 
-```text
-Usage: pixi-audit [OPTIONS] <LOCKFILE>
+### Ignore known findings
 
-Arguments:
-  <LOCKFILE>  Path to the pixi.lock file to audit
-
-Options:
-      --environment <ENV>       Audit only this environment (repeatable)
-      --platform <PLATFORM>     Audit only this platform (repeatable)
-      --ignore <ID>             Vulnerability ID or alias to ignore (repeatable)
-      --json                    Emit pretty-printed JSON on stdout
-  -h, --help                    Print help
-  -V, --version                 Print version
-```
-
-Unknown environment and platform names are errors. This prevents a typo from producing an empty, clean-looking audit.
-
-### Exit codes
-
-| Code | Meaning |
-| ---: | --- |
-| `0` | Audit completed with no non-ignored vulnerabilities |
-| `1` | Audit completed and found vulnerabilities |
-| `2` | The audit could not run, for example because of an invalid lock file, filter, or API response |
-
-Progress and diagnostics are written to stderr. Human-readable or JSON results are written to stdout, so `--json` can be safely piped to another command. Each HTTP request has a 30-second timeout.
-
-### API endpoint
-
-The default conda endpoint is `https://api.basilisk.prefix.dev`. Override it for a self-hosted OSV-compatible service with `PIXI_AUDIT_BASE_URL`:
+Ignore an advisory by its vulnerability ID or one of its aliases:
 
 ```console
-$ PIXI_AUDIT_BASE_URL=https://audit.example.com pixi audit pixi.lock
+pixi audit --ignore CVE-2026-1234
 ```
 
-The service must implement `POST /v1/querybatch` and `GET /v1/vulns/{id}`.
-
-PyPI auditing uses `uv-audit` with `https://api.osv.dev` by default. Override that endpoint with `PIXI_AUDIT_PYPI_BASE_URL`:
+Ignored findings stay visible in the report. If you only want to ignore an advisory until a fix exists, use:
 
 ```console
-$ PIXI_AUDIT_PYPI_BASE_URL=https://osv.example.com pixi audit pixi.lock
-```
-
-## Audit behavior
-
-- Packages are deduplicated across the selected environments and platforms.
-- Withdrawn advisories are skipped.
-- Severity is derived from CVSS v2, v3, or v4 data for basilisk findings. Severity filtering applies only to conda findings.
-- A failed vulnerability detail request fails the audit. A missing Basilisk detail
-  document is kept as a finding with unknown severity; PyPI detail failures from
-  `uv-audit` fail the audit.
-
-## Rust crates
-
-This workspace contains three crates:
-
-- **`pixi_audit_cli`** provides the `pixi-audit` executable and human-readable report renderer.
-- **`pixi_audit`** collects packages from lock files, queries the vulnerability API, applies ignore rules, classifies CVSS v2/v3/v4 severity, and builds an `AuditReport`. Its default `lock` feature enables `rattler_lock` integration.
-- **`osv_protocol`** provides serializable request, response, and vulnerability-document types for OSV-compatible clients and servers. Ecosystem names are represented as strings, allowing values such as `conda-forge` that are not enumerated by the upstream `osv` crate.
-
-Try the library against the included example lock file:
-
-```console
-$ cargo run -p pixi_audit --example audit_lockfile -- \
-    crates/pixi_audit/examples/pixi.lock | jq .
-```
-
-`pixi audit` can also be invoked bare inside a workspace — it walks up from
-the current directory to find `pixi.toml` (or `pyproject.toml` with
-`[tool.pixi]`) and audits the workspace's `pixi.lock`:
-
-```shell
-pixi audit                                # discover the workspace
-pixi audit --severity high                # filter conda findings to high/critical
 pixi audit --ignore-until-fixed CVE-2026-7777
-pixi audit --fix                          # raise constraints, update packages, re-audit
 ```
 
-Persistent configuration lives in the workspace manifest:
+The finding returns as soon as either an ecosystem-specific or upstream fix is known.
+
+### Set a severity threshold
+
+Use `--severity` to fail only on conda findings at or above a given level:
+
+```console
+pixi audit --severity high
+```
+
+Accepted values are `low`, `medium`, `high`, and `critical`. Findings with unknown severity still fail the audit. The threshold does not apply to PyPI findings, which are currently reported with unknown severity.
+
+### Update vulnerable dependencies
+
+`--fix` raises matching direct dependency constraints to the lowest known compatible fixed version, runs `pixi update`, and audits the updated lock file again:
+
+```console
+pixi audit --fix
+```
+
+Existing upper bounds are preserved. Transitive dependencies and Git, path, or URL dependencies without a version are left alone.
+
+### Write JSON
+
+```console
+pixi audit --json > audit-report.json
+```
+
+Progress and diagnostics go to stderr. The report goes to stdout, so redirecting or piping JSON is safe.
+
+## Configuration
+
+Keep recurring audit settings in the workspace manifest:
 
 ```toml
 [tool.pixi-audit]
-ignore = ["CVE-2023-0464"]              # always suppress
-ignore-until-fixed = ["CVE-2026-7777"]  # suppress until a fix is released
-severity = "high"                       # low | medium | high | critical
+ignore = ["CVE-2023-0464"]
+ignore-until-fixed = ["CVE-2026-7777"]
+severity = "high"
 ```
 
-Ignore lists from the config and the command line are combined;
-`--severity` on the command line overrides the config. Severity filtering applies
-only to conda findings. `--fix` raises matching direct dependency constraints in
-`pixi.toml` or `[tool.pixi]` to the lowest compatible known fixed version while
-preserving existing upper bounds, runs `pixi update`, and reports what was
-resolved. Git, path, URL, and transitive dependencies without a matching
-manifest entry are not added or rewritten.
+Command-line ignore lists are combined with the manifest values. A command-line severity overrides the configured value.
+
+## Exit codes
+
+| Code | Meaning |
+| ---: | --- |
+| `0` | The audit completed without actionable vulnerabilities |
+| `1` | The audit found actionable vulnerabilities |
+| `2` | The audit could not run |
+
+## Coverage
+
+Packages are deduplicated across the selected environments and platforms. Withdrawn advisories are skipped.
+
+Conda-forge packages are checked against Basilisk. PyPI packages are checked directly against OSV. Packages from bioconda, custom channels, and source dependencies are reported as unchecked instead of being treated as safe.
+
+The default endpoints are:
+
+- `https://api.basilisk.prefix.dev` for conda-forge packages
+- `https://api.osv.dev` for PyPI packages
+
+Override them with `PIXI_AUDIT_BASE_URL` and `PIXI_AUDIT_PYPI_BASE_URL` respectively. Each HTTP request has a 30-second timeout.
+
+## Rust crates
+
+The workspace contains three crates:
+
+- `pixi_audit_cli` provides the `pixi-audit` executable and report rendering.
+- `pixi_audit` reads lock files, queries the audit services, and builds an `AuditReport`.
+- `osv_protocol` contains serializable types for OSV-compatible clients and servers.
+
+The `pixi_audit` crate enables `rattler_lock` support by default. To try it with the included example lock file:
+
+```console
+cargo run -p pixi_audit --example audit_lockfile -- \
+  crates/pixi_audit/examples/pixi.lock
+```
 
 ## Development
 
-The workspace requires Rust 1.95 or newer, matching `uv-audit`'s MSRV. Run the same checks as CI with:
+Pixi installs the pinned Rust toolchain and the compilers needed by `pixi-build-rust`:
 
 ```console
-$ cargo fmt --all --check
-$ cargo clippy --workspace --all-targets --all-features -- -D warnings
-$ cargo test --workspace
-$ cargo test --workspace --all-features
-$ cargo check --workspace --no-default-features --all-targets
-$ cargo test -p pixi_audit --no-default-features
+pixi install
+pixi run check
 ```
 
-Tests use in-process mock HTTP servers and require no network access or credentials.
+`pixi run check` runs formatting, Clippy, the workspace tests, and the no-default-features checks from CI. Tests use local mock HTTP servers and do not need credentials.
 
-## Migration notes
+Install the current checkout with Cargo through the Pixi environment using:
 
-The crates were extracted from `prefix-dev/pixi#6682`. Compared with the original `audit-command` branch:
-
-- `AuditPackage.version` and `UncheckedPackage.version` are optional. Packages without a known version are not queried and are reported as unchecked.
-- `Finding.fixed_versions` contains fixes published in the package's own ecosystem; fixes known upstream but not published there are in `upstream_fixed_versions`. For conda-forge entries, pixi-audit uses Basilisk's validated top-level `fix_version` and `conda_publication` metadata when present.
-- `AuditError::Status` includes the API's error message when available.
-- Lock-file collection is available through `pixi_audit::lock::collect_packages`, and channel classification through `PackageEcosystem::from_channel_url`.
+```console
+pixi run install
+```
 
 ## License
 

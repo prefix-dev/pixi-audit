@@ -1,11 +1,15 @@
 //! Audit locked packages for known vulnerabilities against an
 //! OSV-compatible vulnerability API (basilisk).
 
+mod advisory;
+mod audit;
 pub mod client;
 mod cvss_v2;
 #[cfg(feature = "lock")]
 pub mod lock;
 pub mod report;
+#[cfg(test)]
+mod test_support;
 
 pub use client::{
     AuditError, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,

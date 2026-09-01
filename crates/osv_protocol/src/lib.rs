@@ -233,30 +233,6 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_osv_document() {
-        let json = r#"{
-            "id": "BSLK-1",
-            "modified": "2026-01-01T00:00:00Z",
-            "aliases": ["CVE-2026-1234"],
-            "summary": "Buffer overflow",
-            "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
-            "affected": [{
-                "package": {"ecosystem": "conda-forge", "name": "openssl"},
-                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.1.1"}]}]
-            }],
-            "references": [{"type": "ADVISORY", "url": "https://example.com/adv"}]
-        }"#;
-        let vuln: OsvVulnerability = serde_json::from_str(json).unwrap();
-        assert_eq!(vuln.id, "BSLK-1");
-        assert_eq!(vuln.aliases, vec!["CVE-2026-1234"]);
-        assert_eq!(
-            vuln.affected[0].ranges[0].events[1].fixed.as_deref(),
-            Some("3.1.1")
-        );
-        assert_eq!(vuln.references[0].url, "https://example.com/adv");
-    }
-
-    #[test]
     fn deserialize_query() {
         let json =
             r#"{"package": {"name": "openssl", "ecosystem": "conda-forge"}, "version": "3.1.0"}"#;

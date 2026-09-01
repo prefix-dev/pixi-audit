@@ -1,0 +1,31 @@
+[workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+preview = ["pixi-build"]
+
+[tasks]
+build = "cargo build --workspace"
+fmt = "cargo fmt --all --check"
+install = "cargo install --path crates/pixi_audit_cli --locked"
+lint = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+test = "cargo test --workspace"
+test-minimal = "cargo check --workspace --no-default-features --all-targets && cargo test -p pixi_audit --no-default-features"
+check = { depends-on = ["fmt", "lint", "test", "test-minimal"] }
+
+[package]
+name = "pixi-audit"
+
+[package.build]
+source = { path = "crates/pixi_audit_cli" }
+
+[package.build.backend]
+name = "pixi-build-rust"
+
+[package.build.config]
+binaries = ["pixi-audit"]
+
+[package.build-dependencies]
+rust = "1.95.*"
+
+[dev]
+pixi-audit = { path = "." }
