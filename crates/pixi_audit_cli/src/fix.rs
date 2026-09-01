@@ -9,7 +9,12 @@ use std::str::FromStr;
 
 use miette::{IntoDiagnostic, WrapErr, miette};
 use pixi_audit::AuditReport;
+use rattler_conda_types::{
+    NamelessMatchSpec, Version as CondaVersion, VersionSpec,
+    version_spec::{LogicalOperator, RangeOperator},
+};
 use toml_edit::{DocumentMut, Formatted, Item, Table, Value};
+use uv_pep440::{Version as PypiVersion, VersionSpecifier, VersionSpecifiers};
 
 /// Distinct package names among the report's non-ignored findings, in
 /// first-appearance order.
@@ -23,13 +28,14 @@ pub fn vulnerable_package_names(report: &AuditReport) -> Vec<String> {
     names
 }
 
-/// Raise every matching direct dependency constraint in a Pixi manifest to
-/// the highest known fixed version from the audit report.
+/// Raise matching direct dependency constraints in a Pixi manifest to the
+/// lowest fixed version newer than each vulnerable locked version.
 ///
-/// Registry string requirements and inline/table requirements with a
-/// `version` field are updated. Git, path, and URL dependencies without a
-/// version are left untouched. The original TOML formatting and comments are
-/// retained by `toml_edit`.
+/// Existing upper bounds and build qualifiers are preserved. A requirement is
+/// left unchanged when no known fix satisfies it. Registry string requirements
+/// and inline/table requirements with a `version` field are updated; Git, path,
+/// and URL dependencies without a version are left untouched. The original
+/// TOML formatting and comments are retained by `toml_edit`.
 pub fn bump_manifest_constraints(manifest: &Path, report: &AuditReport) -> miette::Result<usize> {
     let fixes = fixed_versions(report);
     if fixes.is_empty() {
@@ -86,10 +92,16 @@ pub fn run_pixi_update(manifest: &Path, names: &[String]) -> miette::Result<()> 
 fn fixed_versions(report: &AuditReport) -> BTreeMap<(String, String), String> {
     let mut fixes = BTreeMap::new();
     for finding in &report.vulnerabilities {
+        // OSV can publish fixed events for multiple release branches. Pick the
+        // first fix newer than the locked version instead of forcing the
+        // highest (and potentially incompatible) major release.
         let Some(fixed) = finding
             .fixed_versions
             .iter()
-            .max_by(|left, right| compare_versions(left, right, &finding.ecosystem))
+            .filter(|fixed| {
+                compare_versions(fixed, &finding.version, &finding.ecosystem) == Ordering::Greater
+            })
+            .min_by(|left, right| compare_versions(left, right, &finding.ecosystem))
         else {
             continue;
         };
@@ -97,6 +109,8 @@ fn fixed_versions(report: &AuditReport) -> BTreeMap<(String, String), String> {
             normalize_name(&finding.package, &finding.ecosystem),
             finding.ecosystem.clone(),
         );
+        // Multiple advisories for one package must all be resolved, so retain
+        // the greatest of their minimum required fixes.
         fixes
             .entry(key)
             .and_modify(|current: &mut String| {
@@ -173,43 +187,86 @@ fn update_dependencies(
         let Some(fixed) = fixes.get(&key) else {
             continue;
         };
-        let constraint = format!(">={fixed}");
-        if set_constraint(item, &constraint) {
+        if set_constraint(item, fixed, ecosystem) {
             changed += 1;
         }
     }
     changed
 }
 
-fn set_constraint(item: &mut Item, constraint: &str) -> bool {
+fn set_constraint(item: &mut Item, fixed: &str, ecosystem: &str) -> bool {
     if let Some(value) = item.as_value_mut()
-        && set_string_value(value, constraint)
+        && set_string_value(value, fixed, ecosystem)
     {
         return true;
     }
     if let Some(inline) = item.as_inline_table_mut()
         && let Some(version) = inline.get_mut("version")
-        && set_string_value(version, constraint)
+        && set_string_value(version, fixed, ecosystem)
     {
         return true;
     }
     if let Some(table) = item.as_table_mut()
         && let Some(version) = table.get_mut("version").and_then(Item::as_value_mut)
-        && set_string_value(version, constraint)
+        && set_string_value(version, fixed, ecosystem)
     {
         return true;
     }
     false
 }
 
-fn set_string_value(value: &mut Value, constraint: &str) -> bool {
+fn set_string_value(value: &mut Value, fixed: &str, ecosystem: &str) -> bool {
     let Value::String(version) = value else {
         return false;
     };
+    let Some(constraint) = tighten_constraint(version.value(), fixed, ecosystem) else {
+        return false;
+    };
+    if constraint == *version.value() {
+        return false;
+    }
     let decor = version.decor().clone();
-    *version = Formatted::new(constraint.to_string());
+    *version = Formatted::new(constraint);
     *version.decor_mut() = decor;
     true
+}
+
+fn tighten_constraint(current: &str, fixed: &str, ecosystem: &str) -> Option<String> {
+    if ecosystem.eq_ignore_ascii_case("PyPI") {
+        let current = match current.trim() {
+            "" | "*" => VersionSpecifiers::empty(),
+            current => VersionSpecifiers::from_str(current).ok()?,
+        };
+        let fixed = PypiVersion::from_str(fixed).ok()?;
+        if !current.contains(&fixed) {
+            return None;
+        }
+        let lower_bound = VersionSpecifier::greater_than_equal_version(fixed);
+        Some(
+            current
+                .iter()
+                .cloned()
+                .chain(std::iter::once(lower_bound))
+                .collect::<VersionSpecifiers>()
+                .to_string(),
+        )
+    } else {
+        let mut current = current.parse::<NamelessMatchSpec>().ok()?;
+        let fixed = CondaVersion::from_str(fixed).ok()?;
+        if current
+            .version
+            .as_ref()
+            .is_some_and(|constraint| !constraint.matches(&fixed))
+        {
+            return None;
+        }
+        let lower_bound = VersionSpec::Range(RangeOperator::GreaterEquals, fixed);
+        current.version = Some(match current.version.take() {
+            None | Some(VersionSpec::Any) => lower_bound,
+            Some(existing) => VersionSpec::Group(LogicalOperator::And, vec![existing, lower_bound]),
+        });
+        Some(current.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +330,12 @@ mod tests {
             r#"[workspace]
 name = "demo"
 
+[tasks]
+insta-review = {
+    cmd = "cargo insta review",
+    depends-on = ["test"],
+}
+
 [dependencies]
 openssl = ">=1,<4" # keep this comment
 zlib = { version = ">=1", channel = "conda-forge" }
@@ -298,24 +361,31 @@ openssl = { version = ">=1", build = "*_0" }
         assert_eq!(bump_manifest_constraints(&manifest, &report).unwrap(), 3);
         let content = std::fs::read_to_string(&manifest).unwrap();
         let value: toml::Value = toml::from_str(&content).unwrap();
-        assert_eq!(value["dependencies"]["openssl"].as_str(), Some(">=3.1.1"));
+        let openssl = value["dependencies"]["openssl"].as_str().unwrap();
+        assert!(openssl.contains(">=3.1.1"), "constraint: {openssl}");
+        assert!(openssl.contains("<4"), "constraint: {openssl}");
         assert_eq!(
             value["dependencies"]["zlib"]["version"].as_str(),
             Some(">=1")
         );
-        assert_eq!(
-            value["feature"]["test"]["pypi-dependencies"]["requests"].as_str(),
-            Some(">=2.10.0")
-        );
+        let requests = value["feature"]["test"]["pypi-dependencies"]["requests"]
+            .as_str()
+            .unwrap();
+        assert!(requests.contains(">=2.10.0"), "constraint: {requests}");
+        assert!(requests.contains("<3"), "constraint: {requests}");
         assert_eq!(
             value["feature"]["test"]["pypi-dependencies"]["urllib3"]["git"].as_str(),
             Some("https://example.com/urllib3")
         );
-        assert_eq!(
-            value["target"]["linux-64"]["host-dependencies"]["openssl"]["version"].as_str(),
-            Some(">=3.1.1")
+        let target_openssl = value["target"]["linux-64"]["host-dependencies"]["openssl"]["version"]
+            .as_str()
+            .unwrap();
+        assert!(
+            target_openssl.contains(">=3.1.1"),
+            "constraint: {target_openssl}"
         );
         assert!(content.contains("# keep this comment"));
+        assert!(content.contains("insta-review = {"));
     }
 
     #[test]
@@ -347,13 +417,69 @@ requests = { version = ">=2", extras = ["socks"] }
             value["project"]["dependencies"][0].as_str(),
             Some("requests>=2")
         );
-        assert_eq!(
-            value["tool"]["pixi"]["pypi-dependencies"]["requests"]["version"].as_str(),
-            Some(">=2.33.0")
-        );
+        let requests = value["tool"]["pixi"]["pypi-dependencies"]["requests"]["version"]
+            .as_str()
+            .unwrap();
+        assert!(requests.contains(">=2.33.0"), "constraint: {requests}");
         assert_eq!(
             value["tool"]["pixi"]["pypi-dependencies"]["requests"]["extras"][0].as_str(),
             Some("socks")
         );
+    }
+
+    #[test]
+    fn chooses_lowest_fixed_release_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("pixi.toml");
+        std::fs::write(
+            &manifest,
+            r#"[workspace]
+name = "demo"
+
+[pypi-dependencies]
+requests = ">=1,<2"
+"#,
+        )
+        .unwrap();
+        let report = AuditReport {
+            vulnerabilities: vec![finding_with_fix(
+                "requests",
+                "PYSEC-1",
+                "PyPI",
+                &["2.1", "1.5"],
+            )],
+            ..Default::default()
+        };
+
+        assert_eq!(bump_manifest_constraints(&manifest, &report).unwrap(), 1);
+        let content = std::fs::read_to_string(manifest).unwrap();
+        assert!(content.contains(">=1.5"), "manifest: {content}");
+        assert!(content.contains("<2"), "manifest: {content}");
+        assert!(!content.contains(">=2.1"), "manifest: {content}");
+    }
+
+    #[test]
+    fn leaves_constraint_unchanged_when_no_fix_satisfies_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("pixi.toml");
+        let content = r#"[workspace]
+name = "demo"
+
+[pypi-dependencies]
+requests = ">=1,<1.5"
+"#;
+        std::fs::write(&manifest, content).unwrap();
+        let report = AuditReport {
+            vulnerabilities: vec![finding_with_fix(
+                "requests",
+                "PYSEC-1",
+                "PyPI",
+                &["2.0", "1.5"],
+            )],
+            ..Default::default()
+        };
+
+        assert_eq!(bump_manifest_constraints(&manifest, &report).unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(manifest).unwrap(), content);
     }
 }

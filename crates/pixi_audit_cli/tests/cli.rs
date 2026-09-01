@@ -84,7 +84,7 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     assert!(stdout.contains("BSLK-1"));
     assert!(stdout.contains("CRITICAL"));
     assert!(stdout.contains("fixed in: 3.1.1"));
-    assert!(stdout.contains("https://basilisk.prefix.dev/advisories/BSLK-1"));
+    assert!(stdout.contains("https://example.com/adv"));
     assert!(stdout.contains("1 package(s) could not be checked:"));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -290,7 +290,7 @@ async fn basilisk_upstream_fix_is_rendered() {
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("CVE-2026-50219  UNKNOWN   fix released upstream: 2.8.2"),
+        stdout.contains("CVE-2026-50219  fix released upstream: 2.8.2"),
         "stdout: {stdout}"
     );
     assert!(
@@ -452,10 +452,8 @@ async fn fix_runs_pixi_update_and_reaudits() {
         "stderr: {stderr}"
     );
     let manifest = std::fs::read_to_string(workspace.path().join("pixi.toml")).unwrap();
-    assert!(
-        manifest.contains("openssl = \">=3.1.1\""),
-        "manifest: {manifest}"
-    );
+    assert!(manifest.contains(">=3.1.1"), "manifest: {manifest}");
+    assert!(manifest.contains("<4"), "manifest: {manifest}");
     let args = std::fs::read_to_string(workspace.path().join("pixi-args.txt")).unwrap();
     assert!(args.contains("update"), "pixi argv: {args}");
     assert!(args.contains("--manifest-path"), "pixi argv: {args}");

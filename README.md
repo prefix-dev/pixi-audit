@@ -141,9 +141,10 @@ severity = "high"                       # low | medium | high | critical
 Ignore lists from the config and the command line are combined;
 `--severity` on the command line overrides the config. Severity filtering applies
 only to conda findings. `--fix` raises matching direct dependency constraints in
-`pixi.toml` or `[tool.pixi]` to the highest known fixed version, runs
-`pixi update`, and reports what was resolved. Git, path, URL, and transitive
-dependencies without a matching manifest entry are not added or rewritten.
+`pixi.toml` or `[tool.pixi]` to the lowest compatible known fixed version while
+preserving existing upper bounds, runs `pixi update`, and reports what was
+resolved. Git, path, URL, and transitive dependencies without a matching
+manifest entry are not added or rewritten.
 
 ## Development
 

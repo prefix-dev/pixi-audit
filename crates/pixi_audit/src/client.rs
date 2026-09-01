@@ -88,7 +88,13 @@ pub struct PypiAuditClient {
 }
 
 impl PypiAuditClient {
-    pub fn new(base_url: Url) -> Result<Self, AuditError> {
+    pub fn new(mut base_url: Url) -> Result<Self, AuditError> {
+        // uv-audit joins endpoint paths onto this URL. Without a trailing
+        // slash, `Url::join` treats the last path segment as a file and drops
+        // it (for example, `/osv` would become `/v1/querybatch`).
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
         let display_url = DisplaySafeUrl::parse(base_url.as_str()).map_err(|source| {
             AuditError::InvalidPypiBaseUrl {
                 url: base_url,
@@ -432,6 +438,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pypi_base_url_with_deep_path_keeps_all_segments() {
+        let app = Router::new().route(
+            "/a/b/v1/querybatch",
+            post(|| async { Json(serde_json::json!({"results": [{}]})) }),
+        );
+        let base = spawn(app).await;
+        let deep = base.join("a/b").unwrap();
+        assert!(!deep.path().ends_with('/'));
+        let client = PypiAuditClient::new(deep).unwrap();
+        let dependency =
+            uv_audit::Dependency::new("requests".parse().unwrap(), "2.32.0".parse().unwrap());
+
+        let findings = client
+            .inner()
+            .query_batch(&[dependency], uv_audit::osv::Filter::All)
+            .await
+            .unwrap();
+        assert!(findings.is_empty());
     }
 
     #[tokio::test]

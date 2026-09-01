@@ -12,9 +12,6 @@ use crate::{
 /// How many `GET /v1/vulns/{id}` requests to keep in flight.
 const MAX_CONCURRENT_DETAIL_FETCHES: usize = 16;
 
-/// Human-readable advisory pages for findings returned by Basilisk.
-const BASILISK_ADVISORY_BASE_URL: &str = "https://basilisk.prefix.dev/advisories";
-
 /// Where a locked package comes from, for vulnerability-query purposes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -326,13 +323,12 @@ fn fixed_versions(
     (same_ecosystem, upstream)
 }
 
-fn basilisk_advisory_url(id: &str) -> String {
-    let mut url = url::Url::parse(BASILISK_ADVISORY_BASE_URL)
-        .expect("embedded Basilisk advisory URL is valid");
-    url.path_segments_mut()
-        .expect("Basilisk advisory URL can be a base")
-        .push(id);
-    url.into()
+fn advisory_url(doc: &OsvVulnerability) -> Option<String> {
+    doc.references
+        .iter()
+        .find(|reference| reference.kind.as_deref() == Some("ADVISORY"))
+        .or_else(|| doc.references.first())
+        .map(|reference| reference.url.clone())
 }
 
 /// Audits `packages` against the vulnerability database, applying `ignore`
@@ -518,7 +514,7 @@ pub async fn audit(
                     fixed_versions,
                     upstream_fixed_versions,
                     summary: doc.summary.clone(),
-                    url: Some(basilisk_advisory_url(&doc.id)),
+                    url: advisory_url(doc),
                     ignore_reason: None,
                 },
                 &ignore_set,
@@ -1269,10 +1265,7 @@ mod tests {
         assert_eq!(finding.id, "BSLK-1");
         assert_eq!(finding.severity, SeverityBand::Critical);
         assert_eq!(finding.fixed_versions, vec!["3.1.1"]);
-        assert_eq!(
-            finding.url.as_deref(),
-            Some("https://basilisk.prefix.dev/advisories/BSLK-1")
-        );
+        assert_eq!(finding.url.as_deref(), Some("https://example.com/adv"));
 
         // PyPI and clean conda-forge packages are audited and not listed as unchecked.
         assert!(report.unchecked.is_empty());

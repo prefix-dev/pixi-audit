@@ -35,7 +35,7 @@ tempfile = "3"
 thiserror = "2.0.12"
 tokio = "1.43.0"
 toml = "1.0"
-toml_edit = "0.22"
+toml_edit = "0.25"
 url = "2.5"
 uv-audit = { version = "0.0.67", default-features = false }
 uv-cache = "0.0.67"
