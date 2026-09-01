@@ -158,7 +158,7 @@ Tests use in-process mock HTTP servers and require no network access or credenti
 The crates were extracted from `prefix-dev/pixi#6682`. Compared with the original `audit-command` branch:
 
 - `AuditPackage.version` and `UncheckedPackage.version` are optional. Packages without a known version are not queried and are reported as unchecked.
-- `Finding.fixed_versions` contains fixes from the package's own ecosystem; fixes published only in another ecosystem are in `upstream_fixed_versions`.
+- `Finding.fixed_versions` contains fixes published in the package's own ecosystem; fixes known upstream but not published there are in `upstream_fixed_versions`. For conda-forge entries, pixi-audit uses Basilisk's validated top-level `fix_version` and `conda_publication` metadata when present.
 - `AuditError::Status` includes the API's error message when available.
 - Lock-file collection is available through `pixi_audit::lock::collect_packages`, and channel classification through `PackageEcosystem::from_channel_url`.
 

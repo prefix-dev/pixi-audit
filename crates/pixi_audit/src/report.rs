@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use futures::{StreamExt, TryStreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     client::{AuditError, BasiliskClient},
@@ -220,13 +220,46 @@ fn build_query(package: &AuditPackage) -> OsvQuery {
     }
 }
 
-/// Fixed versions for `package_name` from an OSV document, split by origin:
-/// the first vector holds `fixed` events from `affected` entries in the
-/// queried `ecosystem` (or entries naming no package at all), the second
-/// holds fixes for the same package name in *other* ecosystems. basilisk's
-/// conda-forge entries carry no ranges — the fix data lives on the upstream
-/// (PyPI/NVD/...) entries it preserves — so conflating the two would present
-/// upstream release numbers as conda-forge fixed versions.
+#[derive(Debug, Deserialize)]
+struct BasiliskDatabaseSpecific {
+    basilisk: BasiliskFixMetadata,
+}
+
+#[derive(Debug, Deserialize)]
+struct BasiliskFixMetadata {
+    fix_version: String,
+    conda_publication: CondaPublication,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CondaPublication {
+    Published,
+    NotPublished,
+    Unknown,
+}
+
+fn basilisk_fix_metadata(
+    database_specific: Option<&serde_json::Value>,
+) -> Option<BasiliskFixMetadata> {
+    let metadata: BasiliskDatabaseSpecific =
+        serde_json::from_value(database_specific?.clone()).ok()?;
+    (!metadata.basilisk.fix_version.trim().is_empty()).then_some(metadata.basilisk)
+}
+
+fn push_unique(versions: &mut Vec<String>, version: &str) {
+    if !versions.iter().any(|existing| existing == version) {
+        versions.push(version.to_string());
+    }
+}
+
+/// Fixed versions for `package_name` from an OSV document, split by origin.
+///
+/// Standard OSV `fixed` events retain their generic behavior: entries in the
+/// queried ecosystem (or entries naming no package) are same-ecosystem fixes,
+/// while matching package entries in other ecosystems are upstream fixes.
+/// Basilisk's extension is more strict and is considered only for conda-forge
+/// queries on entries that explicitly match both the package and ecosystem.
 fn fixed_versions(
     doc: &OsvVulnerability,
     package_name: &str,
@@ -255,10 +288,31 @@ fn fixed_versions(
         };
         for range in &affected.ranges {
             for event in &range.events {
-                if let Some(fixed) = &event.fixed
-                    && !versions.contains(fixed)
-                {
-                    versions.push(fixed.clone());
+                if let Some(fixed) = &event.fixed {
+                    push_unique(versions, fixed);
+                }
+            }
+        }
+
+        let basilisk_target_matches = ecosystem.eq_ignore_ascii_case("conda-forge")
+            && affected.package.as_ref().is_some_and(|package| {
+                package
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(package_name))
+                    && package.ecosystem.as_deref().is_some_and(|entry_ecosystem| {
+                        entry_ecosystem.eq_ignore_ascii_case(ecosystem)
+                    })
+            });
+        if basilisk_target_matches
+            && let Some(metadata) = basilisk_fix_metadata(affected.database_specific.as_ref())
+        {
+            match metadata.conda_publication {
+                CondaPublication::Published => {
+                    push_unique(&mut same_ecosystem, &metadata.fix_version)
+                }
+                CondaPublication::NotPublished | CondaPublication::Unknown => {
+                    push_unique(&mut upstream, &metadata.fix_version)
                 }
             }
         }
@@ -550,6 +604,64 @@ mod tests {
         .unwrap()
     }
 
+    fn basilisk_fix_doc(conda_publication: &str) -> OsvVulnerability {
+        serde_json::from_value(serde_json::json!({
+            "id": "CVE-2026-50219",
+            "affected": [{
+                "package": {
+                    "ecosystem": "conda-forge",
+                    "name": "libexpat",
+                    "purl": "pkg:conda/conda-forge/libexpat"
+                },
+                "versions": ["2.8.0", "2.8.1"],
+                "database_specific": {
+                    "basilisk": {
+                        "applicability": "evaluated",
+                        "comparator": "conda",
+                        "matcher_version": "nvd_cpe@3",
+                        "fix_version": "2.8.2",
+                        "conda_publication": conda_publication,
+                        "reported_fixes": [{
+                            "source_kind": "nvd",
+                            "source_advisory_id": "CVE-2026-50219",
+                            "reported_fix": "9.9.9",
+                            "conda_publication": "published"
+                        }]
+                    }
+                }
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn basilisk_not_published_fix_is_upstream() {
+        let (fixed, upstream) = fixed_versions(
+            &basilisk_fix_doc("not_published"),
+            "libexpat",
+            "conda-forge",
+        );
+        assert!(fixed.is_empty());
+        assert_eq!(upstream, vec!["2.8.2"]);
+        assert!(!upstream.contains(&"9.9.9".to_string()));
+    }
+
+    #[test]
+    fn basilisk_published_fix_is_in_the_queried_ecosystem() {
+        let (fixed, upstream) =
+            fixed_versions(&basilisk_fix_doc("published"), "libexpat", "conda-forge");
+        assert_eq!(fixed, vec!["2.8.2"]);
+        assert!(upstream.is_empty());
+    }
+
+    #[test]
+    fn basilisk_unknown_publication_is_conservatively_upstream() {
+        let (fixed, upstream) =
+            fixed_versions(&basilisk_fix_doc("unknown"), "libexpat", "conda-forge");
+        assert!(fixed.is_empty());
+        assert_eq!(upstream, vec!["2.8.2"]);
+    }
+
     #[test]
     fn fixed_versions_only_come_from_the_queried_ecosystem() {
         let doc = basilisk_shaped_doc();
@@ -563,6 +675,136 @@ mod tests {
         let (fixed, upstream) = fixed_versions(&doc, "pillow", "PyPI");
         assert_eq!(fixed, vec!["10.2.0"]);
         assert!(upstream.is_empty());
+    }
+
+    #[test]
+    fn missing_or_malformed_basilisk_metadata_falls_back_to_osv_ranges() {
+        let metadata_values = [
+            None,
+            Some(serde_json::json!({"basilisk": {"fix_version": "2.8.2"}})),
+            Some(serde_json::json!({
+                "basilisk": {
+                    "fix_version": 282,
+                    "conda_publication": "published"
+                }
+            })),
+            Some(serde_json::json!({
+                "basilisk": {
+                    "fix_version": "2.8.2",
+                    "conda_publication": "sometimes"
+                }
+            })),
+        ];
+
+        for database_specific in metadata_values {
+            let mut affected = serde_json::json!({
+                "package": {"ecosystem": "conda-forge", "name": "libexpat"},
+                "ranges": [{
+                    "type": "ECOSYSTEM",
+                    "events": [{"introduced": "0"}, {"fixed": "2.8.3"}]
+                }]
+            });
+            if let Some(database_specific) = database_specific {
+                affected["database_specific"] = database_specific;
+            }
+            let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+                "id": "CVE-2026-50219",
+                "affected": [affected]
+            }))
+            .unwrap();
+
+            let (fixed, upstream) = fixed_versions(&doc, "libexpat", "conda-forge");
+            assert_eq!(fixed, vec!["2.8.3"]);
+            assert!(upstream.is_empty());
+        }
+    }
+
+    #[test]
+    fn basilisk_metadata_requires_matching_package_and_ecosystem() {
+        let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+            "id": "CVE-2026-50219",
+            "affected": [
+                {
+                    "package": {"ecosystem": "conda-forge", "name": "other"},
+                    "database_specific": {"basilisk": {
+                        "fix_version": "1.0.0",
+                        "conda_publication": "published"
+                    }}
+                },
+                {
+                    "package": {"ecosystem": "PyPI", "name": "libexpat"},
+                    "database_specific": {"basilisk": {
+                        "fix_version": "2.0.0",
+                        "conda_publication": "not_published"
+                    }}
+                },
+                {
+                    "database_specific": {"basilisk": {
+                        "fix_version": "3.0.0",
+                        "conda_publication": "published"
+                    }}
+                }
+            ]
+        }))
+        .unwrap();
+
+        let (fixed, upstream) = fixed_versions(&doc, "libexpat", "conda-forge");
+        assert!(fixed.is_empty());
+        assert!(upstream.is_empty());
+    }
+
+    #[test]
+    fn non_conda_queries_ignore_basilisk_metadata_but_keep_osv_ranges() {
+        let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+            "id": "PYSEC-2026-1",
+            "affected": [{
+                "package": {"ecosystem": "PyPI", "name": "demo"},
+                "ranges": [{"events": [{"fixed": "4.0.0"}]}],
+                "database_specific": {"basilisk": {
+                    "fix_version": "3.0.0",
+                    "conda_publication": "published"
+                }}
+            }]
+        }))
+        .unwrap();
+
+        let (fixed, upstream) = fixed_versions(&doc, "demo", "PyPI");
+        assert_eq!(fixed, vec!["4.0.0"]);
+        assert!(upstream.is_empty());
+    }
+
+    #[test]
+    fn standard_range_fixes_and_basilisk_metadata_are_deduplicated() {
+        let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+            "id": "CVE-2026-50219",
+            "affected": [
+                {
+                    "package": {"ecosystem": "conda-forge", "name": "libexpat"},
+                    "ranges": [{"events": [
+                        {"fixed": "2.8.2"},
+                        {"fixed": "2.8.2"},
+                        {"fixed": "2.8.3"}
+                    ]}],
+                    "database_specific": {"basilisk": {
+                        "fix_version": "2.8.2",
+                        "conda_publication": "published"
+                    }}
+                },
+                {
+                    "package": {"ecosystem": "PyPI", "name": "libexpat"},
+                    "ranges": [{"events": [
+                        {"fixed": "2.8.2"},
+                        {"fixed": "2.8.4"},
+                        {"fixed": "2.8.4"}
+                    ]}]
+                }
+            ]
+        }))
+        .unwrap();
+
+        let (fixed, upstream) = fixed_versions(&doc, "libexpat", "conda-forge");
+        assert_eq!(fixed, vec!["2.8.2", "2.8.3"]);
+        assert_eq!(upstream, vec!["2.8.4"]);
     }
 
     #[test]
@@ -596,6 +838,24 @@ mod tests {
         assert!(
             upstream.is_empty(),
             "version already reported as fixed must not repeat as upstream: {upstream:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_reference_wins_over_patch_and_issue_links() {
+        let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+            "id": "CVE-2026-50219",
+            "references": [
+                {"type": "FIX", "url": "https://example.com/patch"},
+                {"type": "REPORT", "url": "https://example.com/issue"},
+                {"type": "ADVISORY", "url": "https://example.com/advisory"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            advisory_url(&doc).as_deref(),
+            Some("https://example.com/advisory")
         );
     }
 
@@ -717,6 +977,21 @@ mod tests {
         })
     }
 
+    fn vuln_doc_with_basilisk_upstream_fix() -> serde_json::Value {
+        serde_json::json!({
+            "id": "CVE-2026-50219",
+            "summary": "Known upstream fix",
+            "affected": [{
+                "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                "versions": ["3.1.0"],
+                "database_specific": {"basilisk": {
+                    "fix_version": "3.1.1",
+                    "conda_publication": "not_published"
+                }}
+            }]
+        })
+    }
+
     /// Mock server serving `doc` for every openssl query.
     async fn spawn_mock_serving(doc: serde_json::Value) -> Url {
         let vuln_id = doc["id"].as_str().unwrap().to_string();
@@ -779,6 +1054,22 @@ mod tests {
         // The JSON field serializes kebab-case.
         let json = serde_json::to_value(&report.ignored[0]).unwrap();
         assert_eq!(json["ignore_reason"], "until-fixed");
+    }
+
+    #[tokio::test]
+    async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
+        let base = spawn_mock_serving(vuln_doc_with_basilisk_upstream_fix()).await;
+        let ids = vec!["CVE-2026-50219".to_string()];
+        let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
+            .await
+            .unwrap();
+
+        assert_eq!(report.vulnerabilities.len(), 1);
+        assert!(report.ignored.is_empty());
+        assert_eq!(
+            report.vulnerabilities[0].upstream_fixed_versions,
+            vec!["3.1.1"]
+        );
     }
 
     #[tokio::test]
