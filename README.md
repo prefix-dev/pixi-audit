@@ -101,7 +101,9 @@ $ PIXI_AUDIT_PYPI_BASE_URL=https://osv.example.com pixi audit pixi.lock
 - Packages are deduplicated across the selected environments and platforms.
 - Withdrawn advisories are skipped.
 - Severity is derived from CVSS v2, v3, or v4 data for basilisk findings. Severity filtering applies only to conda findings.
-- A failed vulnerability detail request fails the audit. A missing detail document is kept as a finding with unknown severity.
+- A failed vulnerability detail request fails the audit. A missing Basilisk detail
+  document is kept as a finding with unknown severity; PyPI detail failures from
+  `uv-audit` fail the audit.
 
 ## Rust crates
 

@@ -336,9 +336,10 @@ fn advisory_url(doc: &OsvVulnerability) -> Option<String> {
 ///
 /// A security audit must never silently drop findings, so there is
 /// deliberately no partial-report mode: any detail fetch that fails after
-/// retries fails the audit as a whole. The one exception is a 404 — the
-/// batch index can briefly reference a document that is not served yet —
-/// which degrades to an id-only finding (severity unknown) instead.
+/// retries fails the audit as a whole. A missing Basilisk document is the one
+/// exception: its batch index can briefly reference an id that is not served
+/// yet, so a 404 degrades to an id-only finding with unknown severity. PyPI
+/// detail fetches are handled by `uv-audit`, where any error fails the audit.
 pub async fn audit(
     client: &BasiliskClient,
     pypi_client: &PypiAuditClient,

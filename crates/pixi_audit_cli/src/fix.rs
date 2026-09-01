@@ -13,7 +13,7 @@ use rattler_conda_types::{
     NamelessMatchSpec, Version as CondaVersion, VersionSpec,
     version_spec::{LogicalOperator, RangeOperator},
 };
-use toml_edit::{DocumentMut, Formatted, Item, Table, Value};
+use toml_edit::{DocumentMut, Formatted, Item, TableLike, Value};
 use uv_pep440::{Version as PypiVersion, VersionSpecifier, VersionSpecifiers};
 
 /// Distinct package names among the report's non-ignored findings, in
@@ -50,16 +50,17 @@ pub fn bump_manifest_constraints(manifest: &Path, report: &AuditReport) -> miett
         .into_diagnostic()
         .wrap_err_with(|| format!("'{}' is not valid TOML", manifest.display()))?;
 
-    let root = if manifest.file_name().and_then(|name| name.to_str()) == Some("pyproject.toml") {
-        document
-            .get_mut("tool")
-            .and_then(Item::as_table_mut)
-            .and_then(|tool| tool.get_mut("pixi"))
-            .and_then(Item::as_table_mut)
-            .ok_or_else(|| miette!("'{}' has no [tool.pixi] table", manifest.display()))?
-    } else {
-        document.as_table_mut()
-    };
+    let root: &mut dyn TableLike =
+        if manifest.file_name().and_then(|name| name.to_str()) == Some("pyproject.toml") {
+            document
+                .get_mut("tool")
+                .and_then(Item::as_table_like_mut)
+                .and_then(|tool| tool.get_mut("pixi"))
+                .and_then(Item::as_table_like_mut)
+                .ok_or_else(|| miette!("'{}' has no [tool.pixi] table", manifest.display()))?
+        } else {
+            document.as_table_mut()
+        };
 
     let changed = update_dependency_tables(root, &fixes);
     if changed > 0 {
@@ -153,7 +154,7 @@ fn normalize_name(name: &str, ecosystem: &str) -> String {
 }
 
 fn update_dependency_tables(
-    table: &mut Table,
+    table: &mut dyn TableLike,
     fixes: &BTreeMap<(String, String), String>,
 ) -> usize {
     let mut changed = 0;
@@ -164,12 +165,12 @@ fn update_dependency_tables(
             _ => None,
         };
         if let Some(ecosystem) = ecosystem {
-            if let Some(dependencies) = item.as_table_mut() {
+            if let Some(dependencies) = item.as_table_like_mut() {
                 changed += update_dependencies(dependencies, ecosystem, fixes);
             }
             continue;
         }
-        if let Some(child) = item.as_table_mut() {
+        if let Some(child) = item.as_table_like_mut() {
             changed += update_dependency_tables(child, fixes);
         }
     }
@@ -177,7 +178,7 @@ fn update_dependency_tables(
 }
 
 fn update_dependencies(
-    dependencies: &mut Table,
+    dependencies: &mut dyn TableLike,
     ecosystem: &str,
     fixes: &BTreeMap<(String, String), String>,
 ) -> usize {
@@ -423,6 +424,52 @@ requests = { version = ">=2", extras = ["socks"] }
         assert!(requests.contains(">=2.33.0"), "constraint: {requests}");
         assert_eq!(
             value["tool"]["pixi"]["pypi-dependencies"]["requests"]["extras"][0].as_str(),
+            Some("socks")
+        );
+    }
+
+    #[test]
+    fn bumps_multiline_inline_dependency_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("pixi.toml");
+        std::fs::write(
+            &manifest,
+            r#"[workspace]
+name = "demo"
+
+[feature.test]
+dependencies = {
+    openssl = ">=1,<4",
+}
+pypi-dependencies = {
+    requests = { version = ">=2,<3", extras = ["socks"] },
+}
+"#,
+        )
+        .unwrap();
+        let report = AuditReport {
+            vulnerabilities: vec![
+                finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+                finding_with_fix("requests", "PYSEC-1", "PyPI", &["2.33.0"]),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(bump_manifest_constraints(&manifest, &report).unwrap(), 2);
+        let content = std::fs::read_to_string(manifest).unwrap();
+        let value: toml::Value = toml::from_str(&content).unwrap();
+        let openssl = value["feature"]["test"]["dependencies"]["openssl"]
+            .as_str()
+            .unwrap();
+        assert!(openssl.contains(">=3.1.1"), "constraint: {openssl}");
+        assert!(openssl.contains("<4"), "constraint: {openssl}");
+        let requests = value["feature"]["test"]["pypi-dependencies"]["requests"]["version"]
+            .as_str()
+            .unwrap();
+        assert!(requests.contains(">=2.33.0"), "constraint: {requests}");
+        assert!(requests.contains("<3"), "constraint: {requests}");
+        assert_eq!(
+            value["feature"]["test"]["pypi-dependencies"]["requests"]["extras"][0].as_str(),
             Some("socks")
         );
     }
