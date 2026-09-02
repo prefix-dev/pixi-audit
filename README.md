@@ -137,7 +137,7 @@ pixi audit --json > audit-report.json
 
 Progress and diagnostics go to stderr. The report goes to stdout, so redirecting or piping JSON is safe.
 
-`--format sarif` writes a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log with one rule per vulnerability and package and one result per finding, located at the package's line in `pixi.lock`. Ignored findings are included as suppressed results. GitHub code scanning derives its severity label from the CVSS score in each rule:
+`--format sarif` writes a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log with one rule per vulnerability and package and one result per finding, located at the package's line in `pixi.lock` with the path relative to the repository root. Ignored findings are included as suppressed results. GitHub code scanning derives its severity label from the CVSS score in each rule:
 
 ```yaml
 - run: pixi audit --format sarif > pixi-audit.sarif

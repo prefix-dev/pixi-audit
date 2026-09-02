@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use pixi_audit::{
     AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
     MatchApplicability, PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore,
@@ -59,12 +57,17 @@ fn finding(id: &str, severity: SeverityBand) -> Finding {
     }
 }
 
-fn log(report: &AuditReport) -> serde_json::Value {
+/// The log for `report` over a lock file in a fresh directory outside any
+/// repository, and the URI that file is expected to be written as.
+fn log(report: &AuditReport) -> (serde_json::Value, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pixi.lock");
     let lockfile = LockfileSource {
-        path: Path::new("pixi.lock"),
+        path: &path,
         contents: LOCKFILE,
     };
-    serde_json::to_value(SarifLog::from_report(report, &lockfile)).unwrap()
+    let log = serde_json::to_value(SarifLog::from_report(report, &lockfile)).unwrap();
+    (log, path.to_string_lossy().replace('\\', "/"))
 }
 
 #[test]
@@ -85,7 +88,7 @@ fn one_rule_per_vulnerability_and_package_with_github_properties() {
         },
         ..Default::default()
     };
-    let log = log(&report);
+    let (log, uri) = log(&report);
 
     assert_eq!(log["version"], "2.1.0");
     let driver = &log["runs"][0]["tool"]["driver"];
@@ -123,7 +126,7 @@ fn one_rule_per_vulnerability_and_package_with_github_properties() {
     );
     let text = rule["help"]["text"].as_str().unwrap();
     assert!(text.contains("Fix: fixed in 3.1.1"), "{text}");
-    assert!(text.contains("Lock file: pixi.lock"), "{text}");
+    assert!(text.contains(&format!("Lock file: {uri}")), "{text}");
 }
 
 #[test]
@@ -147,7 +150,7 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
         },
         ..Default::default()
     };
-    let log = log(&report);
+    let (log, uri) = log(&report);
     let results = log["runs"][0]["results"].as_array().unwrap();
     assert_eq!(results.len(), 3);
 
@@ -159,7 +162,7 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
         "CVE-2026-0001: high vulnerability in conda-forge package openssl 3.1.0; fixed in 3.1.1"
     );
     let location = &conda["locations"][0]["physicalLocation"];
-    assert_eq!(location["artifactLocation"]["uri"], "pixi.lock");
+    assert_eq!(location["artifactLocation"]["uri"], uri);
     assert_eq!(location["region"]["startLine"], 8);
     assert!(conda.get("suppressions").is_none());
 
@@ -213,7 +216,7 @@ fn a_package_missing_from_the_lock_file_text_falls_back_to_line_1() {
         },
         ..Default::default()
     };
-    let log = log(&report);
+    let (log, _) = log(&report);
     assert_eq!(
         log["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"],
         1
@@ -221,8 +224,64 @@ fn a_package_missing_from_the_lock_file_text_falls_back_to_line_1() {
 }
 
 #[test]
+fn artifact_uri_is_relative_to_the_git_repository_root() {
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join(".git")).unwrap();
+    let nested = repository.path().join("apps").join("web");
+    std::fs::create_dir_all(&nested).unwrap();
+    let lockfile = nested.join("pixi.lock");
+    std::fs::write(&lockfile, LOCKFILE).unwrap();
+
+    let report = AuditReport {
+        vulnerabilities: vec![finding("CVE-2026-0001", SeverityBand::High)],
+        summary: AuditSummary {
+            audited: 1,
+            vulnerable: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let log = serde_json::to_value(SarifLog::from_report(
+        &report,
+        &LockfileSource {
+            path: &lockfile,
+            contents: LOCKFILE,
+        },
+    ))
+    .unwrap();
+    let result = &log["runs"][0]["results"][0];
+    assert_eq!(result["kind"], "fail");
+    assert_eq!(
+        result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+        "apps/web/pixi.lock"
+    );
+    assert_eq!(
+        log["runs"][0]["invocations"],
+        serde_json::json!([{"executionSuccessful": true}])
+    );
+
+    // Outside any repository and the working directory, the path is used
+    // as given.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let lockfile = elsewhere.path().join("pixi.lock");
+    let log = serde_json::to_value(SarifLog::from_report(
+        &report,
+        &LockfileSource {
+            path: &lockfile,
+            contents: LOCKFILE,
+        },
+    ))
+    .unwrap();
+    let uri = log["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+        ["uri"]
+        .as_str()
+        .unwrap();
+    assert_eq!(uri, lockfile.to_string_lossy().replace('\\', "/"));
+}
+
+#[test]
 fn a_clean_report_has_no_rules_or_results() {
-    let log = log(&AuditReport::default());
+    let (log, _) = log(&AuditReport::default());
     assert_eq!(
         log["runs"][0]["tool"]["driver"]["rules"],
         serde_json::json!([])

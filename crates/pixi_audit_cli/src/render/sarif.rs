@@ -33,7 +33,15 @@ pub struct SarifLog {
 #[serde(rename_all = "camelCase")]
 struct Run {
     tool: Tool,
+    invocations: Vec<Invocation>,
     results: Vec<SarifResult>,
+}
+
+/// The audit ran to completion; a failed audit never produces a log.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Invocation {
+    execution_successful: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,6 +55,7 @@ struct Tool {
 struct Driver {
     name: &'static str,
     version: &'static str,
+    semantic_version: &'static str,
     information_uri: &'static str,
     rules: Vec<Rule>,
 }
@@ -89,6 +98,7 @@ struct MultiformatMessage {
 #[serde(rename_all = "camelCase")]
 struct SarifResult {
     rule_id: String,
+    kind: &'static str,
     level: &'static str,
     message: Message,
     locations: Vec<Location>,
@@ -147,10 +157,14 @@ impl SarifLog {
                     driver: Driver {
                         name: "pixi-audit",
                         version: env!("CARGO_PKG_VERSION"),
+                        semantic_version: env!("CARGO_PKG_VERSION"),
                         information_uri: "https://github.com/prefix-dev/pixi_audit",
                         rules,
                     },
                 },
+                invocations: vec![Invocation {
+                    execution_successful: true,
+                }],
                 results,
             }],
         }
@@ -293,6 +307,7 @@ fn result(finding: &Finding, uri: &str, lockfile_contents: &str) -> SarifResult 
     };
     SarifResult {
         rule_id: rule_id(finding),
+        kind: "fail",
         level: level(finding.severity),
         message: Message {
             text: format!(
@@ -319,16 +334,31 @@ fn result(finding: &Finding, uri: &str, lockfile_contents: &str) -> SarifResult 
     }
 }
 
-/// The lock file path relative to the working directory when it lies
-/// inside it, as code scanning expects, with forward slashes either way.
+/// The lock file path as code scanning expects it: relative to the git
+/// repository containing it, else to the working directory, else as is.
+/// Forward slashes either way.
 fn artifact_uri(path: &Path) -> String {
-    let relative = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf));
-    relative
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let relative_to_root = git_repository_root(&absolute)
+        .and_then(|root| absolute.strip_prefix(root).ok().map(Path::to_path_buf));
+    let relative_to_cwd = || {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| absolute.strip_prefix(cwd).ok().map(Path::to_path_buf))
+    };
+    relative_to_root
+        .or_else(relative_to_cwd)
         .unwrap_or_else(|| path.to_path_buf())
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// The nearest ancestor of `path` holding a `.git` directory, or the
+/// `.git` file of a worktree or submodule.
+fn git_repository_root(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.join(".git").exists())
 }
 
 /// The first line of the lock file naming the package at its version: the

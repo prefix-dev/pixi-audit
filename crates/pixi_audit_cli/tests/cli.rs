@@ -252,12 +252,10 @@ async fn sarif_format_points_at_the_lock_file() {
     assert_eq!(result["ruleId"], "BSLK-1-openssl");
     assert_eq!(result["level"], "error");
     let location = &result["locations"][0]["physicalLocation"];
-    assert!(
-        location["artifactLocation"]["uri"]
-            .as_str()
-            .unwrap()
-            .ends_with("tests/data/pixi.lock"),
-        "{location}"
+    // Relative to this repository's root, as code scanning expects.
+    assert_eq!(
+        location["artifactLocation"]["uri"],
+        "crates/pixi_audit_cli/tests/data/pixi.lock"
     );
     // The openssl package URL is on line 8 of the fixture.
     assert_eq!(location["region"]["startLine"], 8);
