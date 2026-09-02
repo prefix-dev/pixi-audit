@@ -1751,7 +1751,6 @@ dependencies = [
  "axum",
  "cvss",
  "futures",
- "miette",
  "osv_protocol",
  "rattler_lock",
  "reqwest",

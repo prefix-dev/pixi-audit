@@ -157,7 +157,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         .wrap_err("failed to construct the HTTP client")?;
     let http = reqwest_middleware::ClientBuilder::new(http_client).build();
     let client = BasiliskClient::new(http, base_url);
-    let pypi_client = PypiAuditClient::new(pypi_base_url).map_err(miette::Report::new)?;
+    let pypi_client = PypiAuditClient::new(pypi_base_url).into_diagnostic()?;
 
     let ignore_spec = pixi_audit::IgnoreSpec {
         ignore: &ignore,
@@ -172,7 +172,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         ignore_spec,
     )
     .await
-    .map_err(miette::Report::new)?;
+    .into_diagnostic()?;
 
     if !cli.fix {
         return Ok(RunOutcome { report, threshold });
@@ -214,7 +214,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         ignore_spec,
     )
     .await
-    .map_err(miette::Report::new)?;
+    .into_diagnostic()?;
 
     let before_count = report.summary.vulnerable;
     let resolved = before_count.saturating_sub(after.summary.vulnerable);

@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use miette::Diagnostic;
 use rattler_lock::{LockFile, LockedPackage};
 use thiserror::Error;
 
@@ -11,7 +10,7 @@ use crate::{
     report::{AuditPackage, AuditReport, IgnoreSpec, PackageEcosystem, audit},
 };
 
-#[derive(Debug, Error, Diagnostic)]
+#[derive(Debug, Error)]
 pub enum LockFileAuditError {
     #[error("the lock file contains no environments; run `pixi lock` first")]
     EmptyLockFile,
@@ -24,7 +23,6 @@ pub enum LockFileAuditError {
     #[error("the selected environments contain no platform named '{name}'")]
     UnknownPlatform { name: String },
     #[error(transparent)]
-    #[diagnostic(transparent)]
     Audit(#[from] AuditError),
 }
 
