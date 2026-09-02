@@ -197,7 +197,7 @@ pub async fn audit(
                         .version
                         .clone()
                         .expect("only packages with a version are queried"),
-                    ecosystem: ecosystem.to_string(),
+                    ecosystem: package.ecosystem.clone(),
                     environments: package.environments.clone(),
                     id: doc.id.clone(),
                     aliases: doc.aliases.clone(),
@@ -230,7 +230,7 @@ pub async fn audit(
             report.unchecked.push(UncheckedPackage {
                 package: package.name.clone(),
                 version: package.version.clone(),
-                ecosystem: package.ecosystem.osv_ecosystem().to_string(),
+                ecosystem: package.ecosystem.clone(),
                 environments: package.environments.clone(),
             });
         }

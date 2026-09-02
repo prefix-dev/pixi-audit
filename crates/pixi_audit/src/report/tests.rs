@@ -1,5 +1,26 @@
 use super::*;
 
+#[test]
+fn severity_band_round_trips_through_its_name() {
+    for band in SeverityBand::ALL {
+        assert_eq!(band.name().parse::<SeverityBand>(), Ok(band));
+        assert_eq!(band.to_string(), band.name());
+    }
+    assert!("HIGH".parse::<SeverityBand>().is_err());
+    assert!("severe".parse::<SeverityBand>().is_err());
+}
+
+#[test]
+fn ecosystem_serializes_as_osv_string() {
+    let json = serde_json::to_value([
+        PackageEcosystem::CondaForge,
+        PackageEcosystem::Pypi,
+        PackageEcosystem::Other("bioconda".to_string()),
+    ])
+    .unwrap();
+    assert_eq!(json, serde_json::json!(["conda-forge", "PyPI", "bioconda"]));
+}
+
 fn severity(kind: &str, score: &str) -> crate::types::OsvSeverity {
     crate::types::OsvSeverity {
         kind: kind.to_string(),

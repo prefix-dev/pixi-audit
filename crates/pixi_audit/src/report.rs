@@ -1,6 +1,9 @@
 //! Audit inputs and report types.
 
-use serde::Serialize;
+use std::str::FromStr;
+
+use serde::{Serialize, Serializer};
+use thiserror::Error;
 
 use crate::types::OsvSeverity;
 
@@ -9,8 +12,7 @@ use crate::types::OsvSeverity;
 pub use crate::audit::audit;
 
 /// Where a locked package comes from, for vulnerability-query purposes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PackageEcosystem {
     /// A conda package from the conda-forge channel. The only ecosystem
     /// basilisk's query API answers for today.
@@ -57,6 +59,20 @@ impl PackageEcosystem {
     }
 }
 
+/// Serializes as the OSV ecosystem string (`"conda-forge"`, `"PyPI"`, or
+/// the channel name), matching what the report has always emitted.
+impl Serialize for PackageEcosystem {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.osv_ecosystem())
+    }
+}
+
+impl std::fmt::Display for PackageEcosystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.osv_ecosystem())
+    }
+}
+
 /// A deduplicated locked package to audit.
 #[derive(Debug, Clone)]
 pub struct AuditPackage {
@@ -82,6 +98,27 @@ pub enum SeverityBand {
 }
 
 impl SeverityBand {
+    /// Every band, least severe first.
+    pub const ALL: [SeverityBand; 5] = [
+        SeverityBand::Unknown,
+        SeverityBand::Low,
+        SeverityBand::Medium,
+        SeverityBand::High,
+        SeverityBand::Critical,
+    ];
+
+    /// The band's lowercase name, as used in JSON output and on the command
+    /// line.
+    pub fn name(self) -> &'static str {
+        match self {
+            SeverityBand::Critical => "critical",
+            SeverityBand::High => "high",
+            SeverityBand::Medium => "medium",
+            SeverityBand::Low => "low",
+            SeverityBand::Unknown => "unknown",
+        }
+    }
+
     /// The highest CVSS band across the document's severity entries.
     /// Understands the type labels basilisk emits: `CVSS_V3`/`CVSS_V3.0`/
     /// `CVSS_V3.1` (OSV and NVD sources), `CVSS_V4`, and `CVSS_V2.0`.
@@ -121,14 +158,23 @@ impl SeverityBand {
 
 impl std::fmt::Display for SeverityBand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            SeverityBand::Critical => "critical",
-            SeverityBand::High => "high",
-            SeverityBand::Medium => "medium",
-            SeverityBand::Low => "low",
-            SeverityBand::Unknown => "unknown",
-        };
-        f.write_str(name)
+        f.write_str(self.name())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("'{0}' is not a severity band")]
+pub struct ParseSeverityBandError(String);
+
+/// Parses the exact lowercase band names produced by [`SeverityBand::name`].
+impl FromStr for SeverityBand {
+    type Err = ParseSeverityBandError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|band| band.name() == s)
+            .ok_or_else(|| ParseSeverityBandError(s.to_string()))
     }
 }
 
@@ -159,7 +205,7 @@ pub struct IgnoreSpec<'a> {
 pub struct Finding {
     pub package: String,
     pub version: String,
-    pub ecosystem: String,
+    pub ecosystem: PackageEcosystem,
     pub environments: Vec<String>,
     pub id: String,
     pub aliases: Vec<String>,
@@ -183,7 +229,7 @@ pub struct UncheckedPackage {
     pub package: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    pub ecosystem: String,
+    pub ecosystem: PackageEcosystem,
     pub environments: Vec<String>,
 }
 

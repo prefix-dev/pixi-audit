@@ -134,14 +134,13 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
 /// Parses a severity band name. Shared by clap's value parser and the
 /// config file, so both accept exactly the same values.
 pub fn parse_band(s: &str) -> Result<SeverityBand, String> {
-    match s {
-        "low" => Ok(SeverityBand::Low),
-        "medium" => Ok(SeverityBand::Medium),
-        "high" => Ok(SeverityBand::High),
-        "critical" => Ok(SeverityBand::Critical),
-        other => Err(format!(
-            "'{other}' is not a severity band (expected low, medium, high, or critical)"
+    match s.parse::<SeverityBand>() {
+        // "unknown" is a valid band but never a threshold: it must always
+        // fail the audit, so it cannot be opted into.
+        Ok(SeverityBand::Unknown) | Err(_) => Err(format!(
+            "'{s}' is not a severity band (expected low, medium, high, or critical)"
         )),
+        Ok(band) => Ok(band),
     }
 }
 

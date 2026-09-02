@@ -1,4 +1,4 @@
-use pixi_audit::{AuditReport, AuditSummary, Finding, SeverityBand};
+use pixi_audit::{AuditReport, AuditSummary, Finding, PackageEcosystem, SeverityBand};
 
 use super::*;
 
@@ -10,7 +10,10 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
     Finding {
         package: package.to_string(),
         version: "1.0".to_string(),
-        ecosystem: ecosystem.to_string(),
+        ecosystem: match ecosystem {
+            "PyPI" => PackageEcosystem::Pypi,
+            _ => PackageEcosystem::CondaForge,
+        },
         environments: vec![],
         id: id.to_string(),
         aliases: vec![],

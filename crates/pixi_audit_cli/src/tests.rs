@@ -62,7 +62,7 @@ fn gate_exit_applies_threshold_with_unknown_failsafe() {
     let finding = |severity| pixi_audit::Finding {
         package: "p".into(),
         version: "1".into(),
-        ecosystem: "conda-forge".into(),
+        ecosystem: pixi_audit::PackageEcosystem::CondaForge,
         environments: vec![],
         id: "X".into(),
         aliases: vec![],

@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use pixi_audit::AuditReport;
+use pixi_audit::{AuditReport, PackageEcosystem};
 use rattler_conda_types::{
     NamelessMatchSpec, Version as CondaVersion, VersionSpec,
     version_spec::{LogicalOperator, RangeOperator},
@@ -12,7 +12,9 @@ use rattler_conda_types::{
 use toml_edit::{Formatted, Item, TableLike, Value};
 use uv_pep440::{Version as PypiVersion, VersionSpecifier, VersionSpecifiers};
 
-pub(super) fn plan_fixed_versions(report: &AuditReport) -> BTreeMap<(String, String), String> {
+pub(super) fn plan_fixed_versions(
+    report: &AuditReport,
+) -> BTreeMap<(String, PackageEcosystem), String> {
     let mut fixes = BTreeMap::new();
     for finding in &report.vulnerabilities {
         // OSV can publish fixed events for multiple release branches. Pick the
@@ -46,8 +48,8 @@ pub(super) fn plan_fixed_versions(report: &AuditReport) -> BTreeMap<(String, Str
     fixes
 }
 
-fn compare_versions(left: &str, right: &str, ecosystem: &str) -> Ordering {
-    if ecosystem.eq_ignore_ascii_case("PyPI") {
+fn compare_versions(left: &str, right: &str, ecosystem: &PackageEcosystem) -> Ordering {
+    if matches!(ecosystem, PackageEcosystem::Pypi) {
         match (
             uv_pep440::Version::from_str(left),
             uv_pep440::Version::from_str(right),
@@ -66,9 +68,9 @@ fn compare_versions(left: &str, right: &str, ecosystem: &str) -> Ordering {
     }
 }
 
-fn normalize_name(name: &str, ecosystem: &str) -> String {
+fn normalize_name(name: &str, ecosystem: &PackageEcosystem) -> String {
     let name = name.to_ascii_lowercase();
-    if ecosystem.eq_ignore_ascii_case("PyPI") {
+    if matches!(ecosystem, PackageEcosystem::Pypi) {
         name.replace(['_', '.'], "-")
     } else {
         name
@@ -77,18 +79,20 @@ fn normalize_name(name: &str, ecosystem: &str) -> String {
 
 pub(super) fn update_manifest_dependencies(
     table: &mut dyn TableLike,
-    fixes: &BTreeMap<(String, String), String>,
+    fixes: &BTreeMap<(String, PackageEcosystem), String>,
 ) -> usize {
     let mut changed = 0;
     for (key, item) in table.iter_mut() {
         let ecosystem = match key.get() {
-            "pypi-dependencies" => Some("PyPI"),
-            "dependencies" | "host-dependencies" | "build-dependencies" => Some("conda-forge"),
+            "pypi-dependencies" => Some(PackageEcosystem::Pypi),
+            "dependencies" | "host-dependencies" | "build-dependencies" => {
+                Some(PackageEcosystem::CondaForge)
+            }
             _ => None,
         };
         if let Some(ecosystem) = ecosystem {
             if let Some(dependencies) = item.as_table_like_mut() {
-                changed += update_dependencies(dependencies, ecosystem, fixes);
+                changed += update_dependencies(dependencies, &ecosystem, fixes);
             }
             continue;
         }
@@ -101,12 +105,12 @@ pub(super) fn update_manifest_dependencies(
 
 fn update_dependencies(
     dependencies: &mut dyn TableLike,
-    ecosystem: &str,
-    fixes: &BTreeMap<(String, String), String>,
+    ecosystem: &PackageEcosystem,
+    fixes: &BTreeMap<(String, PackageEcosystem), String>,
 ) -> usize {
     let mut changed = 0;
     for (name, item) in dependencies.iter_mut() {
-        let key = (normalize_name(name.get(), ecosystem), ecosystem.to_string());
+        let key = (normalize_name(name.get(), ecosystem), ecosystem.clone());
         let Some(fixed) = fixes.get(&key) else {
             continue;
         };
@@ -117,7 +121,7 @@ fn update_dependencies(
     changed
 }
 
-fn set_constraint(item: &mut Item, fixed: &str, ecosystem: &str) -> bool {
+fn set_constraint(item: &mut Item, fixed: &str, ecosystem: &PackageEcosystem) -> bool {
     if let Some(value) = item.as_value_mut()
         && set_string_value(value, fixed, ecosystem)
     {
@@ -138,7 +142,7 @@ fn set_constraint(item: &mut Item, fixed: &str, ecosystem: &str) -> bool {
     false
 }
 
-fn set_string_value(value: &mut Value, fixed: &str, ecosystem: &str) -> bool {
+fn set_string_value(value: &mut Value, fixed: &str, ecosystem: &PackageEcosystem) -> bool {
     let Value::String(version) = value else {
         return false;
     };
@@ -154,8 +158,8 @@ fn set_string_value(value: &mut Value, fixed: &str, ecosystem: &str) -> bool {
     true
 }
 
-fn tighten_constraint(current: &str, fixed: &str, ecosystem: &str) -> Option<String> {
-    if ecosystem.eq_ignore_ascii_case("PyPI") {
+fn tighten_constraint(current: &str, fixed: &str, ecosystem: &PackageEcosystem) -> Option<String> {
+    if matches!(ecosystem, PackageEcosystem::Pypi) {
         let current = match current.trim() {
             "" | "*" => VersionSpecifiers::empty(),
             current => VersionSpecifiers::from_str(current).ok()?,

@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use console::style;
-use pixi_audit::{AuditReport, Finding, SeverityBand};
+use pixi_audit::{AuditReport, Finding, PackageEcosystem, SeverityBand};
 
 pub fn render_human(report: &AuditReport) -> String {
     let mut out = String::new();
@@ -68,14 +68,14 @@ pub fn render_human(report: &AuditReport) -> String {
 
     let summary = &report.summary;
     if summary.vulnerable > 0 {
-        let packages: std::collections::BTreeSet<(&str, &str, &str)> = report
+        let packages: std::collections::BTreeSet<(&str, &str, &PackageEcosystem)> = report
             .vulnerabilities
             .iter()
             .map(|finding| {
                 (
                     finding.package.as_str(),
                     finding.version.as_str(),
-                    finding.ecosystem.as_str(),
+                    &finding.ecosystem,
                 )
             })
             .collect();
@@ -104,14 +104,18 @@ pub fn render_human(report: &AuditReport) -> String {
 }
 
 fn grouped(findings: &[Finding]) -> Vec<(String, Vec<&Finding>)> {
-    type Group<'a> = ((&'a str, &'a str, &'a str), String, Vec<&'a Finding>);
+    type Group<'a> = (
+        (&'a str, &'a str, &'a PackageEcosystem),
+        String,
+        Vec<&'a Finding>,
+    );
 
     let mut groups: Vec<Group<'_>> = Vec::new();
     for finding in findings {
         let key = (
             finding.package.as_str(),
             finding.version.as_str(),
-            finding.ecosystem.as_str(),
+            &finding.ecosystem,
         );
         match groups.iter_mut().find(|(k, _, _)| *k == key) {
             Some((_, _, members)) => members.push(finding),

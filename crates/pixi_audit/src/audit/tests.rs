@@ -583,7 +583,7 @@ async fn pypi_package_is_audited_with_osv() {
     assert!(report.unchecked.is_empty());
     let finding = &report.vulnerabilities[0];
     assert_eq!(finding.package, "requests_test");
-    assert_eq!(finding.ecosystem, "PyPI");
+    assert_eq!(finding.ecosystem, PackageEcosystem::Pypi);
     assert_eq!(finding.id, "PYSEC-2026-1");
     assert_eq!(finding.aliases, ["CVE-2026-9999"]);
     assert_eq!(finding.fixed_versions, ["2.32.1"]);

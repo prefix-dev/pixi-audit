@@ -1,4 +1,6 @@
-use pixi_audit::{AuditReport, AuditSummary, Finding, SeverityBand, UncheckedPackage};
+use pixi_audit::{
+    AuditReport, AuditSummary, Finding, PackageEcosystem, SeverityBand, UncheckedPackage,
+};
 
 use super::*;
 
@@ -6,7 +8,7 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
     Finding {
         package: package.to_string(),
         version: "3.1.0".to_string(),
-        ecosystem: "conda-forge".to_string(),
+        ecosystem: PackageEcosystem::CondaForge,
         environments: vec!["default".to_string(), "prod".to_string()],
         id: id.to_string(),
         aliases: vec![],
@@ -71,7 +73,7 @@ fn findings_are_grouped_per_package_with_fix_and_url() {
 fn findings_from_different_ecosystems_are_separate_packages() {
     let conda = finding("openssl", "CVE-2026-0001", SeverityBand::High);
     let mut pypi = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
-    pypi.ecosystem = "PyPI".to_string();
+    pypi.ecosystem = PackageEcosystem::Pypi;
     pypi.environments = vec!["docs".to_string()];
     let report = AuditReport {
         vulnerabilities: vec![conda, pypi],
@@ -114,7 +116,7 @@ fn ignored_and_unchecked_sections_render() {
         unchecked: vec![UncheckedPackage {
             package: "samtools".to_string(),
             version: Some("1.19".to_string()),
-            ecosystem: "bioconda".to_string(),
+            ecosystem: PackageEcosystem::Other("bioconda".to_string()),
             environments: vec!["default".to_string()],
         }],
         summary: AuditSummary {
@@ -158,7 +160,7 @@ fn unchecked_package_without_version_renders_question_mark() {
         unchecked: vec![UncheckedPackage {
             package: "mypkg".to_string(),
             version: None,
-            ecosystem: "unknown".to_string(),
+            ecosystem: PackageEcosystem::Other("unknown".to_string()),
             environments: vec!["default".to_string()],
         }],
         summary: AuditSummary {
