@@ -7,7 +7,10 @@ use thiserror::Error;
 
 use crate::{
     client::{AuditError, BasiliskClient, PypiAuditClient},
-    report::{AuditPackage, AuditReport, IgnoreSpec, PackageEcosystem, audit},
+    report::{
+        AuditPackage, AuditReport, IgnoreSpec, InvalidPackageName, PackageEcosystem, PackageName,
+        audit,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -22,6 +25,10 @@ pub enum LockFileAuditError {
     /// A filter named a platform no selected environment contains.
     #[error("the selected environments contain no platform named '{name}'")]
     UnknownPlatform { name: String },
+    /// A locked package name that its own ecosystem rejects. Lock files
+    /// written by pixi never contain one.
+    #[error(transparent)]
+    InvalidPackageName(#[from] InvalidPackageName),
     #[error(transparent)]
     Audit(#[from] AuditError),
 }
@@ -66,7 +73,7 @@ pub fn collect_packages(
     // (name, version, ecosystem) -> environment names. Keyed on the enum, so
     // e.g. a hypothetical channel literally named "PyPI" cannot collide with
     // the real PyPI ecosystem.
-    type DedupKey = (String, Option<String>, PackageEcosystem);
+    type DedupKey = (PackageName, Option<String>, PackageEcosystem);
     let mut dedup: BTreeMap<DedupKey, BTreeSet<String>> = BTreeMap::new();
 
     for (environment_name, environment) in lock_file.environments() {
@@ -85,13 +92,13 @@ pub fn collect_packages(
                             .and_then(|binary| binary.channel.as_ref())
                             .map(|channel| channel.to_string());
                         (
-                            conda.name().as_normalized().to_string(),
+                            PackageName::Conda(conda.name().clone()),
                             conda.record().map(|record| record.version.to_string()),
                             PackageEcosystem::from_channel_url(channel.as_deref()),
                         )
                     }
                     LockedPackage::Pypi(pypi) => (
-                        pypi.name().to_string(),
+                        PackageName::pypi(pypi.name().as_ref())?,
                         pypi.version().map(ToString::to_string),
                         PackageEcosystem::Pypi,
                     ),
@@ -189,7 +196,10 @@ packages:
     fn collects_deduplicated_packages_with_environments() {
         let packages = collect_packages(&fixture(), &[], &[]).unwrap();
 
-        let openssl: Vec<&AuditPackage> = packages.iter().filter(|p| p.name == "openssl").collect();
+        let openssl: Vec<&AuditPackage> = packages
+            .iter()
+            .filter(|p| p.name.as_str() == "openssl")
+            .collect();
         // Same (name, version, ecosystem) across platforms and environments
         // collapses into one entry listing both environments.
         assert_eq!(openssl.len(), 1);
@@ -197,14 +207,20 @@ packages:
         assert_eq!(openssl[0].ecosystem, PackageEcosystem::CondaForge);
         assert_eq!(openssl[0].environments, vec!["default", "prod"]);
 
-        let samtools = packages.iter().find(|p| p.name == "samtools").unwrap();
+        let samtools = packages
+            .iter()
+            .find(|p| p.name.as_str() == "samtools")
+            .unwrap();
         assert_eq!(
             samtools.ecosystem,
             PackageEcosystem::Other("bioconda".to_string())
         );
         assert_eq!(samtools.environments, vec!["default"]);
 
-        let requests = packages.iter().find(|p| p.name == "requests").unwrap();
+        let requests = packages
+            .iter()
+            .find(|p| p.name.as_str() == "requests")
+            .unwrap();
         assert_eq!(requests.ecosystem, PackageEcosystem::Pypi);
         assert_eq!(requests.version.as_deref(), Some("2.32.0"));
 
@@ -215,7 +231,7 @@ packages:
     fn environment_filter_limits_collection() {
         let packages = collect_packages(&fixture(), &["prod".to_string()], &[]).unwrap();
         assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].name, "openssl");
+        assert_eq!(packages[0].name.as_str(), "openssl");
         assert_eq!(packages[0].environments, vec!["prod"]);
     }
 
@@ -223,7 +239,7 @@ packages:
     fn platform_filter_limits_collection() {
         let packages = collect_packages(&fixture(), &[], &["osx-arm64".to_string()]).unwrap();
         assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].name, "openssl");
+        assert_eq!(packages[0].name.as_str(), "openssl");
         assert_eq!(packages[0].environments, vec!["default"]);
     }
 
@@ -330,7 +346,7 @@ packages:
 
         assert_eq!(report.vulnerabilities.len(), 1);
         let finding = &report.vulnerabilities[0];
-        assert_eq!(finding.package, "openssl");
+        assert_eq!(finding.package.as_str(), "openssl");
         assert_eq!(finding.id, "BSLK-1");
         assert_eq!(finding.severity, crate::report::SeverityBand::Critical);
         assert_eq!(finding.environments, vec!["default", "prod"]);

@@ -10,7 +10,8 @@ use super::*;
 use crate::{
     client::BasiliskClient,
     test_support::{
-        basilisk_client as test_client, pypi_client as test_pypi_client, spawn_router as spawn,
+        basilisk_client as test_client, conda_name, pypi_client as test_pypi_client, pypi_name,
+        spawn_router as spawn,
     },
 };
 
@@ -77,19 +78,19 @@ async fn audit(
 fn packages() -> Vec<AuditPackage> {
     vec![
         AuditPackage {
-            name: "openssl".to_string(),
+            name: conda_name("openssl"),
             version: Some("3.1.0".to_string()),
             ecosystem: PackageEcosystem::CondaForge,
             environments: vec!["default".to_string()],
         },
         AuditPackage {
-            name: "zlib".to_string(),
+            name: conda_name("zlib"),
             version: Some("1.3".to_string()),
             ecosystem: PackageEcosystem::CondaForge,
             environments: vec!["default".to_string()],
         },
         AuditPackage {
-            name: "requests".to_string(),
+            name: pypi_name("requests"),
             version: Some("2.32.0".to_string()),
             ecosystem: PackageEcosystem::Pypi,
             environments: vec!["default".to_string()],
@@ -303,7 +304,7 @@ async fn audit_reports_findings_and_unchecked() {
 
     assert_eq!(report.vulnerabilities.len(), 1);
     let finding = &report.vulnerabilities[0];
-    assert_eq!(finding.package, "openssl");
+    assert_eq!(finding.package.as_str(), "openssl");
     assert_eq!(finding.id, "BSLK-1");
     assert_eq!(finding.severity, SeverityBand::Critical);
     assert_eq!(finding.fixed_versions, vec!["3.1.1"]);
@@ -410,13 +411,13 @@ async fn unknown_version_packages_are_unchecked_and_never_queried() {
 
     let packages = vec![
         AuditPackage {
-            name: "mystery".to_string(),
+            name: conda_name("mystery"),
             version: None,
             ecosystem: PackageEcosystem::CondaForge,
             environments: vec!["default".to_string()],
         },
         AuditPackage {
-            name: "zlib".to_string(),
+            name: conda_name("zlib"),
             version: Some("1.3".to_string()),
             ecosystem: PackageEcosystem::CondaForge,
             environments: vec!["default".to_string()],
@@ -430,7 +431,7 @@ async fn unknown_version_packages_are_unchecked_and_never_queried() {
     assert_eq!(*received.lock().unwrap(), 1);
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(report.unchecked.len(), 1);
-    assert_eq!(report.unchecked[0].package, "mystery");
+    assert_eq!(report.unchecked[0].package.as_str(), "mystery");
     assert_eq!(report.unchecked[0].version, None);
     assert_eq!(report.summary.audited, 1);
 }
@@ -461,13 +462,13 @@ async fn other_ecosystem_packages_are_unchecked_and_never_queried() {
 
     let packages = vec![
         AuditPackage {
-            name: "samtools".to_string(),
+            name: conda_name("samtools"),
             version: Some("1.19".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
             environments: vec!["default".to_string()],
         },
         AuditPackage {
-            name: "zlib".to_string(),
+            name: conda_name("zlib"),
             version: Some("1.3".to_string()),
             ecosystem: PackageEcosystem::CondaForge,
             environments: vec!["default".to_string()],
@@ -479,7 +480,7 @@ async fn other_ecosystem_packages_are_unchecked_and_never_queried() {
 
     assert_eq!(*received.lock().unwrap(), 1);
     assert_eq!(report.unchecked.len(), 1);
-    assert_eq!(report.unchecked[0].package, "samtools");
+    assert_eq!(report.unchecked[0].package.as_str(), "samtools");
     assert_eq!(
         report.unchecked[0].ecosystem,
         PackageEcosystem::Other("bioconda".to_string())
@@ -592,7 +593,7 @@ async fn short_pypi_batch_response_fails_the_audit() {
     );
     let pypi_client = test_pypi_client(spawn(app).await);
     let packages = vec![AuditPackage {
-        name: "requests".to_string(),
+        name: pypi_name("requests"),
         version: Some("2.32.0".to_string()),
         ecosystem: PackageEcosystem::Pypi,
         environments: vec!["default".to_string()],
@@ -617,7 +618,7 @@ async fn pypi_package_is_audited_with_osv() {
     let conda_base = spawn_mock().await;
     let pypi_client = test_pypi_client(spawn_pypi_mock().await);
     let packages = vec![AuditPackage {
-        name: "requests_test".to_string(),
+        name: pypi_name("requests_test"),
         version: Some("2.32.0".to_string()),
         ecosystem: PackageEcosystem::Pypi,
         environments: vec!["default".to_string()],
@@ -635,7 +636,7 @@ async fn pypi_package_is_audited_with_osv() {
     assert_eq!(report.vulnerabilities.len(), 1);
     assert!(report.unchecked.is_empty());
     let finding = &report.vulnerabilities[0];
-    assert_eq!(finding.package, "requests_test");
+    assert_eq!(finding.package.as_str(), "requests-test");
     assert_eq!(finding.ecosystem, PackageEcosystem::Pypi);
     assert_eq!(finding.id, "PYSEC-2026-1");
     assert_eq!(finding.aliases, ["CVE-2026-9999"]);

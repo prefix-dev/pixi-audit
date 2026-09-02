@@ -11,6 +11,26 @@ fn severity_band_round_trips_through_its_name() {
 }
 
 #[test]
+fn package_names_normalize_per_ecosystem() {
+    let pypi = PackageName::pypi("Ruamel.YAML").unwrap();
+    assert_eq!(pypi.as_str(), "ruamel-yaml");
+    assert_eq!(pypi, PackageName::pypi("ruamel__yaml").unwrap());
+    assert!(pypi.matches("ruamel.yaml"));
+    assert!(!pypi.matches("ruamel"));
+
+    let conda = PackageName::conda("OpenSSL").unwrap();
+    assert_eq!(conda.as_str(), "openssl");
+    assert!(conda.matches("openssl"));
+    assert!(!conda.matches("open-ssl"));
+    assert!(PackageName::conda("not valid").is_err());
+
+    assert_eq!(
+        serde_json::to_value([&pypi, &conda]).unwrap(),
+        serde_json::json!(["ruamel-yaml", "openssl"])
+    );
+}
+
+#[test]
 fn ecosystem_serializes_as_osv_string() {
     let json = serde_json::to_value([
         PackageEcosystem::CondaForge,

@@ -10,7 +10,7 @@ use crate::{
     client::{AuditError, BasiliskClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, PackageEcosystem,
-        SeverityBand, UncheckedPackage,
+        PackageName, SeverityBand, UncheckedPackage,
     },
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
 };
@@ -73,8 +73,8 @@ impl Backend {
         }
     }
 
-    fn fixed_versions(self, doc: &OsvVulnerability, query_name: &str) -> FixedVersions {
-        let mut fixes = fixed_versions(doc, query_name, self.osv_ecosystem());
+    fn fixed_versions(self, doc: &OsvVulnerability, package: &PackageName) -> FixedVersions {
+        let mut fixes = fixed_versions(doc, package, self.osv_ecosystem());
         if self == Backend::Pypi {
             // Only PEP 440 versions are actionable for a PyPI package, and
             // there is no "upstream" of PyPI to report.
@@ -119,10 +119,9 @@ impl Backends<'_> {
 struct PlannedQuery {
     /// Index into the audited package list.
     package: usize,
+    /// The normalized name, as the backend knows it.
+    package_name: PackageName,
     backend: Backend,
-    /// The name as the backend knows it: lowercased for Basilisk, PEP 503
-    /// normalized for PyPI.
-    query_name: String,
     /// The version as sent to the backend.
     query_version: String,
     /// The version as locked, reported on findings.
@@ -133,7 +132,7 @@ impl PlannedQuery {
     fn osv_query(&self) -> OsvQuery {
         OsvQuery {
             package: QueryPackage {
-                name: Some(self.query_name.clone()),
+                name: Some(self.package_name.as_str().to_string()),
                 ecosystem: Some(self.backend.osv_ecosystem().to_string()),
                 purl: None,
             },
@@ -151,20 +150,19 @@ fn plan_query(index: usize, package: &AuditPackage) -> Option<PlannedQuery> {
     match &package.ecosystem {
         PackageEcosystem::CondaForge => Some(PlannedQuery {
             package: index,
+            package_name: package.name.clone(),
             backend: Backend::Basilisk,
-            query_name: package.name.to_lowercase(),
             query_version: version.clone(),
             version,
         }),
-        // Only normalized Python names and PEP 440 versions are safe to
-        // send to OSV. Invalid PyPI entries remain explicitly unchecked.
+        // Only PEP 440 versions are safe to send to OSV; a PyPI entry whose
+        // version does not parse remains explicitly unchecked.
         PackageEcosystem::Pypi => {
-            let name = uv_normalize::PackageName::from_str(&package.name).ok()?;
             let query_version = uv_pep440::Version::from_str(&version).ok()?;
             Some(PlannedQuery {
                 package: index,
+                package_name: package.name.clone(),
                 backend: Backend::Pypi,
-                query_name: name.to_string(),
                 query_version: query_version.to_string(),
                 version,
             })
@@ -270,7 +268,7 @@ pub async fn audit(
             if doc.withdrawn.is_some() {
                 continue;
             }
-            let fixes = query.backend.fixed_versions(doc, &query.query_name);
+            let fixes = query.backend.fixed_versions(doc, &query.package_name);
             let finding = Finding {
                 package: package.name.clone(),
                 version: query.version.clone(),

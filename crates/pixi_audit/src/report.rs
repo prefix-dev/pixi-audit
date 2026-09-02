@@ -73,10 +73,100 @@ impl std::fmt::Display for PackageEcosystem {
     }
 }
 
+/// A package name that carries its ecosystem's normalization rules, so two
+/// spellings compare equal exactly when the ecosystem says they do. Conda
+/// names are lowercased; PyPI names follow PEP 503, under which
+/// `Ruamel.YAML`, `ruamel_yaml`, and `ruamel-yaml` are one package.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PackageName {
+    Conda(rattler_conda_types::PackageName),
+    Pypi(uv_normalize::PackageName),
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum InvalidPackageName {
+    #[error("'{name}' is not a valid conda package name")]
+    Conda {
+        name: String,
+        #[source]
+        source: rattler_conda_types::InvalidPackageNameError,
+    },
+    #[error("'{name}' is not a valid PyPI package name")]
+    Pypi {
+        name: String,
+        #[source]
+        source: uv_normalize::InvalidNameError,
+    },
+}
+
+impl PackageName {
+    /// Parses a conda package name, lowercasing it.
+    pub fn conda(name: &str) -> Result<Self, InvalidPackageName> {
+        rattler_conda_types::PackageName::from_str(name)
+            .map(Self::Conda)
+            .map_err(|source| InvalidPackageName::Conda {
+                name: name.to_string(),
+                source,
+            })
+    }
+
+    /// Parses a PyPI package name, normalizing it per PEP 503.
+    pub fn pypi(name: &str) -> Result<Self, InvalidPackageName> {
+        uv_normalize::PackageName::from_str(name)
+            .map(Self::Pypi)
+            .map_err(|source| InvalidPackageName::Pypi {
+                name: name.to_string(),
+                source,
+            })
+    }
+
+    /// Parses `name` with the rules of `ecosystem`: PyPI names follow
+    /// PEP 503, every other ecosystem is a conda channel.
+    pub fn parse(ecosystem: &PackageEcosystem, name: &str) -> Result<Self, InvalidPackageName> {
+        match ecosystem {
+            PackageEcosystem::Pypi => Self::pypi(name),
+            PackageEcosystem::CondaForge | PackageEcosystem::Other(_) => Self::conda(name),
+        }
+    }
+
+    /// The normalized name, as sent in queries and written to reports.
+    pub fn as_str(&self) -> &str {
+        match self {
+            PackageName::Conda(name) => name.as_normalized(),
+            PackageName::Pypi(name) => name.as_str(),
+        }
+    }
+
+    /// Whether `spelling`, as written in an advisory or a manifest, names
+    /// this package under the ecosystem's normalization rules.
+    pub fn matches(&self, spelling: &str) -> bool {
+        match self {
+            PackageName::Conda(name) => name.as_normalized().eq_ignore_ascii_case(spelling),
+            PackageName::Pypi(name) => {
+                uv_normalize::PackageName::from_str(spelling).is_ok_and(|other| other == *name)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for PackageName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Serializes as the normalized name string, matching what the report has
+/// always emitted.
+impl Serialize for PackageName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// A deduplicated locked package to audit.
 #[derive(Debug, Clone)]
 pub struct AuditPackage {
-    pub name: String,
+    pub name: PackageName,
     /// `None` when the version could not be determined (e.g. an unresolved
     /// conda source package). Such packages are never queried — a
     /// version-less OSV query matches every version ever affected — and are
@@ -203,7 +293,7 @@ pub struct IgnoreSpec<'a> {
 /// One (package, vulnerability) pair.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
-    pub package: String,
+    pub package: PackageName,
     pub version: String,
     pub ecosystem: PackageEcosystem,
     pub environments: Vec<String>,
@@ -226,7 +316,7 @@ pub struct Finding {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UncheckedPackage {
-    pub package: String,
+    pub package: PackageName,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub ecosystem: PackageEcosystem,

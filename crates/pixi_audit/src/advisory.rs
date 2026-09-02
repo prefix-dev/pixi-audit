@@ -2,7 +2,10 @@
 
 use serde::Deserialize;
 
-use crate::types::{OsvAffected, OsvVulnerability};
+use crate::{
+    report::PackageName,
+    types::{OsvAffected, OsvVulnerability},
+};
 
 #[derive(Debug, Deserialize)]
 struct BasiliskDatabaseSpecific {
@@ -69,16 +72,18 @@ fn release_fixed_events(affected: &OsvAffected) -> impl Iterator<Item = &str> {
         .filter_map(|event| event.fixed.as_deref())
 }
 
-/// Fixed versions for `package_name` from an OSV document, split by origin.
+/// Fixed versions for `package` from an OSV document, split by origin.
 ///
 /// Standard OSV `fixed` events retain their generic behavior: entries in the
 /// queried ecosystem (or entries naming no package) are same-ecosystem fixes,
 /// while matching package entries in other ecosystems are upstream fixes.
+/// Package names match under the ecosystem's own normalization, so an
+/// advisory spelling `ruamel.yaml` matches a PyPI query for `ruamel-yaml`.
 /// Basilisk's extension is more strict and is considered only for conda-forge
 /// queries on entries that explicitly match both the package and ecosystem.
 pub(crate) fn fixed_versions(
     doc: &OsvVulnerability,
-    package_name: &str,
+    package: &PackageName,
     ecosystem: &str,
 ) -> FixedVersions {
     let mut fixes = FixedVersions::default();
@@ -90,8 +95,7 @@ pub(crate) fn fixed_versions(
             .and_then(|p| p.ecosystem.as_deref());
 
         // An entry naming no package applies to the queried one.
-        let name_matches = entry_name.is_none_or(|name| name.eq_ignore_ascii_case(package_name));
-        if !name_matches {
+        if !entry_name.is_none_or(|name| package.matches(name)) {
             continue;
         }
         let same_ecosystem =

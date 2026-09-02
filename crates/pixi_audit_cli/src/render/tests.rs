@@ -1,12 +1,13 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, Finding, PackageEcosystem, SeverityBand, UncheckedPackage,
+    AuditReport, AuditSummary, Finding, PackageEcosystem, PackageName, SeverityBand,
+    UncheckedPackage,
 };
 
 use super::*;
 
 fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
     Finding {
-        package: package.to_string(),
+        package: PackageName::conda(package).unwrap(),
         version: "3.1.0".to_string(),
         ecosystem: PackageEcosystem::CondaForge,
         environments: vec!["default".to_string(), "prod".to_string()],
@@ -73,6 +74,7 @@ fn findings_are_grouped_per_package_with_fix_and_url() {
 fn findings_from_different_ecosystems_are_separate_packages() {
     let conda = finding("openssl", "CVE-2026-0001", SeverityBand::High);
     let mut pypi = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
+    pypi.package = PackageName::pypi("openssl").unwrap();
     pypi.ecosystem = PackageEcosystem::Pypi;
     pypi.environments = vec!["docs".to_string()];
     let report = AuditReport {
@@ -114,7 +116,7 @@ fn ignored_and_unchecked_sections_render() {
     let report = AuditReport {
         ignored: vec![finding("openssl", "CVE-2026-0001", SeverityBand::High)],
         unchecked: vec![UncheckedPackage {
-            package: "samtools".to_string(),
+            package: PackageName::conda("samtools").unwrap(),
             version: Some("1.19".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
             environments: vec!["default".to_string()],
@@ -158,7 +160,7 @@ fn until_fixed_ignores_are_marked() {
 fn unchecked_package_without_version_renders_question_mark() {
     let report = AuditReport {
         unchecked: vec![UncheckedPackage {
-            package: "mypkg".to_string(),
+            package: PackageName::conda("mypkg").unwrap(),
             version: None,
             ecosystem: PackageEcosystem::Other("unknown".to_string()),
             environments: vec!["default".to_string()],

@@ -54,8 +54,9 @@ pub async fn apply(
 fn vulnerable_package_names(report: &AuditReport) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for finding in &report.vulnerabilities {
-        if !names.contains(&finding.package) {
-            names.push(finding.package.clone());
+        let name = finding.package.to_string();
+        if !names.contains(&name) {
+            names.push(name);
         }
     }
     names

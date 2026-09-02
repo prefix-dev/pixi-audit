@@ -2,7 +2,10 @@ use axum::Router;
 use reqwest_middleware::ClientWithMiddleware;
 use url::Url;
 
-use crate::client::{BasiliskClient, PypiAuditClient};
+use crate::{
+    client::{BasiliskClient, PypiAuditClient},
+    report::PackageName,
+};
 
 pub async fn spawn_router(app: Router) -> Url {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -21,4 +24,12 @@ pub fn basilisk_client(base_url: Url) -> BasiliskClient {
 
 pub fn pypi_client(base_url: Url) -> PypiAuditClient {
     PypiAuditClient::new(http_client(), base_url)
+}
+
+pub fn conda_name(name: &str) -> PackageName {
+    PackageName::conda(name).unwrap()
+}
+
+pub fn pypi_name(name: &str) -> PackageName {
+    PackageName::pypi(name).unwrap()
 }

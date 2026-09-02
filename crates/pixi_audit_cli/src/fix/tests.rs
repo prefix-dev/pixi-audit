@@ -1,4 +1,4 @@
-use pixi_audit::{AuditReport, AuditSummary, Finding, PackageEcosystem, SeverityBand};
+use pixi_audit::{AuditReport, AuditSummary, Finding, PackageEcosystem, PackageName, SeverityBand};
 
 use super::*;
 
@@ -7,13 +7,14 @@ fn finding(package: &str, id: &str) -> Finding {
 }
 
 fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[&str]) -> Finding {
+    let ecosystem = match ecosystem {
+        "PyPI" => PackageEcosystem::Pypi,
+        _ => PackageEcosystem::CondaForge,
+    };
     Finding {
-        package: package.to_string(),
+        package: PackageName::parse(&ecosystem, package).unwrap(),
         version: "1.0".to_string(),
-        ecosystem: match ecosystem {
-            "PyPI" => PackageEcosystem::Pypi,
-            _ => PackageEcosystem::CondaForge,
-        },
+        ecosystem,
         environments: vec![],
         id: id.to_string(),
         aliases: vec![],
@@ -258,6 +259,48 @@ requests = "*"
     let content = std::fs::read_to_string(manifest).unwrap();
     assert!(content.contains(">=10.0"), "manifest: {content}");
     assert!(!content.contains(">=11.0"), "manifest: {content}");
+}
+
+#[test]
+fn manifest_keys_match_findings_under_ecosystem_normalization() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("pixi.toml");
+    std::fs::write(
+        &manifest,
+        r#"[workspace]
+name = "demo"
+
+[dependencies]
+OpenSSL = ">=1"
+
+[pypi-dependencies]
+"Ruamel.YAML" = "*"
+zope__interface = ">=0.5"
+"#,
+    )
+    .unwrap();
+    // Findings carry normalized names; the manifest spells them differently.
+    let report = AuditReport {
+        vulnerabilities: vec![
+            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            finding_with_fix("ruamel-yaml", "PYSEC-1", "PyPI", &["1.18.7"]),
+            finding_with_fix("zope-interface", "PYSEC-2", "PyPI", &["6.0"]),
+        ],
+        ..Default::default()
+    };
+
+    let changed = bump_manifest_constraints(&manifest, &report).unwrap();
+    let content = std::fs::read_to_string(manifest).unwrap();
+    assert_eq!(changed, 3, "manifest: {content}");
+    let value: toml::Value = toml::from_str(&content).unwrap();
+    let openssl = value["dependencies"]["OpenSSL"].as_str().unwrap();
+    assert!(openssl.contains(">=3.1.1"), "constraint: {openssl}");
+    let ruamel = value["pypi-dependencies"]["Ruamel.YAML"].as_str().unwrap();
+    assert!(ruamel.contains(">=1.18.7"), "constraint: {ruamel}");
+    let zope = value["pypi-dependencies"]["zope__interface"]
+        .as_str()
+        .unwrap();
+    assert!(zope.contains(">=6.0"), "constraint: {zope}");
 }
 
 #[test]

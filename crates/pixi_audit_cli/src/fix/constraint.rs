@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use pixi_audit::{AuditReport, PackageEcosystem};
+use pixi_audit::{AuditReport, PackageName};
 use rattler_conda_types::{
     NamelessMatchSpec, Version as CondaVersion, VersionSpec,
     version_spec::{LogicalOperator, RangeOperator},
@@ -20,24 +20,24 @@ pub(super) enum FixVersion {
 }
 
 impl FixVersion {
-    fn parse(ecosystem: &PackageEcosystem, version: &str) -> Option<Self> {
-        match ecosystem {
-            PackageEcosystem::Pypi => PypiVersion::from_str(version).ok().map(Self::Pypi),
-            PackageEcosystem::CondaForge | PackageEcosystem::Other(_) => {
-                CondaVersion::from_str(version).ok().map(Self::Conda)
-            }
+    /// Parses `version` with the version scheme of `package`'s ecosystem.
+    fn parse(package: &PackageName, version: &str) -> Option<Self> {
+        match package {
+            PackageName::Conda(_) => CondaVersion::from_str(version).ok().map(Self::Conda),
+            PackageName::Pypi(_) => PypiVersion::from_str(version).ok().map(Self::Pypi),
         }
     }
 }
 
-/// The minimum version each vulnerable package must be raised to, keyed by
-/// normalized name and ecosystem.
-pub(super) type FixPlan = BTreeMap<(String, PackageEcosystem), FixVersion>;
+/// The minimum version each vulnerable package must be raised to. The
+/// name carries its ecosystem's normalization, so a manifest key spelled
+/// `Ruamel.YAML` finds the plan entry for the locked `ruamel-yaml`.
+pub(super) type FixPlan = BTreeMap<PackageName, FixVersion>;
 
 pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
     let mut fixes = FixPlan::new();
     for finding in &report.vulnerabilities {
-        let Some(locked) = FixVersion::parse(&finding.ecosystem, &finding.version) else {
+        let Some(locked) = FixVersion::parse(&finding.package, &finding.version) else {
             continue;
         };
         // OSV can publish fixed events for multiple release branches. Pick the
@@ -47,19 +47,17 @@ pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
         let Some(fixed) = finding
             .fixed_versions
             .iter()
-            .filter_map(|fixed| FixVersion::parse(&finding.ecosystem, fixed))
+            .filter_map(|fixed| FixVersion::parse(&finding.package, fixed))
             .filter(|fixed| *fixed > locked)
             .min()
         else {
             continue;
         };
-        let key = (
-            normalize_name(&finding.package, &finding.ecosystem),
-            finding.ecosystem.clone(),
-        );
         // Multiple advisories for one package must all be resolved, so retain
         // the greatest of their minimum required fixes.
-        let required = fixes.entry(key).or_insert_with(|| fixed.clone());
+        let required = fixes
+            .entry(finding.package.clone())
+            .or_insert_with(|| fixed.clone());
         if *required < fixed {
             *required = fixed;
         }
@@ -67,12 +65,17 @@ pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
     fixes
 }
 
-fn normalize_name(name: &str, ecosystem: &PackageEcosystem) -> String {
-    let name = name.to_ascii_lowercase();
-    if matches!(ecosystem, PackageEcosystem::Pypi) {
-        name.replace(['_', '.'], "-")
-    } else {
-        name
+/// Parses a manifest dependency key with the normalization of the table it
+/// sits in.
+type NameParser = fn(&str) -> Result<PackageName, pixi_audit::InvalidPackageName>;
+
+/// Which dependency table a manifest key opens, and therefore how the
+/// package names inside it are normalized.
+fn dependency_table_kind(key: &str) -> Option<NameParser> {
+    match key {
+        "pypi-dependencies" => Some(PackageName::pypi),
+        "dependencies" | "host-dependencies" | "build-dependencies" => Some(PackageName::conda),
+        _ => None,
     }
 }
 
@@ -83,18 +86,12 @@ fn normalize_name(name: &str, ecosystem: &PackageEcosystem) -> String {
 pub(super) fn update_manifest_dependencies(table: &mut dyn TableLike, fixes: &FixPlan) -> usize {
     let mut changed = 0;
     for (key, item) in table.iter_mut() {
-        let ecosystem = match key.get() {
-            "pypi-dependencies" => Some(PackageEcosystem::Pypi),
-            "dependencies" | "host-dependencies" | "build-dependencies" => {
-                Some(PackageEcosystem::CondaForge)
-            }
-            _ => None,
-        };
+        let parse_name = dependency_table_kind(key.get());
         let Some(child) = item.as_table_like_mut() else {
             continue;
         };
-        changed += match ecosystem {
-            Some(ecosystem) => update_dependencies(child, &ecosystem, fixes),
+        changed += match parse_name {
+            Some(parse_name) => update_dependencies(child, parse_name, fixes),
             None => update_manifest_dependencies(child, fixes),
         };
     }
@@ -103,13 +100,17 @@ pub(super) fn update_manifest_dependencies(table: &mut dyn TableLike, fixes: &Fi
 
 fn update_dependencies(
     dependencies: &mut dyn TableLike,
-    ecosystem: &PackageEcosystem,
+    parse_name: NameParser,
     fixes: &FixPlan,
 ) -> usize {
     let mut changed = 0;
     for (name, item) in dependencies.iter_mut() {
-        let key = (normalize_name(name.get(), ecosystem), ecosystem.clone());
-        let Some(fixed) = fixes.get(&key) else {
+        // A key that is not a valid name in this table's ecosystem cannot
+        // match any finding; pixi itself would reject it.
+        let Ok(name) = parse_name(name.get()) else {
+            continue;
+        };
+        let Some(fixed) = fixes.get(&name) else {
             continue;
         };
         if set_constraint(item, fixed) {

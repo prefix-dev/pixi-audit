@@ -21,9 +21,11 @@ miette = "7.6.0"
 osv_protocol = { path = "crates/osv_protocol", version = "0.1.0" }
 pixi_audit = { path = "crates/pixi_audit", version = "0.1.0" }
 # Same version pixi pins, so the `LockFile` type identity unifies when pixi
-# consumes these crates.
+# consumes these crates. `rattler_conda_types` must be the version
+# `rattler_lock` depends on, so the `PackageName` inside a lock file is the
+# same type `pixi_audit` exposes.
 rattler_lock = { version = "0.31", default-features = false }
-rattler_conda_types = "0.49"
+rattler_conda_types = "0.48"
 # Same middleware crate pixi uses (its workspace renames `astral-reqwest-middleware`
 # to `reqwest-middleware`), so the `ClientWithMiddleware` type identity unifies
 # when pixi consumes these crates.

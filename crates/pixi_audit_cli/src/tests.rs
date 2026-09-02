@@ -60,7 +60,7 @@ fn invalid_severity_is_rejected_at_parse_time() {
 #[test]
 fn gate_applies_threshold_with_unknown_failsafe() {
     let finding = |severity| pixi_audit::Finding {
-        package: "p".into(),
+        package: pixi_audit::PackageName::conda("p").unwrap(),
         version: "1".into(),
         ecosystem: pixi_audit::PackageEcosystem::CondaForge,
         environments: vec![],

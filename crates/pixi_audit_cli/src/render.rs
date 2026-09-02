@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use console::style;
-use pixi_audit::{AuditReport, Finding, IgnoreReason, PackageEcosystem, SeverityBand};
+use pixi_audit::{AuditReport, Finding, IgnoreReason, PackageEcosystem, PackageName, SeverityBand};
 
 pub fn render_human(report: &AuditReport) -> String {
     let mut out = String::new();
@@ -89,11 +89,11 @@ pub fn render_human(report: &AuditReport) -> String {
 
 /// Identifies one locked package: the same name at a different version or
 /// from a different ecosystem is a different package.
-type PackageKey<'a> = (&'a str, &'a str, &'a PackageEcosystem);
+type PackageKey<'a> = (&'a PackageName, &'a str, &'a PackageEcosystem);
 
 fn package_key(finding: &Finding) -> PackageKey<'_> {
     (
-        finding.package.as_str(),
+        &finding.package,
         finding.version.as_str(),
         &finding.ecosystem,
     )
