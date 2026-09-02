@@ -78,20 +78,20 @@ pub fn discover_workspace(start: &Path) -> miette::Result<Option<PathBuf>> {
 /// config; a present-but-invalid table is an error — a security tool must
 /// not silently drop configured suppressions. Unknown keys warn on stderr.
 pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
-    let value = read_toml(manifest)?;
-    let Some(table) = value.get("tool").and_then(|t| t.get("pixi-audit")) else {
+    let mut value = read_toml(manifest)?;
+    let table = value
+        .get_mut("tool")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|tool| tool.remove("pixi-audit"));
+    let Some(table) = table else {
         return Ok(AuditConfig::default());
     };
-    let raw: RawConfig = table
-        .clone()
-        .try_into()
-        .into_diagnostic()
-        .wrap_err_with(|| {
-            format!(
-                "invalid [tool.pixi-audit] table in '{}'",
-                manifest.display()
-            )
-        })?;
+    let raw: RawConfig = table.try_into().into_diagnostic().wrap_err_with(|| {
+        format!(
+            "invalid [tool.pixi-audit] table in '{}'",
+            manifest.display()
+        )
+    })?;
 
     for key in raw.unknown.keys() {
         eprintln!(
@@ -125,9 +125,17 @@ pub fn parse_band(s: &str) -> Result<SeverityBand, String> {
     match s.parse::<SeverityBand>() {
         // "unknown" is a valid band but never a threshold: it must always
         // fail the audit, so it cannot be opted into.
-        Ok(SeverityBand::Unknown) | Err(_) => Err(format!(
-            "'{s}' is not a severity band (expected low, medium, high, or critical)"
-        )),
+        Ok(SeverityBand::Unknown) | Err(_) => {
+            let expected: Vec<&str> = SeverityBand::ALL
+                .iter()
+                .filter(|band| **band != SeverityBand::Unknown)
+                .map(|band| band.name())
+                .collect();
+            Err(format!(
+                "'{s}' is not a severity band (expected one of {})",
+                expected.join(", ")
+            ))
+        }
         Ok(band) => Ok(band),
     }
 }

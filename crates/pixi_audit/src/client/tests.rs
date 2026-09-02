@@ -115,6 +115,7 @@ async fn query_batch_caps_unbounded_pagination() {
     );
 
     let err = pypi_client(pypi_base)
+        .osv_client()
         .query_batch(&[query("requests", "2.32.0")])
         .await
         .unwrap_err();
@@ -177,6 +178,7 @@ async fn pypi_base_url_with_deep_path_keeps_all_segments() {
     let client = pypi_client(deep);
 
     let results = client
+        .osv_client()
         .query_batch(&[query("requests", "2.32.0")])
         .await
         .unwrap();

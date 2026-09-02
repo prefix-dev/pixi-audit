@@ -11,6 +11,7 @@
 //! self-hosted) OSV-compatible instance.
 
 use std::path::Path;
+use std::time::Duration;
 
 use pixi_audit::{
     BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,
@@ -31,7 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &std::env::var(PYPI_BASE_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_PYPI_BASE_URL.to_string()),
     )?;
     eprintln!("Auditing {path} against {base_url} and {pypi_base_url} ...");
-    let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
+    // The clients apply no timeout of their own; configure one here.
+    let reqwest = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let http = reqwest_middleware::ClientBuilder::new(reqwest).build();
     let client = BasiliskClient::new(http.clone(), base_url);
     let pypi_client = PypiAuditClient::new(http, pypi_base_url);
 

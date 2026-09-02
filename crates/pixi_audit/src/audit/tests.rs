@@ -566,7 +566,7 @@ async fn spawn_pypi_mock() -> Url {
                 Json(serde_json::json!({
                     "id": "PYSEC-2026-1",
                     "modified": "2026-07-31T00:00:00Z",
-                    "summary": "Python package vulnerability",
+                    "summary": "Python package\nvulnerability",
                     "aliases": ["CVE-2026-9999"],
                     "affected": [{
                         "package": {"ecosystem": "PyPI", "name": "requests-test"},
@@ -639,6 +639,10 @@ async fn pypi_package_is_audited_with_osv() {
     assert_eq!(finding.package.as_str(), "requests-test");
     assert_eq!(finding.ecosystem, PackageEcosystem::Pypi);
     assert_eq!(finding.id, "PYSEC-2026-1");
+    assert_eq!(
+        finding.summary.as_deref(),
+        Some("Python package vulnerability")
+    );
     assert_eq!(finding.aliases, ["CVE-2026-9999"]);
     assert_eq!(finding.fixed_versions, ["2.32.1"]);
     assert_eq!(finding.severity, SeverityBand::Unknown);

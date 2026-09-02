@@ -54,25 +54,19 @@ impl PackageEcosystem {
             PackageEcosystem::Other(origin) => origin,
         }
     }
-
-    /// Whether an audit backend is configured for this ecosystem. Packages
-    /// outside this set are reported as "not checked".
-    pub fn is_audited(&self) -> bool {
-        matches!(self, PackageEcosystem::CondaForge | PackageEcosystem::Pypi)
-    }
 }
 
-/// Serializes as the OSV ecosystem string (`"conda-forge"`, `"PyPI"`, or
-/// the channel name), matching what the report has always emitted.
-impl Serialize for PackageEcosystem {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.osv_ecosystem())
-    }
-}
-
+/// Displays as the OSV ecosystem string (`conda-forge`, `PyPI`, or the
+/// channel name). JSON output serializes the same string.
 impl std::fmt::Display for PackageEcosystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.osv_ecosystem())
+    }
+}
+
+impl Serialize for PackageEcosystem {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -152,17 +146,16 @@ impl PackageName {
     }
 }
 
+/// Displays as the normalized name. JSON output serializes the same string.
 impl std::fmt::Display for PackageName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-/// Serializes as the normalized name string, matching what the report has
-/// always emitted.
 impl Serialize for PackageName {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
+        serializer.collect_str(self)
     }
 }
 

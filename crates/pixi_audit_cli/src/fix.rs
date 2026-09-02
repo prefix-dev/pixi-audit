@@ -42,7 +42,9 @@ pub async fn apply(
     }
     run_pixi_update(manifest, &names)?;
 
-    let after = reaudit().await?;
+    let after = reaudit().await.wrap_err(
+        "re-audit after `pixi update` failed; the manifest and lock file were already updated",
+    )?;
     let before_count = before.summary.vulnerable;
     let resolved = before_count.saturating_sub(after.summary.vulnerable);
     eprintln!("fixed: resolved {resolved} of {before_count} vulnerabilities via pixi update");

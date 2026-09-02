@@ -10,7 +10,7 @@ use crate::{
     client::{AuditError, BasiliskClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, PackageEcosystem,
-        PackageName, SeverityBand, UncheckedPackage,
+        SeverityBand, UncheckedPackage,
     },
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
 };
@@ -20,22 +20,27 @@ const MAX_CONCURRENT_DETAIL_FETCHES: usize = 16;
 
 /// The vulnerability database a package is checked against, together with
 /// the policy for interpreting what that database returns.
+///
+/// The discriminants index [`Backend::ALL`] and the per-backend tables in
+/// [`query_backends`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Backend {
     /// Basilisk, which answers for conda-forge packages.
-    Basilisk,
+    Basilisk = 0,
     /// OSV.dev, which answers for PyPI packages.
-    Pypi,
+    Pypi = 1,
 }
 
 impl Backend {
     const ALL: [Backend; 2] = [Backend::Basilisk, Backend::Pypi];
 
-    /// The ecosystem string sent in queries and matched against advisories.
-    fn osv_ecosystem(self) -> &'static str {
-        match self {
-            Backend::Basilisk => "conda-forge",
-            Backend::Pypi => "PyPI",
+    /// The backend that answers for `ecosystem`, if any.
+    fn for_ecosystem(ecosystem: &PackageEcosystem) -> Option<Self> {
+        match ecosystem {
+            PackageEcosystem::CondaForge => Some(Backend::Basilisk),
+            PackageEcosystem::Pypi => Some(Backend::Pypi),
+            // No backend answers for other channels or source packages.
+            PackageEcosystem::Other(_) => None,
         }
     }
 
@@ -59,10 +64,11 @@ impl Backend {
     fn summary(self, doc: &OsvVulnerability) -> Option<String> {
         match self {
             Backend::Basilisk => doc.summary.clone(),
+            // OSV.dev summaries are hard-wrapped; fold them onto one line.
             Backend::Pypi => doc
                 .summary
                 .as_ref()
-                .map(|summary| summary.trim().replace('\n', "")),
+                .map(|summary| summary.split_whitespace().collect::<Vec<_>>().join(" ")),
         }
     }
 
@@ -73,8 +79,8 @@ impl Backend {
         }
     }
 
-    fn fixed_versions(self, doc: &OsvVulnerability, package: &PackageName) -> FixedVersions {
-        let mut fixes = fixed_versions(doc, package, self.osv_ecosystem());
+    fn fixed_versions(self, doc: &OsvVulnerability, package: &AuditPackage) -> FixedVersions {
+        let mut fixes = fixed_versions(doc, &package.name, package.ecosystem.osv_ecosystem());
         if self == Backend::Pypi {
             // Only PEP 440 versions are actionable for a PyPI package, and
             // there is no "upstream" of PyPI to report.
@@ -94,21 +100,10 @@ struct Backends<'a> {
 }
 
 impl Backends<'_> {
-    async fn query_batch(
-        &self,
-        backend: Backend,
-        queries: &[OsvQuery],
-    ) -> Result<Vec<BatchResult>, AuditError> {
+    fn client(&self, backend: Backend) -> &BasiliskClient {
         match backend {
-            Backend::Basilisk => self.basilisk.query_batch(queries).await,
-            Backend::Pypi => self.pypi.query_batch(queries).await,
-        }
-    }
-
-    async fn get_vuln(&self, backend: Backend, id: &str) -> Result<OsvVulnerability, AuditError> {
-        match backend {
-            Backend::Basilisk => self.basilisk.get_vuln(id).await,
-            Backend::Pypi => self.pypi.get_vuln(id).await,
+            Backend::Basilisk => self.basilisk,
+            Backend::Pypi => self.pypi.osv_client(),
         }
     }
 }
@@ -116,11 +111,8 @@ impl Backends<'_> {
 /// A package that will be queried, with the exact identity sent to its
 /// backend. Only packages with a version in a supported ecosystem are
 /// planned; everything else is reported as unchecked.
-struct PlannedQuery {
-    /// Index into the audited package list.
-    package: usize,
-    /// The normalized name, as the backend knows it.
-    package_name: PackageName,
+struct PlannedQuery<'a> {
+    package: &'a AuditPackage,
     backend: Backend,
     /// The version as sent to the backend.
     query_version: String,
@@ -128,12 +120,12 @@ struct PlannedQuery {
     version: String,
 }
 
-impl PlannedQuery {
+impl PlannedQuery<'_> {
     fn osv_query(&self) -> OsvQuery {
         OsvQuery {
             package: QueryPackage {
-                name: Some(self.package_name.as_str().to_string()),
-                ecosystem: Some(self.backend.osv_ecosystem().to_string()),
+                name: Some(self.package.name.to_string()),
+                ecosystem: Some(self.package.ecosystem.osv_ecosystem().to_string()),
                 purl: None,
             },
             version: Some(self.query_version.clone()),
@@ -145,47 +137,45 @@ impl PlannedQuery {
 /// Decides whether and how `package` is queried. A version-less package is
 /// never queried: a version-less OSV query matches every version ever
 /// affected.
-fn plan_query(index: usize, package: &AuditPackage) -> Option<PlannedQuery> {
+fn plan_query(package: &AuditPackage) -> Option<PlannedQuery<'_>> {
     let version = package.version.clone()?;
-    match &package.ecosystem {
-        PackageEcosystem::CondaForge => Some(PlannedQuery {
-            package: index,
-            package_name: package.name.clone(),
-            backend: Backend::Basilisk,
-            query_version: version.clone(),
-            version,
-        }),
+    let backend = Backend::for_ecosystem(&package.ecosystem)?;
+    let query_version = match backend {
+        Backend::Basilisk => version.clone(),
         // Only PEP 440 versions are safe to send to OSV; a PyPI entry whose
         // version does not parse remains explicitly unchecked.
-        PackageEcosystem::Pypi => {
-            let query_version = uv_pep440::Version::from_str(&version).ok()?;
-            Some(PlannedQuery {
-                package: index,
-                package_name: package.name.clone(),
-                backend: Backend::Pypi,
-                query_version: query_version.to_string(),
-                version,
-            })
-        }
-        // No backend answers for other channels or source packages.
-        PackageEcosystem::Other(_) => None,
-    }
+        Backend::Pypi => uv_pep440::Version::from_str(&version).ok()?.to_string(),
+    };
+    Some(PlannedQuery {
+        package,
+        backend,
+        query_version,
+        version,
+    })
 }
 
-/// Runs every planned query against its backend. The result at position
-/// `i` belongs to `planned[i]`.
+/// Runs every planned query against its backend, both backends in
+/// parallel. The result at position `i` belongs to `planned[i]`.
 async fn query_backends(
     backends: &Backends<'_>,
-    planned: &[PlannedQuery],
+    planned: &[PlannedQuery<'_>],
 ) -> Result<Vec<BatchResult>, AuditError> {
+    let mut positions: [Vec<usize>; Backend::ALL.len()] = Default::default();
+    let mut queries: [Vec<OsvQuery>; Backend::ALL.len()] = Default::default();
+    for (position, query) in planned.iter().enumerate() {
+        positions[query.backend as usize].push(position);
+        queries[query.backend as usize].push(query.osv_query());
+    }
+    let batches = futures::future::try_join_all(Backend::ALL.iter().map(|&backend| {
+        backends
+            .client(backend)
+            .query_batch(&queries[backend as usize])
+    }))
+    .await?;
+
     let mut results = vec![BatchResult::default(); planned.len()];
-    for backend in Backend::ALL {
-        let positions: Vec<usize> = (0..planned.len())
-            .filter(|&i| planned[i].backend == backend)
-            .collect();
-        let queries: Vec<OsvQuery> = positions.iter().map(|&i| planned[i].osv_query()).collect();
-        let batch = backends.query_batch(backend, &queries).await?;
-        for (position, result) in positions.into_iter().zip(batch) {
+    for (positions, batch) in positions.iter().zip(batches) {
+        for (&position, result) in positions.iter().zip(batch) {
             results[position] = result;
         }
     }
@@ -200,7 +190,7 @@ async fn fetch_documents(
 ) -> Result<HashMap<(Backend, String), OsvVulnerability>, AuditError> {
     futures::stream::iter(references)
         .map(|(backend, id)| async move {
-            match backends.get_vuln(backend, &id).await {
+            match backends.client(backend).get_vuln(&id).await {
                 Ok(doc) => Ok(((backend, id), doc)),
                 Err(AuditError::Status { status, .. })
                     if backend.tolerates_missing_document()
@@ -236,11 +226,19 @@ pub async fn audit(
         basilisk: client,
         pypi: pypi_client,
     };
-    let planned: Vec<PlannedQuery> = packages
-        .iter()
-        .enumerate()
-        .filter_map(|(index, package)| plan_query(index, package))
-        .collect();
+    let mut report = AuditReport::default();
+    let mut planned = Vec::with_capacity(packages.len());
+    for package in &packages {
+        match plan_query(package) {
+            Some(query) => planned.push(query),
+            None => report.unchecked.push(UncheckedPackage {
+                package: package.name.clone(),
+                version: package.version.clone(),
+                ecosystem: package.ecosystem.clone(),
+                environments: package.environments.clone(),
+            }),
+        }
+    }
     let results = query_backends(&backends, &planned).await?;
 
     let references: BTreeSet<(Backend, String)> = planned
@@ -256,11 +254,8 @@ pub async fn audit(
     let documents = fetch_documents(&backends, references).await?;
 
     let suppressions = Suppressions::from_spec(ignore);
-    let mut report = AuditReport::default();
-    let mut checked = vec![false; packages.len()];
     for (query, result) in planned.iter().zip(&results) {
-        checked[query.package] = true;
-        let package = &packages[query.package];
+        let package = query.package;
         for vuln in &result.vulns {
             let doc = documents
                 .get(&(query.backend, vuln.id.clone()))
@@ -268,7 +263,7 @@ pub async fn audit(
             if doc.withdrawn.is_some() {
                 continue;
             }
-            let fixes = query.backend.fixed_versions(doc, &query.package_name);
+            let fixes = query.backend.fixed_versions(doc, package);
             let finding = Finding {
                 package: package.name.clone(),
                 version: query.version.clone(),
@@ -284,16 +279,6 @@ pub async fn audit(
                 ignore_reason: None,
             };
             record_finding(&mut report, finding, &suppressions);
-        }
-    }
-    for (package, checked) in packages.iter().zip(checked) {
-        if !checked {
-            report.unchecked.push(UncheckedPackage {
-                package: package.name.clone(),
-                version: package.version.clone(),
-                ecosystem: package.ecosystem.clone(),
-                environments: package.environments.clone(),
-            });
         }
     }
 
