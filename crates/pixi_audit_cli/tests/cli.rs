@@ -206,6 +206,42 @@ async fn json_mode_emits_only_the_report_on_stdout() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stale_ignore_rules_warn_on_stderr() {
+    let base = spawn_mock(true).await;
+    let output = run_cli(
+        base,
+        vec![
+            lockfile(),
+            "--json".to_string(),
+            "--ignore".to_string(),
+            "cve-2026-1234".to_string(),
+            "--ignore".to_string(),
+            "CVE-0000-0000".to_string(),
+            "--ignore-until-fixed".to_string(),
+            "GHSA-stale".to_string(),
+        ],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: ignore rule 'CVE-0000-0000' matched no finding"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("warning: ignore rule 'GHSA-stale' matched no finding"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("'cve-2026-1234'"), "stderr: {stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["unmatched_ignores"],
+        serde_json::json!(["CVE-0000-0000", "GHSA-stale"])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ignored_finding_exits_0_but_is_reported() {
     let base = spawn_mock(true).await;
     let output = run_cli(

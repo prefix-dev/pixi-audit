@@ -253,7 +253,7 @@ pub async fn audit(
         .collect();
     let documents = fetch_documents(&backends, references).await?;
 
-    let suppressions = Suppressions::from_spec(ignore);
+    let mut suppressions = Suppressions::from_spec(ignore);
     for (query, result) in planned.iter().zip(&results) {
         let package = query.package;
         for vuln in &result.vulns {
@@ -278,9 +278,10 @@ pub async fn audit(
                 url: query.backend.url(doc),
                 ignore_reason: None,
             };
-            record_finding(&mut report, finding, &suppressions);
+            record_finding(&mut report, finding, &mut suppressions);
         }
     }
+    report.unmatched_ignores = suppressions.unmatched(ignore);
 
     let order =
         |a: &Finding, b: &Finding| b.severity.cmp(&a.severity).then(a.package.cmp(&b.package));
@@ -294,10 +295,15 @@ pub async fn audit(
     Ok(report)
 }
 
-/// Lowercased suppression lists, ready for case-insensitive matching.
+/// Lowercased suppression lists, ready for case-insensitive matching, and
+/// a record of which ids matched a finding.
 struct Suppressions {
     ignore: BTreeSet<String>,
     until_fixed: BTreeSet<String>,
+    /// Lowercased ids from either list that matched a finding's id or
+    /// alias, whether or not that finding ended up suppressed: an
+    /// `until_fixed` id for a finding with a known fix has still matched.
+    matched: BTreeSet<String>,
 }
 
 impl Suppressions {
@@ -306,32 +312,53 @@ impl Suppressions {
         Self {
             ignore: lowercase(spec.ignore),
             until_fixed: lowercase(spec.ignore_until_fixed),
+            matched: BTreeSet::new(),
         }
+    }
+
+    /// The lowercased id or alias of `finding` that `set` lists, if any.
+    fn listed_in(set: &BTreeSet<String>, finding: &Finding) -> Option<String> {
+        std::iter::once(&finding.id)
+            .chain(&finding.aliases)
+            .map(|id| id.to_lowercase())
+            .find(|id| set.contains(id))
     }
 
     /// Why `finding` is suppressed, if it is. `ignore` wins over
     /// `until_fixed`, and `until_fixed` lapses once any fix is known.
-    fn reason_for(&self, finding: &Finding) -> Option<IgnoreReason> {
-        let listed_in = |set: &BTreeSet<String>| {
-            set.contains(&finding.id.to_lowercase())
-                || finding
-                    .aliases
-                    .iter()
-                    .any(|alias| set.contains(&alias.to_lowercase()))
-        };
+    fn reason_for(&mut self, finding: &Finding) -> Option<IgnoreReason> {
+        let ignored = Self::listed_in(&self.ignore, finding);
+        let until_fixed = Self::listed_in(&self.until_fixed, finding);
+        self.matched
+            .extend(ignored.iter().chain(until_fixed.iter()).cloned());
         let has_known_fix =
             !finding.fixed_versions.is_empty() || !finding.upstream_fixes.is_empty();
-        if listed_in(&self.ignore) {
+        if ignored.is_some() {
             Some(IgnoreReason::Always)
-        } else if listed_in(&self.until_fixed) && !has_known_fix {
+        } else if until_fixed.is_some() && !has_known_fix {
             Some(IgnoreReason::UntilFixed)
         } else {
             None
         }
     }
+
+    /// The ids of `spec` that matched no finding, in their original
+    /// spelling and order, each once.
+    fn unmatched(&self, spec: IgnoreSpec<'_>) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        spec.ignore
+            .iter()
+            .chain(spec.ignore_until_fixed)
+            .filter(|id| {
+                let lowercase = id.to_lowercase();
+                !self.matched.contains(&lowercase) && seen.insert(lowercase)
+            })
+            .cloned()
+            .collect()
+    }
 }
 
-fn record_finding(report: &mut AuditReport, mut finding: Finding, suppressions: &Suppressions) {
+fn record_finding(report: &mut AuditReport, mut finding: Finding, suppressions: &mut Suppressions) {
     match suppressions.reason_for(&finding) {
         Some(reason) => {
             finding.ignore_reason = Some(reason);

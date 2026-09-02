@@ -65,6 +65,8 @@ pixi audit --ignore-until-fixed CVE-2026-7777
 
 The finding returns as soon as either an ecosystem-specific or upstream fix is known.
 
+An ignore rule that matches no finding produces a warning on stderr, so suppressions left behind after an upgrade stand out. The JSON report lists them under `unmatched_ignores`.
+
 ### Set a severity threshold
 
 Use `--severity` to fail only on conda findings at or above a given level:

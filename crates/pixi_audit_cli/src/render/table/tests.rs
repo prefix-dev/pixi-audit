@@ -70,6 +70,7 @@ fn full_report() -> AuditReport {
             ignored: 1,
             unchecked: 1,
         },
+        unmatched_ignores: vec![],
     }
 }
 

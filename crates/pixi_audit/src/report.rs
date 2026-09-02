@@ -364,6 +364,10 @@ pub struct AuditReport {
     pub ignored: Vec<Finding>,
     pub unchecked: Vec<UncheckedPackage>,
     pub summary: AuditSummary,
+    /// Ids from the ignore lists that matched no finding's id or alias, as
+    /// written and without duplicates. Usually a suppression left behind
+    /// after the package was upgraded.
+    pub unmatched_ignores: Vec<String>,
 }
 
 #[cfg(test)]

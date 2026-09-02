@@ -242,6 +242,35 @@ async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
 }
 
 #[tokio::test]
+async fn ignore_rules_that_match_no_finding_are_reported() {
+    // BSLK-1 (alias CVE-2026-1234) is the only finding. Matching is by id
+    // or alias, case-insensitive, and an until-fixed rule that matched a
+    // finding with a known fix still counts as matched.
+    let base = spawn_mock().await;
+    let ignore = vec![
+        "cve-2026-1234".to_string(),
+        "CVE-9999-0001".to_string(),
+        "cve-9999-0001".to_string(),
+    ];
+    let until_fixed = vec!["bslk-1".to_string(), "GHSA-nope".to_string()];
+    let spec = IgnoreSpec {
+        ignore: &ignore,
+        ignore_until_fixed: &until_fixed,
+    };
+    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+
+    assert_eq!(report.ignored.len(), 1);
+    assert_eq!(report.unmatched_ignores, ["CVE-9999-0001", "GHSA-nope"]);
+
+    // Nothing to ignore, nothing unmatched.
+    let base = spawn_mock().await;
+    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+        .await
+        .unwrap();
+    assert!(report.unmatched_ignores.is_empty());
+}
+
+#[tokio::test]
 async fn until_fixed_with_known_fix_stays_vulnerable() {
     // BSLK-1 has fixed 3.1.1, so suppression does not apply.
     let base = spawn_mock().await;
