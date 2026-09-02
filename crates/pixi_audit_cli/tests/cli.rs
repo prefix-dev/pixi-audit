@@ -58,11 +58,20 @@ async fn spawn_mock(vulnerable: bool) -> String {
 
 /// Runs the binary without blocking the tokio worker serving the mock.
 async fn run_cli(base_url: String, args: Vec<String>) -> Output {
+    run_cli_env(base_url, args, vec![]).await
+}
+
+async fn run_cli_env(base_url: String, args: Vec<String>, env: Vec<(&str, &str)>) -> Output {
+    let env: Vec<(String, String)> = env
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     tokio::task::spawn_blocking(move || {
         std::process::Command::new(BIN)
             .args(&args)
             .env("PIXI_AUDIT_BASE_URL", &base_url)
             .env("PIXI_AUDIT_PYPI_BASE_URL", &base_url)
+            .envs(env)
             .output()
             .expect("binary runs")
     })
@@ -77,15 +86,23 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("openssl 3.1.0 (conda-forge) — default, prod"),
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("BSLK-1"))
+        .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
+    let cells: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(
+        cells,
+        [
+            "(conda)", "openssl", "3.1.0", "3.1.1", "BSLK-1", "Critical", "default,", "prod"
+        ],
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("BSLK-1"));
-    assert!(stdout.contains("CRITICAL"));
-    assert!(stdout.contains("fixed in: 3.1.1"));
-    assert!(stdout.contains("https://example.com/adv"));
-    assert!(stdout.contains("1 package(s) could not be checked:"));
+    assert!(stdout.contains("by severity: 1 critical, 0 high"));
+    assert!(stdout.contains("by status:   1 fixed, 0 not-fixed, 0 ignored"));
+    // Piped output carries no escape codes.
+    assert!(!stdout.contains('\x1b'), "stdout: {stdout}");
+    assert!(stdout.contains("Unchecked (1)"));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("error: audit found vulnerabilities"),
@@ -104,6 +121,76 @@ async fn clean_lockfile_exits_0() {
         stdout.contains("No vulnerabilities found"),
         "stdout: {stdout}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fields_and_sort_by_shape_the_table() {
+    let base = spawn_mock(true).await;
+    let output = run_cli(
+        base,
+        vec![
+            lockfile(),
+            "--fields".to_string(),
+            "vulnerability,name,url".to_string(),
+            "--sort-by".to_string(),
+            "name".to_string(),
+        ],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let header = stdout
+        .lines()
+        .find(|line| line.contains("Vulnerability"))
+        .unwrap();
+    assert_eq!(
+        header.split_whitespace().collect::<Vec<_>>(),
+        ["Vulnerability", "Name", "URL"]
+    );
+    let row = stdout.lines().find(|line| line.contains("BSLK-1")).unwrap();
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        ["BSLK-1", "(conda)", "openssl", "https://example.com/adv"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grouped_format_prints_findings_per_package() {
+    let base = spawn_mock(true).await;
+    let output = run_cli(
+        base,
+        vec![lockfile(), "--format".to_string(), "grouped".to_string()],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("openssl 3.1.0 (conda-forge) — default, prod"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("fixed in: 3.1.1"));
+    // Without hyperlink support the grouped format prints the advisory URL.
+    assert!(
+        stdout.contains("https://example.com/adv"),
+        "stdout: {stdout}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn github_actions_get_annotations_on_stderr() {
+    let base = spawn_mock(true).await;
+    let output = run_cli_env(base, vec![lockfile()], vec![("GITHUB_ACTIONS", "true")]).await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("::error title=BSLK-1 in openssl 3.1.0::critical severity, fixed in 3.1.1"),
+        "stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("::error"), "stdout: {stdout}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -133,8 +220,12 @@ async fn ignored_finding_exits_0_but_is_reported() {
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Ignored 1 finding(s):"), "stdout: {stdout}");
-    assert!(stdout.contains("BSLK-1 (openssl 3.1.0)"));
+    assert!(stdout.contains("Ignored (1)"), "stdout: {stdout}");
+    let row = stdout.lines().find(|line| line.contains("BSLK-1")).unwrap();
+    assert!(
+        row.contains("openssl") && row.ends_with("always"),
+        "row: {row}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -148,8 +239,9 @@ async fn environment_filter_limits_the_audit() {
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains("could not be checked"), "stdout: {stdout}");
-    assert!(stdout.contains("openssl 3.1.0 (conda-forge) — prod"));
+    assert!(!stdout.contains("Unchecked"), "stdout: {stdout}");
+    let row = stdout.lines().find(|line| line.contains("BSLK-1")).unwrap();
+    assert!(row.ends_with("  prod"), "row: {row}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -289,14 +381,8 @@ async fn basilisk_upstream_fix_is_rendered() {
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("CVE-2026-50219  fix released upstream: 2.8.2"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        !stdout.contains("no known fixed version"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("upstream: 2.8.2"), "stdout: {stdout}");
+    assert!(!stdout.contains("not-fixed  "), "stdout: {stdout}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -347,7 +433,7 @@ async fn ignore_until_fixed_suppresses_only_unfixed_findings() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains("BSLK-NOFIX (openssl 3.1.0) — until a fix is released"),
+        stdout.contains("until a fix is released"),
         "stdout: {stdout}"
     );
 
@@ -383,7 +469,7 @@ async fn discovery_and_config_file_drive_a_bare_invocation() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Ignored 1 finding(s):"), "stdout: {stdout}");
+    assert!(stdout.contains("Ignored (1)"), "stdout: {stdout}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

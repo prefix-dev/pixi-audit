@@ -3,7 +3,46 @@ use pixi_audit::{
     UncheckedPackage,
 };
 
+use pixi_audit::{CondaPublication, UpstreamFix, UpstreamOrigin};
+
 use super::*;
+
+fn on_pypi(version: &str) -> UpstreamFix {
+    UpstreamFix {
+        version: version.to_string(),
+        origin: UpstreamOrigin::Ecosystem {
+            ecosystem: "PyPI".to_string(),
+        },
+    }
+}
+
+fn project_release(version: &str, conda_publication: CondaPublication) -> UpstreamFix {
+    UpstreamFix {
+        version: version.to_string(),
+        origin: UpstreamOrigin::Project { conda_publication },
+    }
+}
+
+#[test]
+fn upstream_fixes_say_where_they_exist() {
+    let cases = [
+        (on_pypi("3.2.0"), "PyPI: 3.2.0", "3.2.0 on PyPI"),
+        (
+            project_release("2.8.2", CondaPublication::NotPublished),
+            "upstream: 2.8.2",
+            "2.8.2 released upstream, no conda-forge build",
+        ),
+        (
+            project_release("2.8.2", CondaPublication::Unknown),
+            "upstream: 2.8.2 (unconfirmed)",
+            "2.8.2 released upstream, conda-forge build unconfirmed",
+        ),
+    ];
+    for (fix, label, sentence) in cases {
+        assert_eq!(upstream_fix_label(&fix), label);
+        assert_eq!(describe_upstream_fix(&fix), sentence);
+    }
+}
 
 fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
     Finding {
@@ -15,7 +54,7 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
         aliases: vec![],
         severity,
         fixed_versions: vec!["3.1.4".to_string()],
-        upstream_fixed_versions: vec![],
+        upstream_fixes: vec![],
         summary: None,
         url: Some(format!("https://osv.dev/{id}")),
         ignore_reason: None,
@@ -42,7 +81,7 @@ fn empty_report_renders_clean_summary() {
 fn findings_are_grouped_per_package_with_fix_and_url() {
     let mut second = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
     second.fixed_versions = vec![];
-    second.upstream_fixed_versions = vec!["3.2.0".to_string()];
+    second.upstream_fixes = vec![on_pypi("3.2.0")];
     second.url = None;
     let report = AuditReport {
         vulnerabilities: vec![
@@ -64,7 +103,7 @@ fn findings_are_grouped_per_package_with_fix_and_url() {
     );
     assert!(text.contains("CVE-2026-0001  HIGH      fixed in: 3.1.4"));
     assert!(text.contains("https://osv.dev/CVE-2026-0001"));
-    assert!(text.contains("CVE-2026-0002  MEDIUM    fix released upstream: 3.2.0"));
+    assert!(text.contains("CVE-2026-0002  MEDIUM    fix released elsewhere: 3.2.0 on PyPI"));
     assert!(
         text.contains("2 vulnerabilities in 1 package(s) (10 audited, 0 ignored, 0 unchecked)")
     );

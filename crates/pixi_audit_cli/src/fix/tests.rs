@@ -20,7 +20,7 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
         aliases: vec![],
         severity: SeverityBand::High,
         fixed_versions: fixed_versions.iter().map(ToString::to_string).collect(),
-        upstream_fixed_versions: vec![],
+        upstream_fixes: vec![],
         summary: None,
         url: None,
         ignore_reason: None,
@@ -30,7 +30,12 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
 #[test]
 fn fixable_package_names_dedupes_and_skips_ignored_and_unfixed() {
     let mut upstream_only = finding("pillow", "CVE-5");
-    upstream_only.upstream_fixed_versions = vec!["10.2.0".to_string()];
+    upstream_only.upstream_fixes = vec![pixi_audit::UpstreamFix {
+        version: "10.2.0".to_string(),
+        origin: pixi_audit::UpstreamOrigin::Ecosystem {
+            ecosystem: "PyPI".to_string(),
+        },
+    }];
     let report = AuditReport {
         vulnerabilities: vec![
             finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),

@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use console::style;
-use pixi_audit::{AuditReport, Finding, IgnoreReason, PackageEcosystem, PackageName, SeverityBand};
+use pixi_audit::{
+    AuditReport, CondaPublication, Finding, IgnoreReason, PackageEcosystem, PackageName,
+    SeverityBand, UpstreamFix, UpstreamOrigin,
+};
 use supports_hyperlinks::Stream;
 
 /// How [`render_human`] adapts its output to the terminal it is written to.
@@ -177,15 +180,60 @@ fn severity_cell(band: SeverityBand) -> Option<String> {
 fn fix_note(finding: &Finding) -> String {
     if !finding.fixed_versions.is_empty() {
         format!("  fixed in: {}", finding.fixed_versions.join(", "))
-    } else if !finding.upstream_fixed_versions.is_empty() {
+    } else if !finding.upstream_fixes.is_empty() {
         format!(
-            "  fix released upstream: {}",
-            finding.upstream_fixed_versions.join(", ")
+            "  fix released elsewhere: {}",
+            describe_upstream_fixes(finding)
         )
     } else {
         "  no known fixed version".to_string()
     }
 }
+
+/// Every upstream fix of a finding spelled out, `; `-separated.
+pub fn describe_upstream_fixes(finding: &Finding) -> String {
+    finding
+        .upstream_fixes
+        .iter()
+        .map(describe_upstream_fix)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// One upstream fix in a sentence: where it exists and what that means for
+/// the audited package.
+pub fn describe_upstream_fix(fix: &UpstreamFix) -> String {
+    match &fix.origin {
+        UpstreamOrigin::Ecosystem { ecosystem } => format!("{} on {ecosystem}", fix.version),
+        UpstreamOrigin::Project { conda_publication } => match conda_publication {
+            CondaPublication::NotPublished => {
+                format!("{} released upstream, no conda-forge build", fix.version)
+            }
+            CondaPublication::Unknown => format!(
+                "{} released upstream, conda-forge build unconfirmed",
+                fix.version
+            ),
+            CondaPublication::Published => format!("{} released upstream", fix.version),
+        },
+    }
+}
+
+/// One upstream fix as a short table label: `PyPI: 3.2.0`,
+/// `upstream: 2.8.2`, or `upstream: 2.8.2 (unconfirmed)` when basilisk
+/// could not tell whether conda-forge has a build.
+pub fn upstream_fix_label(fix: &UpstreamFix) -> String {
+    match &fix.origin {
+        UpstreamOrigin::Ecosystem { ecosystem } => format!("{ecosystem}: {}", fix.version),
+        UpstreamOrigin::Project { conda_publication } => match conda_publication {
+            CondaPublication::Unknown => format!("upstream: {} (unconfirmed)", fix.version),
+            CondaPublication::NotPublished | CondaPublication::Published => {
+                format!("upstream: {}", fix.version)
+            }
+        },
+    }
+}
+
+pub mod table;
 
 #[cfg(test)]
 mod tests;

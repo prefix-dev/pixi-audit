@@ -68,7 +68,7 @@ fn gate_applies_threshold_with_unknown_failsafe() {
         aliases: vec![],
         severity,
         fixed_versions: vec![],
-        upstream_fixed_versions: vec![],
+        upstream_fixes: vec![],
         summary: None,
         url: None,
         ignore_reason: None,

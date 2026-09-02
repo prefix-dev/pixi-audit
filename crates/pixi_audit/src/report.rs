@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::types::OsvSeverity;
@@ -286,6 +286,38 @@ pub struct IgnoreSpec<'a> {
     pub ignore_until_fixed: &'a [String],
 }
 
+/// What basilisk knows about a conda-forge build of a fixed release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "kebab-case", deserialize = "snake_case"))]
+pub enum CondaPublication {
+    Published,
+    NotPublished,
+    Unknown,
+}
+
+/// Where a fix exists when it is not a release in the audited ecosystem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "origin", rename_all = "kebab-case")]
+pub enum UpstreamOrigin {
+    /// The same package has a fixed release in another ecosystem, such as
+    /// the PyPI release of a package audited from conda-forge.
+    Ecosystem { ecosystem: String },
+    /// The project itself released the fix. This comes from advisories
+    /// matched by CPE, where no ecosystem is involved; `conda_publication`
+    /// says whether basilisk could find a conda-forge build of it, and is
+    /// never `Published` here since that counts as a fixed version.
+    Project { conda_publication: CondaPublication },
+}
+
+/// A fix that exists somewhere other than the audited ecosystem.
+/// Informative only: it may not be installable for the audited package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpstreamFix {
+    pub version: String,
+    #[serde(flatten)]
+    pub origin: UpstreamOrigin,
+}
+
 /// One (package, vulnerability) pair.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
@@ -298,11 +330,9 @@ pub struct Finding {
     pub severity: SeverityBand,
     /// Fixed versions in the package's own ecosystem.
     pub fixed_versions: Vec<String>,
-    /// Fixed versions of the same package in other ecosystems (e.g. the PyPI
-    /// release that fixes an advisory reported against a conda-forge
-    /// package). Informative only — those releases may not exist in the
-    /// audited ecosystem yet.
-    pub upstream_fixed_versions: Vec<String>,
+    /// Fixes known outside the package's own ecosystem, each with where it
+    /// exists. Informative only; `--fix` cannot install these.
+    pub upstream_fixes: Vec<UpstreamFix>,
     pub summary: Option<String>,
     pub url: Option<String>,
     /// Set only on findings in the ignored bucket.

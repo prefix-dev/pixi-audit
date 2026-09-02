@@ -85,13 +85,43 @@ pixi audit --fix
 
 Existing upper bounds are preserved. Transitive dependencies and Git, path, or URL dependencies without a version are left alone. `pixi update` only runs when at least one finding has a fixed release in its own ecosystem. Fixes that exist only upstream are reported but cannot be installed.
 
-### Write JSON
+### Choose an output format
+
+The default report is a short status block followed by one row per finding:
+
+```console
+ ✔ Audited pixi.lock                 [312 packages audited, 1 unchecked]
+ ✔ Scanned for vulnerabilities       [3 vulnerability matches]
+   ├── by severity: 1 critical, 0 high, 1 medium, 0 low, 1 unknown
+   └── by status:   2 fixed, 1 not-fixed, 0 ignored
+
+ Name        Version  Fixed in  Vulnerability        Severity  Environments
+ C openssl   3.1.0    3.1.1     CVE-2023-0464        Critical  default, prod
+ C openssl   3.1.0              CVE-2023-2975        Medium    default, prod
+ P requests  2.32.0   2.32.4    GHSA-9hjg-9r4m-mvj7  Unknown   default
+```
+
+As in `pixi lock`, a green `C` marks a conda package and a blue `P` a PyPI package; without colors the marker reads `(conda)` or `(pypi)`. Rows are sorted most severe first. `--sort-by` picks another column, and `--fields` picks which columns to show and in what order, as in `pixi list`:
+
+```console
+pixi audit --sort-by name --fields name,version,vulnerability,fixed-in,url
+```
+
+Available fields are `name`, `version`, `fixed-in`, `kind`, `source`, `vulnerability`, `severity`, `environments`, `aliases`, `summary`, `url`, and `ignored`. Kind and source are off by default: the `C`/`P` marker already tells conda-forge and PyPI apart, and those are the only sources that are audited today. Unchecked packages keep a Source column, since the channel is what explains why they were skipped. An empty *Fixed in* cell means no fixed release is known. When a fix exists but not as a release in the audited ecosystem, the cell says where: `PyPI: 1.2.3` names the ecosystem that has it, `upstream: 1.2.3` means the project released it but conda-forge has no build yet, and `upstream: 1.2.3 (unconfirmed)` means basilisk could not tell whether conda-forge has a build. In JSON these appear under `upstream_fixes`, each with its `origin`.
+
+On a terminal the table is colored and advisory IDs link to their advisory pages. When stdout is piped or `NO_COLOR` is set, the same table is written as plain text at full width, so nothing is clipped in logs. Set `CLICOLOR_FORCE=1` to keep colors in CI logs that render them.
+
+`--format grouped` prints findings grouped per package instead, and `--format json` (or `--json`) writes the report as pretty-printed JSON:
 
 ```console
 pixi audit --json > audit-report.json
 ```
 
 Progress and diagnostics go to stderr. The report goes to stdout, so redirecting or piping JSON is safe.
+
+### Continuous integration
+
+Inside GitHub Actions, every finding is also emitted as a [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) on stderr, so vulnerabilities show up as annotations on the job and on the pull request. They are errors when the audit fails and warnings when every finding sits below the `--severity` threshold.
 
 ## Configuration
 

@@ -7,6 +7,7 @@ use axum::{
 use url::Url;
 
 use super::*;
+use crate::{CondaPublication, UpstreamFix, UpstreamOrigin};
 use crate::{
     client::BasiliskClient,
     test_support::{
@@ -230,8 +231,13 @@ async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
     assert_eq!(report.vulnerabilities.len(), 1);
     assert!(report.ignored.is_empty());
     assert_eq!(
-        report.vulnerabilities[0].upstream_fixed_versions,
-        vec!["3.1.1"]
+        report.vulnerabilities[0].upstream_fixes,
+        vec![UpstreamFix {
+            version: "3.1.1".to_string(),
+            origin: UpstreamOrigin::Project {
+                conda_publication: CondaPublication::NotPublished,
+            },
+        }]
     );
 }
 

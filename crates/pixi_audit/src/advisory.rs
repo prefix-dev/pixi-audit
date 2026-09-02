@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 use crate::{
-    report::PackageName,
+    report::{CondaPublication, PackageName, UpstreamFix, UpstreamOrigin},
     types::{OsvAffected, OsvVulnerability},
 };
 
@@ -16,14 +16,6 @@ struct BasiliskDatabaseSpecific {
 struct BasiliskFixMetadata {
     fix_version: String,
     conda_publication: CondaPublication,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CondaPublication {
-    Published,
-    NotPublished,
-    Unknown,
 }
 
 fn basilisk_fix_metadata(
@@ -39,20 +31,34 @@ fn basilisk_fix_metadata(
 pub(crate) struct FixedVersions {
     /// Fixes released in the queried ecosystem.
     pub same_ecosystem: Vec<String>,
-    /// Fixes of the same package released in other ecosystems. Informative
-    /// only: those releases may not exist in the queried ecosystem yet.
-    pub upstream: Vec<String>,
+    /// Fixes known outside the queried ecosystem, with their origin.
+    /// Informative only: those releases may not exist in the queried
+    /// ecosystem yet.
+    pub upstream: Vec<UpstreamFix>,
 }
 
 impl FixedVersions {
-    fn push(&mut self, same_ecosystem: bool, version: &str) {
-        let versions = if same_ecosystem {
-            &mut self.same_ecosystem
-        } else {
-            &mut self.upstream
-        };
-        if !versions.iter().any(|existing| existing == version) {
-            versions.push(version.to_string());
+    fn push_same_ecosystem(&mut self, version: &str) {
+        if !self
+            .same_ecosystem
+            .iter()
+            .any(|existing| existing == version)
+        {
+            self.same_ecosystem.push(version.to_string());
+        }
+    }
+
+    /// The first origin reported for a version wins.
+    fn push_upstream(&mut self, version: &str, origin: UpstreamOrigin) {
+        if !self
+            .upstream
+            .iter()
+            .any(|existing| existing.version == version)
+        {
+            self.upstream.push(UpstreamFix {
+                version: version.to_string(),
+                origin,
+            });
         }
     }
 }
@@ -98,11 +104,20 @@ pub(crate) fn fixed_versions(
         if !entry_name.is_none_or(|name| package.matches(name)) {
             continue;
         }
-        let same_ecosystem =
-            entry_ecosystem.is_none_or(|entry| entry.eq_ignore_ascii_case(ecosystem));
+        let other_ecosystem =
+            entry_ecosystem.filter(|entry| !entry.eq_ignore_ascii_case(ecosystem));
+        let same_ecosystem = other_ecosystem.is_none();
 
         for fixed in release_fixed_events(affected) {
-            fixes.push(same_ecosystem, fixed);
+            match other_ecosystem {
+                None => fixes.push_same_ecosystem(fixed),
+                Some(other) => fixes.push_upstream(
+                    fixed,
+                    UpstreamOrigin::Ecosystem {
+                        ecosystem: other.to_string(),
+                    },
+                ),
+            }
         }
 
         let explicit_conda_forge_match = ecosystem.eq_ignore_ascii_case("conda-forge")
@@ -112,15 +127,23 @@ pub(crate) fn fixed_versions(
         if explicit_conda_forge_match
             && let Some(metadata) = basilisk_fix_metadata(affected.database_specific.as_ref())
         {
-            let published = matches!(metadata.conda_publication, CondaPublication::Published);
-            fixes.push(published, &metadata.fix_version);
+            // A CPE-matched fix is the project's own release; only a
+            // published conda-forge build makes it a fixed version here.
+            match metadata.conda_publication {
+                CondaPublication::Published => fixes.push_same_ecosystem(&metadata.fix_version),
+                conda_publication => fixes.push_upstream(
+                    &metadata.fix_version,
+                    UpstreamOrigin::Project { conda_publication },
+                ),
+            }
         }
     }
     // A version already reported as fixed in the package's own ecosystem is
     // not additionally an "upstream" fix.
+    let same_ecosystem = &fixes.same_ecosystem;
     fixes
         .upstream
-        .retain(|version| !fixes.same_ecosystem.contains(version));
+        .retain(|fix| !same_ecosystem.contains(&fix.version));
     fixes
 }
 
