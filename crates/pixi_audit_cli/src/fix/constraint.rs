@@ -1,6 +1,5 @@
 //! Plans fixed versions and applies them to dependency constraints.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -9,24 +8,48 @@ use rattler_conda_types::{
     NamelessMatchSpec, Version as CondaVersion, VersionSpec,
     version_spec::{LogicalOperator, RangeOperator},
 };
-use toml_edit::{Formatted, Item, TableLike, Value};
+use toml_edit::{Item, TableLike, Value};
 use uv_pep440::{Version as PypiVersion, VersionSpecifier, VersionSpecifiers};
 
-pub(super) fn plan_fixed_versions(
-    report: &AuditReport,
-) -> BTreeMap<(String, PackageEcosystem), String> {
-    let mut fixes = BTreeMap::new();
+/// A version parsed with its ecosystem's rules, so that comparisons are
+/// never lexicographic ("10.0" must sort after "9.0").
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum FixVersion {
+    Conda(CondaVersion),
+    Pypi(PypiVersion),
+}
+
+impl FixVersion {
+    fn parse(ecosystem: &PackageEcosystem, version: &str) -> Option<Self> {
+        match ecosystem {
+            PackageEcosystem::Pypi => PypiVersion::from_str(version).ok().map(Self::Pypi),
+            PackageEcosystem::CondaForge | PackageEcosystem::Other(_) => {
+                CondaVersion::from_str(version).ok().map(Self::Conda)
+            }
+        }
+    }
+}
+
+/// The minimum version each vulnerable package must be raised to, keyed by
+/// normalized name and ecosystem.
+pub(super) type FixPlan = BTreeMap<(String, PackageEcosystem), FixVersion>;
+
+pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
+    let mut fixes = FixPlan::new();
     for finding in &report.vulnerabilities {
+        let Some(locked) = FixVersion::parse(&finding.ecosystem, &finding.version) else {
+            continue;
+        };
         // OSV can publish fixed events for multiple release branches. Pick the
         // first fix newer than the locked version instead of forcing the
-        // highest (and potentially incompatible) major release.
+        // highest (and potentially incompatible) major release. Versions that
+        // do not parse are skipped rather than compared as text.
         let Some(fixed) = finding
             .fixed_versions
             .iter()
-            .filter(|fixed| {
-                compare_versions(fixed, &finding.version, &finding.ecosystem) == Ordering::Greater
-            })
-            .min_by(|left, right| compare_versions(left, right, &finding.ecosystem))
+            .filter_map(|fixed| FixVersion::parse(&finding.ecosystem, fixed))
+            .filter(|fixed| *fixed > locked)
+            .min()
         else {
             continue;
         };
@@ -36,36 +59,12 @@ pub(super) fn plan_fixed_versions(
         );
         // Multiple advisories for one package must all be resolved, so retain
         // the greatest of their minimum required fixes.
-        fixes
-            .entry(key)
-            .and_modify(|current: &mut String| {
-                if compare_versions(current, fixed, &finding.ecosystem) == Ordering::Less {
-                    *current = fixed.clone();
-                }
-            })
-            .or_insert_with(|| fixed.clone());
+        let required = fixes.entry(key).or_insert_with(|| fixed.clone());
+        if *required < fixed {
+            *required = fixed;
+        }
     }
     fixes
-}
-
-fn compare_versions(left: &str, right: &str, ecosystem: &PackageEcosystem) -> Ordering {
-    if matches!(ecosystem, PackageEcosystem::Pypi) {
-        match (
-            uv_pep440::Version::from_str(left),
-            uv_pep440::Version::from_str(right),
-        ) {
-            (Ok(left), Ok(right)) => left.cmp(&right),
-            _ => left.cmp(right),
-        }
-    } else {
-        match (
-            rattler_conda_types::Version::from_str(left),
-            rattler_conda_types::Version::from_str(right),
-        ) {
-            (Ok(left), Ok(right)) => left.cmp(&right),
-            _ => left.cmp(right),
-        }
-    }
 }
 
 fn normalize_name(name: &str, ecosystem: &PackageEcosystem) -> String {
@@ -77,10 +76,11 @@ fn normalize_name(name: &str, ecosystem: &PackageEcosystem) -> String {
     }
 }
 
-pub(super) fn update_manifest_dependencies(
-    table: &mut dyn TableLike,
-    fixes: &BTreeMap<(String, PackageEcosystem), String>,
-) -> usize {
+/// Walks every dependency table under `table`, at any nesting depth
+/// (`[dependencies]`, `[feature.x.pypi-dependencies]`,
+/// `[target.linux-64.host-dependencies]`, ...), and returns how many
+/// constraints were changed.
+pub(super) fn update_manifest_dependencies(table: &mut dyn TableLike, fixes: &FixPlan) -> usize {
     let mut changed = 0;
     for (key, item) in table.iter_mut() {
         let ecosystem = match key.get() {
@@ -90,15 +90,13 @@ pub(super) fn update_manifest_dependencies(
             }
             _ => None,
         };
-        if let Some(ecosystem) = ecosystem {
-            if let Some(dependencies) = item.as_table_like_mut() {
-                changed += update_dependencies(dependencies, &ecosystem, fixes);
-            }
+        let Some(child) = item.as_table_like_mut() else {
             continue;
-        }
-        if let Some(child) = item.as_table_like_mut() {
-            changed += update_manifest_dependencies(child, fixes);
-        }
+        };
+        changed += match ecosystem {
+            Some(ecosystem) => update_dependencies(child, &ecosystem, fixes),
+            None => update_manifest_dependencies(child, fixes),
+        };
     }
     changed
 }
@@ -106,7 +104,7 @@ pub(super) fn update_manifest_dependencies(
 fn update_dependencies(
     dependencies: &mut dyn TableLike,
     ecosystem: &PackageEcosystem,
-    fixes: &BTreeMap<(String, PackageEcosystem), String>,
+    fixes: &FixPlan,
 ) -> usize {
     let mut changed = 0;
     for (name, item) in dependencies.iter_mut() {
@@ -114,84 +112,84 @@ fn update_dependencies(
         let Some(fixed) = fixes.get(&key) else {
             continue;
         };
-        if set_constraint(item, fixed, ecosystem) {
+        if set_constraint(item, fixed) {
             changed += 1;
         }
     }
     changed
 }
 
-fn set_constraint(item: &mut Item, fixed: &str, ecosystem: &PackageEcosystem) -> bool {
-    if let Some(value) = item.as_value_mut()
-        && set_string_value(value, fixed, ecosystem)
-    {
-        return true;
-    }
-    if let Some(inline) = item.as_inline_table_mut()
-        && let Some(version) = inline.get_mut("version")
-        && set_string_value(version, fixed, ecosystem)
-    {
-        return true;
-    }
-    if let Some(table) = item.as_table_mut()
-        && let Some(version) = table.get_mut("version").and_then(Item::as_value_mut)
-        && set_string_value(version, fixed, ecosystem)
-    {
-        return true;
-    }
-    false
+/// Raises the constraint in a single dependency entry. A registry string
+/// (`pkg = ">=1"`) is updated in place; an inline or full table is updated
+/// through its `version` field. Git, path, and URL requirements have no
+/// `version` and are left untouched.
+fn set_constraint(item: &mut Item, fixed: &FixVersion) -> bool {
+    let version = if item.is_str() {
+        item.as_value_mut()
+    } else {
+        item.as_table_like_mut()
+            .and_then(|table| table.get_mut("version"))
+            .and_then(Item::as_value_mut)
+    };
+    version.is_some_and(|value| set_string_value(value, fixed))
 }
 
-fn set_string_value(value: &mut Value, fixed: &str, ecosystem: &PackageEcosystem) -> bool {
+fn set_string_value(value: &mut Value, fixed: &FixVersion) -> bool {
     let Value::String(version) = value else {
         return false;
     };
-    let Some(constraint) = tighten_constraint(version.value(), fixed, ecosystem) else {
+    let Some(constraint) = tighten_constraint(version.value(), fixed) else {
         return false;
     };
     if constraint == *version.value() {
         return false;
     }
     let decor = version.decor().clone();
-    *version = Formatted::new(constraint);
+    *version = toml_edit::Formatted::new(constraint);
     *version.decor_mut() = decor;
     true
 }
 
-fn tighten_constraint(current: &str, fixed: &str, ecosystem: &PackageEcosystem) -> Option<String> {
-    if matches!(ecosystem, PackageEcosystem::Pypi) {
-        let current = match current.trim() {
-            "" | "*" => VersionSpecifiers::empty(),
-            current => VersionSpecifiers::from_str(current).ok()?,
-        };
-        let fixed = PypiVersion::from_str(fixed).ok()?;
-        if !current.contains(&fixed) {
-            return None;
+/// Adds `>= fixed` to `current`, keeping its other bounds. Returns `None`
+/// when `current` cannot be parsed or already excludes `fixed`, in which
+/// case the requirement is left alone.
+fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
+    match fixed {
+        FixVersion::Pypi(fixed) => {
+            let current = match current.trim() {
+                "" | "*" => VersionSpecifiers::empty(),
+                current => VersionSpecifiers::from_str(current).ok()?,
+            };
+            if !current.contains(fixed) {
+                return None;
+            }
+            let lower_bound = VersionSpecifier::greater_than_equal_version(fixed.clone());
+            Some(
+                current
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(lower_bound))
+                    .collect::<VersionSpecifiers>()
+                    .to_string(),
+            )
         }
-        let lower_bound = VersionSpecifier::greater_than_equal_version(fixed);
-        Some(
-            current
-                .iter()
-                .cloned()
-                .chain(std::iter::once(lower_bound))
-                .collect::<VersionSpecifiers>()
-                .to_string(),
-        )
-    } else {
-        let mut current = current.parse::<NamelessMatchSpec>().ok()?;
-        let fixed = CondaVersion::from_str(fixed).ok()?;
-        if current
-            .version
-            .as_ref()
-            .is_some_and(|constraint| !constraint.matches(&fixed))
-        {
-            return None;
+        FixVersion::Conda(fixed) => {
+            let mut current = current.parse::<NamelessMatchSpec>().ok()?;
+            if current
+                .version
+                .as_ref()
+                .is_some_and(|constraint| !constraint.matches(fixed))
+            {
+                return None;
+            }
+            let lower_bound = VersionSpec::Range(RangeOperator::GreaterEquals, fixed.clone());
+            current.version = Some(match current.version.take() {
+                None | Some(VersionSpec::Any) => lower_bound,
+                Some(existing) => {
+                    VersionSpec::Group(LogicalOperator::And, vec![existing, lower_bound])
+                }
+            });
+            Some(current.to_string())
         }
-        let lower_bound = VersionSpec::Range(RangeOperator::GreaterEquals, fixed);
-        current.version = Some(match current.version.take() {
-            None | Some(VersionSpec::Any) => lower_bound,
-            Some(existing) => VersionSpec::Group(LogicalOperator::And, vec![existing, lower_bound]),
-        });
-        Some(current.to_string())
     }
 }

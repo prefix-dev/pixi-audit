@@ -227,6 +227,40 @@ requests = ">=1,<2"
 }
 
 #[test]
+fn unparseable_fixed_versions_are_skipped_not_compared_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("pixi.toml");
+    std::fs::write(
+        &manifest,
+        r#"[workspace]
+name = "demo"
+
+[pypi-dependencies]
+requests = "*"
+"#,
+    )
+    .unwrap();
+    // "10.0" sorts before "9.0" as text; typed comparison must pick 10.0 as
+    // the lowest fix above the locked 9.5, and ignore the junk entry.
+    let mut finding = finding_with_fix(
+        "requests",
+        "PYSEC-1",
+        "PyPI",
+        &["not-a-version", "10.0", "11.0"],
+    );
+    finding.version = "9.5".to_string();
+    let report = AuditReport {
+        vulnerabilities: vec![finding],
+        ..Default::default()
+    };
+
+    assert_eq!(bump_manifest_constraints(&manifest, &report).unwrap(), 1);
+    let content = std::fs::read_to_string(manifest).unwrap();
+    assert!(content.contains(">=10.0"), "manifest: {content}");
+    assert!(!content.contains(">=11.0"), "manifest: {content}");
+}
+
+#[test]
 fn leaves_constraint_unchanged_when_no_fix_satisfies_it() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("pixi.toml");
