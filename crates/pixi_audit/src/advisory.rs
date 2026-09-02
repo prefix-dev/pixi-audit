@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::types::OsvVulnerability;
+use crate::types::{OsvAffected, OsvVulnerability};
 
 #[derive(Debug, Deserialize)]
 struct BasiliskDatabaseSpecific {
@@ -31,10 +31,42 @@ fn basilisk_fix_metadata(
     (!metadata.basilisk.fix_version.trim().is_empty()).then_some(metadata.basilisk)
 }
 
-fn push_unique(versions: &mut Vec<String>, version: &str) {
-    if !versions.iter().any(|existing| existing == version) {
-        versions.push(version.to_string());
+/// Fixed versions for one package from an OSV document, split by origin.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct FixedVersions {
+    /// Fixes released in the queried ecosystem.
+    pub same_ecosystem: Vec<String>,
+    /// Fixes of the same package released in other ecosystems. Informative
+    /// only: those releases may not exist in the queried ecosystem yet.
+    pub upstream: Vec<String>,
+}
+
+impl FixedVersions {
+    fn push(&mut self, same_ecosystem: bool, version: &str) {
+        let versions = if same_ecosystem {
+            &mut self.same_ecosystem
+        } else {
+            &mut self.upstream
+        };
+        if !versions.iter().any(|existing| existing == version) {
+            versions.push(version.to_string());
+        }
     }
+}
+
+/// `fixed` events from the entry's release ranges (`ECOSYSTEM`/`SEMVER`).
+/// Git ranges carry commit hashes, which are not installable versions.
+fn release_fixed_events(affected: &OsvAffected) -> impl Iterator<Item = &str> {
+    affected
+        .ranges
+        .iter()
+        .filter(|range| {
+            range.kind.as_deref().is_some_and(|kind| {
+                kind.eq_ignore_ascii_case("ECOSYSTEM") || kind.eq_ignore_ascii_case("SEMVER")
+            })
+        })
+        .flat_map(|range| range.events.iter())
+        .filter_map(|event| event.fixed.as_deref())
 }
 
 /// Fixed versions for `package_name` from an OSV document, split by origin.
@@ -48,89 +80,71 @@ pub(crate) fn fixed_versions(
     doc: &OsvVulnerability,
     package_name: &str,
     ecosystem: &str,
-) -> (Vec<String>, Vec<String>) {
-    let mut same_ecosystem = Vec::new();
-    let mut upstream = Vec::new();
+) -> FixedVersions {
+    let mut fixes = FixedVersions::default();
     for affected in &doc.affected {
-        let name_matches = affected
+        let entry_name = affected.package.as_ref().and_then(|p| p.name.as_deref());
+        let entry_ecosystem = affected
             .package
             .as_ref()
-            .and_then(|p| p.name.as_deref())
-            .is_none_or(|name| name.eq_ignore_ascii_case(package_name));
+            .and_then(|p| p.ecosystem.as_deref());
+
+        // An entry naming no package applies to the queried one.
+        let name_matches = entry_name.is_none_or(|name| name.eq_ignore_ascii_case(package_name));
         if !name_matches {
             continue;
         }
-        let ecosystem_matches = affected
-            .package
-            .as_ref()
-            .and_then(|p| p.ecosystem.as_deref())
-            .is_none_or(|e| e.eq_ignore_ascii_case(ecosystem));
-        let versions = if ecosystem_matches {
-            &mut same_ecosystem
-        } else {
-            &mut upstream
-        };
-        for range in &affected.ranges {
-            let is_release_range = range.kind.as_deref().is_some_and(|kind| {
-                kind.eq_ignore_ascii_case("ECOSYSTEM") || kind.eq_ignore_ascii_case("SEMVER")
-            });
-            if !is_release_range {
-                continue;
-            }
-            for event in &range.events {
-                if let Some(fixed) = &event.fixed {
-                    push_unique(versions, fixed);
-                }
-            }
+        let same_ecosystem =
+            entry_ecosystem.is_none_or(|entry| entry.eq_ignore_ascii_case(ecosystem));
+
+        for fixed in release_fixed_events(affected) {
+            fixes.push(same_ecosystem, fixed);
         }
 
-        let basilisk_target_matches = ecosystem.eq_ignore_ascii_case("conda-forge")
-            && affected.package.as_ref().is_some_and(|package| {
-                package
-                    .name
-                    .as_deref()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(package_name))
-                    && package.ecosystem.as_deref().is_some_and(|entry_ecosystem| {
-                        entry_ecosystem.eq_ignore_ascii_case(ecosystem)
-                    })
-            });
-        if basilisk_target_matches
+        let explicit_conda_forge_match = ecosystem.eq_ignore_ascii_case("conda-forge")
+            && entry_name.is_some()
+            && entry_ecosystem.is_some()
+            && same_ecosystem;
+        if explicit_conda_forge_match
             && let Some(metadata) = basilisk_fix_metadata(affected.database_specific.as_ref())
         {
-            match metadata.conda_publication {
-                CondaPublication::Published => {
-                    push_unique(&mut same_ecosystem, &metadata.fix_version)
-                }
-                CondaPublication::NotPublished | CondaPublication::Unknown => {
-                    push_unique(&mut upstream, &metadata.fix_version)
-                }
-            }
+            let published = matches!(metadata.conda_publication, CondaPublication::Published);
+            fixes.push(published, &metadata.fix_version);
         }
     }
     // A version already reported as fixed in the package's own ecosystem is
     // not additionally an "upstream" fix.
-    upstream.retain(|version| !same_ecosystem.contains(version));
-    (same_ecosystem, upstream)
+    fixes
+        .upstream
+        .retain(|version| !fixes.same_ecosystem.contains(version));
+    fixes
 }
 
+fn reference_url<'a>(doc: &'a OsvVulnerability, kind: &str) -> Option<&'a str> {
+    doc.references
+        .iter()
+        .find(|reference| reference.kind.as_deref() == Some(kind))
+        .map(|reference| reference.url.as_str())
+}
+
+/// The advisory link for a Basilisk document: the `ADVISORY` reference,
+/// else the first reference of any kind.
 pub(crate) fn advisory_url(doc: &OsvVulnerability) -> Option<String> {
-    doc.references
-        .iter()
-        .find(|reference| reference.kind.as_deref() == Some("ADVISORY"))
-        .or_else(|| doc.references.first())
-        .map(|reference| reference.url.clone())
-}
-
-pub(crate) fn pypi_advisory_url(doc: &OsvVulnerability) -> String {
-    doc.references
-        .iter()
-        .find(|reference| reference.kind.as_deref() == Some("ADVISORY"))
+    reference_url(doc, "ADVISORY")
         .or_else(|| {
             doc.references
-                .iter()
-                .find(|reference| reference.kind.as_deref() == Some("WEB"))
+                .first()
+                .map(|reference| reference.url.as_str())
         })
-        .map(|reference| reference.url.clone())
+        .map(str::to_string)
+}
+
+/// The advisory link for an OSV.dev document: the `ADVISORY` reference,
+/// else the `WEB` reference, else the document's own osv.dev page.
+pub(crate) fn pypi_advisory_url(doc: &OsvVulnerability) -> String {
+    reference_url(doc, "ADVISORY")
+        .or_else(|| reference_url(doc, "WEB"))
+        .map(str::to_string)
         .unwrap_or_else(|| format!("https://osv.dev/vulnerability/{}", doc.id))
 }
 

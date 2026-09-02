@@ -182,8 +182,9 @@ pub async fn audit(
             } else {
                 package.name.clone()
             };
+            let fixes = fixed_versions(doc, &query_package_name, ecosystem);
             let (mut fixed_versions, mut upstream_fixed_versions) =
-                fixed_versions(doc, &query_package_name, ecosystem);
+                (fixes.same_ecosystem, fixes.upstream);
             if is_pypi {
                 fixed_versions.retain(|version| uv_pep440::Version::from_str(version).is_ok());
                 upstream_fixed_versions.clear();
