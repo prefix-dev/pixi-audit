@@ -152,7 +152,6 @@ jobs:
             pixi upload prefix \
               --channel "$PREFIX_CHANNEL" \
               --generate-attestation \
-              --store-github-attestation \
               --skip-existing \
               "$package"
           done
