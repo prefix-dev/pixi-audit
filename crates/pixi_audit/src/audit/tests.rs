@@ -435,6 +435,59 @@ async fn unknown_version_packages_are_unchecked_and_never_queried() {
     assert_eq!(report.summary.audited, 1);
 }
 
+#[tokio::test]
+async fn other_ecosystem_packages_are_unchecked_and_never_queried() {
+    // No backend answers for bioconda or source packages. Querying Basilisk
+    // for them anyway could only ever produce findings that are counted
+    // neither as audited nor as unchecked, so they are not sent at all.
+    let received: Arc<Mutex<usize>> = Arc::default();
+    let received_clone = received.clone();
+    let app = Router::new()
+        .route(
+            "/v1/querybatch",
+            post(
+                move |axum::extract::State(received): axum::extract::State<Arc<Mutex<usize>>>,
+                      Json(body): Json<serde_json::Value>| async move {
+                    let n = body["queries"].as_array().unwrap().len();
+                    *received.lock().unwrap() += n;
+                    let results: Vec<serde_json::Value> =
+                        (0..n).map(|_| serde_json::json!({})).collect();
+                    Json(serde_json::json!({"results": results}))
+                },
+            ),
+        )
+        .with_state(received_clone);
+    let base = spawn(app).await;
+
+    let packages = vec![
+        AuditPackage {
+            name: "samtools".to_string(),
+            version: Some("1.19".to_string()),
+            ecosystem: PackageEcosystem::Other("bioconda".to_string()),
+            environments: vec!["default".to_string()],
+        },
+        AuditPackage {
+            name: "zlib".to_string(),
+            version: Some("1.3".to_string()),
+            ecosystem: PackageEcosystem::CondaForge,
+            environments: vec!["default".to_string()],
+        },
+    ];
+    let report = audit(&test_client(base), packages, IgnoreSpec::default())
+        .await
+        .unwrap();
+
+    assert_eq!(*received.lock().unwrap(), 1);
+    assert_eq!(report.unchecked.len(), 1);
+    assert_eq!(report.unchecked[0].package, "samtools");
+    assert_eq!(
+        report.unchecked[0].ecosystem,
+        PackageEcosystem::Other("bioconda".to_string())
+    );
+    assert_eq!(report.summary.audited, 1);
+    assert_eq!(report.summary.unchecked, 1);
+}
+
 /// Mock server whose detail endpoint fails with `status` for every id.
 async fn spawn_broken_details_mock(status: axum::http::StatusCode) -> Url {
     let app = Router::new()
