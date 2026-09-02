@@ -27,19 +27,22 @@ pub enum PackageEcosystem {
 impl PackageEcosystem {
     /// Classifies a conda channel URL: conda-forge is the only ecosystem the
     /// vulnerability database can currently answer for; anything else is
-    /// `Other` named after the channel's last URL segment.
+    /// `Other` named after the channel. A label (`<channel>/label/<name>`)
+    /// publishes builds of the same packages under the same versions, so it
+    /// belongs to its channel's ecosystem.
     pub fn from_channel_url(channel_url: Option<&str>) -> Self {
-        match channel_url {
-            Some(url) => {
-                let trimmed = url.trim_end_matches('/');
-                if trimmed.ends_with("/conda-forge") {
-                    PackageEcosystem::CondaForge
-                } else {
-                    let name = trimmed.rsplit('/').next().unwrap_or("unknown");
-                    PackageEcosystem::Other(name.to_string())
-                }
-            }
-            None => PackageEcosystem::Other("unknown".to_string()),
+        let Some(url) = channel_url else {
+            return PackageEcosystem::Other("unknown".to_string());
+        };
+        let trimmed = url.trim_end_matches('/');
+        let channel = trimmed
+            .rsplit_once("/label/")
+            .map_or(trimmed, |(channel, _label)| channel);
+        if channel.ends_with("/conda-forge") {
+            PackageEcosystem::CondaForge
+        } else {
+            let name = channel.rsplit('/').next().unwrap_or("unknown");
+            PackageEcosystem::Other(name.to_string())
         }
     }
 

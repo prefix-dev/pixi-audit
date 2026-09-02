@@ -143,3 +143,21 @@ fn classify_channel_urls() {
         PackageEcosystem::Other("unknown".to_string())
     );
 }
+
+#[test]
+fn label_channels_belong_to_their_channel() {
+    assert_eq!(
+        PackageEcosystem::from_channel_url(Some(
+            "https://conda.anaconda.org/conda-forge/label/rust_dev/"
+        )),
+        PackageEcosystem::CondaForge
+    );
+    assert_eq!(
+        PackageEcosystem::from_channel_url(Some("https://prefix.dev/conda-forge/label/broken")),
+        PackageEcosystem::CondaForge
+    );
+    assert_eq!(
+        PackageEcosystem::from_channel_url(Some("https://conda.anaconda.org/bioconda/label/main")),
+        PackageEcosystem::Other("bioconda".to_string())
+    );
+}
