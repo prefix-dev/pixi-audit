@@ -428,6 +428,7 @@ struct Suppressions<'a> {
     ignore: BTreeSet<String>,
     until_fixed: BTreeSet<String>,
     package_rules: &'a [PackageIgnore],
+    ignore_unfixed: bool,
     /// Lowercased ids from either list that matched a finding's id or
     /// alias, whether or not that finding ended up suppressed: an
     /// `until_fixed` id for a finding with a known fix has still matched.
@@ -441,6 +442,7 @@ impl<'a> Suppressions<'a> {
             ignore: lowercase(spec.ignore),
             until_fixed: lowercase(spec.ignore_until_fixed),
             package_rules: spec.package_rules,
+            ignore_unfixed: spec.ignore_unfixed,
             matched: BTreeSet::new(),
         }
     }
@@ -470,7 +472,9 @@ impl<'a> Suppressions<'a> {
             !finding.fixed_versions.is_empty() || !finding.upstream_fixes.is_empty();
         if ignored.is_some() || package_rule(false) {
             Some(IgnoreReason::Always)
-        } else if (until_fixed.is_some() || package_rule(true)) && !has_known_fix {
+        } else if (self.ignore_unfixed || until_fixed.is_some() || package_rule(true))
+            && !has_known_fix
+        {
             Some(IgnoreReason::UntilFixed)
         } else {
             None

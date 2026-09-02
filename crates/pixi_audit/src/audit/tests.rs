@@ -199,6 +199,7 @@ fn ignore_until_fixed(ids: &[String]) -> IgnoreSpec<'_> {
         ignore: &[],
         ignore_until_fixed: ids,
         package_rules: &[],
+        ignore_unfixed: false,
     }
 }
 
@@ -357,6 +358,35 @@ async fn ignore_rules_that_match_no_finding_are_reported() {
 }
 
 #[tokio::test]
+async fn ignore_unfixed_suppresses_only_findings_without_a_fix() {
+    let spec = IgnoreSpec {
+        ignore_unfixed: true,
+        ..IgnoreSpec::default()
+    };
+
+    // No fix anywhere: suppressed with the until-fixed reason.
+    let base = spawn_mock_serving(vuln_doc_nofix()).await;
+    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    assert!(report.vulnerabilities.is_empty());
+    assert_eq!(
+        report.ignored[0].ignore_reason,
+        Some(IgnoreReason::UntilFixed)
+    );
+
+    // A conda-forge fix: reported.
+    let base = spawn_mock().await;
+    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    assert_eq!(report.vulnerabilities.len(), 1);
+    assert!(report.ignored.is_empty());
+
+    // An upstream-only fix counts as a known fix too.
+    let base = spawn_mock_serving(vuln_doc_with_basilisk_upstream_fix()).await;
+    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    assert_eq!(report.vulnerabilities.len(), 1);
+    assert!(report.ignored.is_empty());
+}
+
+#[tokio::test]
 async fn until_fixed_with_known_fix_stays_vulnerable() {
     // BSLK-1 has fixed 3.1.1, so suppression does not apply.
     let base = spawn_mock().await;
@@ -389,6 +419,7 @@ async fn ignore_wins_over_until_fixed() {
         ignore: &ignore,
         ignore_until_fixed: &until,
         package_rules: &[],
+        ignore_unfixed: false,
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
     assert!(report.vulnerabilities.is_empty());
@@ -404,6 +435,7 @@ async fn plain_ignored_findings_carry_reason_always_and_it_serializes() {
         ignore: &ignore,
         ignore_until_fixed: &[],
         package_rules: &[],
+        ignore_unfixed: false,
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
     assert_eq!(report.ignored[0].ignore_reason, Some(IgnoreReason::Always));
@@ -464,6 +496,7 @@ async fn ignored_findings_are_sorted_like_vulnerabilities() {
         ignore: &ignore,
         ignore_until_fixed: &[],
         package_rules: &[],
+        ignore_unfixed: false,
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
 
@@ -480,6 +513,7 @@ async fn ignore_list_matches_id_and_aliases_case_insensitively() {
         ignore: &ignore,
         ignore_until_fixed: &[],
         package_rules: &[],
+        ignore_unfixed: false,
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
 

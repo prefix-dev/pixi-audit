@@ -646,6 +646,34 @@ async fn ignore_until_fixed_suppresses_only_unfixed_findings() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ignore_unfixed_suppresses_unfixed_findings_until_a_fix_exists() {
+    // No fix known => ignored with the until-fixed reason, exit 0.
+    let base = spawn_mock_versioned(vuln_doc_nofix_medium(), "3.1.0").await;
+    let output = run_cli(base, vec![lockfile(), "--ignore-unfixed".to_string()]).await;
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Ignored (1)"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("until a fix is released"),
+        "stdout: {stdout}"
+    );
+
+    // Fix known => still reported, exit 1.
+    let base = spawn_mock(true).await;
+    let output = run_cli(base, vec![lockfile(), "--ignore-unfixed".to_string()]).await;
+    assert_eq!(output.status.code(), Some(1));
+
+    // The config key does the same.
+    let workspace = temp_workspace(
+        "pixi.toml",
+        "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore-unfixed = true\n",
+    );
+    let base = spawn_mock_versioned(vuln_doc_nofix_medium(), "3.1.0").await;
+    let output = run_cli_in(workspace.path().to_path_buf(), base, vec![], None).await;
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn discovery_and_config_file_drive_a_bare_invocation() {
     let workspace = temp_workspace(
         "pixi.toml",

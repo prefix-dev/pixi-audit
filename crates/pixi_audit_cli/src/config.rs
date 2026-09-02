@@ -18,6 +18,8 @@ pub struct AuditConfig {
     pub ignore_until_fixed: Vec<String>,
     /// Entries of either list that name a package.
     pub package_rules: Vec<PackageIgnore>,
+    /// Suppress every finding without a known fix until one is published.
+    pub ignore_unfixed: bool,
     pub severity: Option<SeverityBand>,
 }
 
@@ -29,6 +31,7 @@ pub struct AuditConfig {
 struct RawConfig {
     ignore: Vec<IgnoreEntry>,
     ignore_until_fixed: Vec<IgnoreEntry>,
+    ignore_unfixed: bool,
     severity: Option<String>,
     #[serde(flatten)]
     unknown: BTreeMap<String, toml::Value>,
@@ -239,6 +242,7 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
     let today = today();
     let mut config = AuditConfig {
         severity,
+        ignore_unfixed: raw.ignore_unfixed,
         ..AuditConfig::default()
     };
     for (key, entries, until_fixed) in [
