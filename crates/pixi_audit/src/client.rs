@@ -4,9 +4,13 @@ use thiserror::Error;
 use url::Url;
 
 mod basilisk;
+mod epss;
+mod kev;
 mod pypi;
 
 pub use basilisk::{BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL};
+pub use epss::{DEFAULT_EPSS_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient};
+pub use kev::{DEFAULT_KEV_URL, KEV_URL_ENV_VAR, KevCatalog, KevClient};
 pub use pypi::{DEFAULT_PYPI_BASE_URL, PYPI_BASE_URL_ENV_VAR, PypiAuditClient};
 
 const MAX_PAGINATION_ROUNDS: usize = 32;

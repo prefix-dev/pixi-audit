@@ -14,9 +14,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use pixi_audit::{
-    BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,
-    PYPI_BASE_URL_ENV_VAR, PypiAuditClient, audit_lock_file,
+    BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL, DEFAULT_KEV_URL,
+    DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, KEV_URL_ENV_VAR, KevClient,
+    PYPI_BASE_URL_ENV_VAR, PypiAuditClient, ThreatSources, audit_lock_file,
 };
+
+fn env_url(variable: &str, default: &str) -> Result<url::Url, url::ParseError> {
+    url::Url::parse(&std::env::var(variable).unwrap_or_else(|_| default.to_string()))
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,12 +30,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "pixi.lock".to_string());
     let lock_file = pixi_audit::rattler_lock::LockFile::from_path(Path::new(&path))?;
 
-    let base_url = url::Url::parse(
-        &std::env::var(BASE_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_BASE_URL.to_string()),
-    )?;
-    let pypi_base_url = url::Url::parse(
-        &std::env::var(PYPI_BASE_URL_ENV_VAR).unwrap_or_else(|_| DEFAULT_PYPI_BASE_URL.to_string()),
-    )?;
+    let base_url = env_url(BASE_URL_ENV_VAR, DEFAULT_BASE_URL)?;
+    let pypi_base_url = env_url(PYPI_BASE_URL_ENV_VAR, DEFAULT_PYPI_BASE_URL)?;
     eprintln!("Auditing {path} against {base_url} and {pypi_base_url} ...");
     // The clients apply no timeout of their own; configure one here.
     let reqwest = reqwest::Client::builder()
@@ -38,7 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let http = reqwest_middleware::ClientBuilder::new(reqwest).build();
     let client = BasiliskClient::new(http.clone(), base_url);
-    let pypi_client = PypiAuditClient::new(http, pypi_base_url);
+    let pypi_client = PypiAuditClient::new(http.clone(), pypi_base_url);
+    let epss_client = EpssClient::new(
+        http.clone(),
+        env_url(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?,
+    );
+    let kev_client = KevClient::new(http, env_url(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?);
 
     let report = audit_lock_file(
         &client,
@@ -47,6 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[],
         &[],
         pixi_audit::IgnoreSpec::default(),
+        ThreatSources {
+            epss: Some(&epss_client),
+            kev: Some(&kev_client),
+        },
     )
     .await?;
 

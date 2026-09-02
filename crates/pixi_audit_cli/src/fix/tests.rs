@@ -22,12 +22,16 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
         id: id.to_string(),
         aliases: vec![],
         severity: SeverityBand::High,
+        cvss_base_score: None,
         fixed_versions: fixed_versions.iter().map(ToString::to_string).collect(),
         upstream_fixes: vec![],
         applicability: MatchApplicability::Unspecified,
         matched_identity: None,
         summary: None,
         url: None,
+        epss: vec![],
+        known_exploited: vec![],
+        risk: pixi_audit::RiskScore::NONE,
         ignore_reason: None,
     }
 }

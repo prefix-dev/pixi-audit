@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Output;
 
 use axum::{
     Json, Router,
+    extract::Query,
     routing::{get, post},
 };
 
@@ -49,11 +51,70 @@ async fn spawn_mock(vulnerable: bool) -> String {
                 Json(serde_json::json!({"results": results}))
             }),
         )
-        .route("/v1/vulns/{id}", get(|| async { Json(vuln_doc()) }));
+        .route("/v1/vulns/{id}", get(|| async { Json(vuln_doc()) }))
+        .merge(threat_routes());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://{addr}/")
+}
+
+/// EPSS and KEV feeds where CVE-2026-1234 is scored and KEV-listed and
+/// nothing else is. The KEV catalog is served at `kev.json`.
+fn threat_routes() -> Router {
+    Router::new()
+        .route(
+            "/data/v1/epss",
+            get(|Query(query): Query<HashMap<String, String>>| async move {
+                let data: Vec<serde_json::Value> = query
+                    .get("cve")
+                    .map(|cves| cves.split(','))
+                    .into_iter()
+                    .flatten()
+                    .filter(|cve| cve.eq_ignore_ascii_case("CVE-2026-1234"))
+                    .map(|cve| {
+                        serde_json::json!({
+                            "cve": cve,
+                            "epss": "0.500000000",
+                            "percentile": "0.900000000",
+                            "date": "2026-09-01"
+                        })
+                    })
+                    .collect();
+                Json(serde_json::json!({"status": "OK", "data": data}))
+            }),
+        )
+        .route(
+            "/kev.json",
+            get(|| async {
+                Json(serde_json::json!({
+                    "dateReleased": "2026-09-01T19:22:46.2162Z",
+                    "vulnerabilities": [{
+                        "cveID": "CVE-2026-1234",
+                        "vendorProject": "OpenSSL",
+                        "product": "OpenSSL",
+                        "vulnerabilityName": "OpenSSL buffer overflow",
+                        "dateAdded": "2026-08-01",
+                        "requiredAction": "Apply updates per vendor instructions.",
+                        "dueDate": "2026-08-22",
+                        "knownRansomwareCampaignUse": "Unknown",
+                        "notes": ""
+                    }]
+                }))
+            }),
+        )
+}
+
+/// Environment pointing every backend and feed at the mock at `base_url`,
+/// with the HTTP cache in a throwaway directory.
+fn audit_env(base_url: &str, cache_dir: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
+    vec![
+        ("PIXI_AUDIT_BASE_URL", base_url.into()),
+        ("PIXI_AUDIT_PYPI_BASE_URL", base_url.into()),
+        ("PIXI_AUDIT_EPSS_BASE_URL", base_url.into()),
+        ("PIXI_AUDIT_KEV_URL", format!("{base_url}kev.json").into()),
+        ("PIXI_CACHE_DIR", cache_dir.into()),
+    ]
 }
 
 /// Runs the binary without blocking the tokio worker serving the mock.
@@ -61,16 +122,18 @@ async fn run_cli(base_url: String, args: Vec<String>) -> Output {
     run_cli_env(base_url, args, vec![]).await
 }
 
+/// Like `run_cli`; `env` is applied last, so it can override any of the
+/// defaults from `audit_env`.
 async fn run_cli_env(base_url: String, args: Vec<String>, env: Vec<(&str, &str)>) -> Output {
     let env: Vec<(String, String)> = env
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     tokio::task::spawn_blocking(move || {
+        let cache = tempfile::tempdir().unwrap();
         std::process::Command::new(BIN)
             .args(&args)
-            .env("PIXI_AUDIT_BASE_URL", &base_url)
-            .env("PIXI_AUDIT_PYPI_BASE_URL", &base_url)
+            .envs(audit_env(&base_url, cache.path()))
             .envs(env)
             .output()
             .expect("binary runs")
@@ -91,10 +154,12 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
         .find(|line| line.contains("BSLK-1"))
         .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
     let cells: Vec<&str> = row.split_whitespace().collect();
+    // Critical (9.0) averaged with CVSS 9.8, KEV-listed => 0.94 * 1.05.
     assert_eq!(
         cells,
         [
-            "(conda)", "openssl", "3.1.0", "3.1.1", "BSLK-1", "Critical", "default,", "prod"
+            "(conda)", "openssl", "3.1.0", "3.1.1", "BSLK-1", "Critical", "50.0%", "(90th)",
+            "98.7", "(kev)", "default,", "prod"
         ],
         "stdout: {stdout}"
     );
@@ -106,6 +171,54 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("error: audit found vulnerabilities"),
+        "stderr: {stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn threat_data_is_serialized() {
+    let base = spawn_mock(true).await;
+    let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let finding = &report["vulnerabilities"][0];
+    assert_eq!(finding["epss"][0]["cve"], "CVE-2026-1234");
+    assert_eq!(finding["epss"][0]["epss"], 0.5);
+    assert_eq!(finding["known_exploited"][0]["vendor_project"], "OpenSSL");
+    assert_eq!(finding["cvss_base_score"], 9.8);
+    let risk = finding["risk"].as_f64().unwrap();
+    assert!((risk - 98.7).abs() < 1e-9, "risk: {risk}");
+    assert_eq!(report["threat_data"]["epss"]["status"], "loaded");
+    assert_eq!(report["threat_data"]["kev"]["date"], "2026-09-01");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreachable_threat_sources_warn_but_do_not_fail_the_audit() {
+    let base = spawn_mock(true).await;
+    // Port 9 (discard) refuses connections immediately.
+    let output = run_cli_env(
+        base,
+        vec![lockfile(), "--json".to_string()],
+        vec![
+            ("PIXI_AUDIT_EPSS_BASE_URL", "http://127.0.0.1:9/"),
+            ("PIXI_AUDIT_KEV_URL", "http://127.0.0.1:9/kev.json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["vulnerabilities"][0]["id"], "BSLK-1");
+    assert_eq!(report["vulnerabilities"][0]["risk"], 0.0);
+    assert_eq!(report["threat_data"]["epss"]["status"], "failed");
+    assert_eq!(report["threat_data"]["kev"]["status"], "failed");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: EPSS scores unavailable"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("warning: KEV catalog unavailable"),
         "stderr: {stderr}"
     );
 }
@@ -186,7 +299,9 @@ async fn github_actions_get_annotations_on_stderr() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("::error title=BSLK-1 in openssl 3.1.0::critical severity, fixed in 3.1.1"),
+        stderr.contains(
+            "::error title=BSLK-1 in openssl 3.1.0::critical severity, risk 98.7, known exploited, fixed in 3.1.1"
+        ),
         "stderr: {stderr}"
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -277,7 +392,11 @@ async fn environment_filter_limits_the_audit() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(!stdout.contains("Unchecked"), "stdout: {stdout}");
     let row = stdout.lines().find(|line| line.contains("BSLK-1")).unwrap();
-    assert!(row.ends_with("  prod"), "row: {row}");
+    let cells: Vec<&str> = row.split_whitespace().collect();
+    assert!(
+        cells.contains(&"prod") && !cells.contains(&"default,"),
+        "row: {row}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -372,7 +491,8 @@ async fn spawn_mock_versioned(doc: serde_json::Value, vulnerable_version: &str) 
                 let doc = doc_for_get.clone();
                 async move { Json(doc) }
             }),
-        );
+        )
+        .merge(threat_routes());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -396,11 +516,11 @@ async fn run_cli_in(
     path_override: Option<std::ffi::OsString>,
 ) -> Output {
     tokio::task::spawn_blocking(move || {
+        let cache = tempfile::tempdir().unwrap();
         let mut cmd = std::process::Command::new(BIN);
         cmd.args(&args)
             .current_dir(&dir)
-            .env("PIXI_AUDIT_BASE_URL", &base_url)
-            .env("PIXI_AUDIT_PYPI_BASE_URL", &base_url);
+            .envs(audit_env(&base_url, cache.path()));
         if let Some(path) = path_override {
             cmd.env("PATH", path);
         }

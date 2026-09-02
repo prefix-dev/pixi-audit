@@ -50,6 +50,25 @@ fn new_flags_parse() {
     assert_eq!(cli.ignore_until_fixed, vec!["CVE-1"]);
     assert_eq!(cli.severity, Some(SeverityBand::High));
     assert!(cli.fix);
+    assert_eq!(cli.sort_by, Field::Risk);
+    assert_eq!(cli.fields, DEFAULT_FIELDS.to_vec());
+}
+
+#[test]
+fn threat_fields_are_selectable() {
+    let cli = Cli::try_parse_from([
+        "pixi-audit",
+        "--sort-by",
+        "epss",
+        "--fields",
+        "vulnerability,risk,kev",
+    ])
+    .unwrap();
+    assert_eq!(cli.sort_by, Field::Epss);
+    assert_eq!(
+        cli.fields,
+        vec![Field::Vulnerability, Field::Risk, Field::Kev]
+    );
 }
 
 #[test]
@@ -73,6 +92,10 @@ fn gate_applies_threshold_with_unknown_failsafe() {
         matched_identity: None,
         summary: None,
         url: None,
+        cvss_base_score: None,
+        epss: vec![],
+        known_exploited: vec![],
+        risk: pixi_audit::RiskScore::NONE,
         ignore_reason: None,
     };
     let report = |severity| AuditReport {

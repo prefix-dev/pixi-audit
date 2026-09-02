@@ -11,6 +11,7 @@ use crate::{
         AuditPackage, AuditReport, IgnoreSpec, InvalidPackageName, PackageEcosystem, PackageName,
         audit,
     },
+    threat::ThreatSources,
 };
 
 #[derive(Debug, Error)]
@@ -123,7 +124,8 @@ pub fn collect_packages(
 }
 
 /// Audits every package in the lock file (subject to the environment and
-/// platform filters) against the vulnerability database.
+/// platform filters) against the vulnerability database, attaching threat
+/// data from `threat` to the findings.
 pub async fn audit_lock_file(
     client: &BasiliskClient,
     pypi_client: &PypiAuditClient,
@@ -131,9 +133,10 @@ pub async fn audit_lock_file(
     environment_filter: &[String],
     platform_filter: &[String],
     ignore: IgnoreSpec<'_>,
+    threat: ThreatSources<'_>,
 ) -> Result<AuditReport, LockFileAuditError> {
     let packages = collect_packages(lock_file, environment_filter, platform_filter)?;
-    Ok(audit(client, pypi_client, packages, ignore).await?)
+    Ok(audit(client, pypi_client, packages, ignore, threat).await?)
 }
 
 #[cfg(test)]
@@ -340,6 +343,7 @@ packages:
             &[],
             &[],
             IgnoreSpec::default(),
+            ThreatSources::default(),
         )
         .await
         .unwrap();

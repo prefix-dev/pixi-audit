@@ -130,7 +130,7 @@ impl BasiliskClient {
 
 /// Builds a `Status` error, extracting the server's `{"error": "..."}` body
 /// (basilisk's error format) when there is one.
-async fn status_error(
+pub(super) async fn status_error(
     url: Url,
     status: reqwest::StatusCode,
     response: reqwest::Response,

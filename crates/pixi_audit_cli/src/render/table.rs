@@ -11,7 +11,7 @@ pub mod field;
 mod grid;
 
 pub use field::{DEFAULT_FIELDS, Field};
-use field::{RowContext, environments_cell, name_cell, severity_color};
+use field::{RowContext, environments_cell, kind_cell, name_cell, severity_color};
 use grid::{Cell, grid};
 
 /// What the output stream can show.
@@ -48,7 +48,7 @@ impl Default for TableLayout {
     fn default() -> Self {
         Self {
             fields: DEFAULT_FIELDS.to_vec(),
-            sort_by: Field::Severity,
+            sort_by: Field::Risk,
         }
     }
 }
@@ -147,15 +147,11 @@ fn status_block(report: &AuditReport, lockfile: &str) -> Element<'static, View> 
             #(status_line(format!("Audited {lockfile}"), packages))
             #(status_line("Scanned for vulnerabilities", matches))
             View {
-                Text(content: "  ├── by severity: ", color: Color::DarkGrey)
+                Text(content: "  ├── by severity: ", weight: Weight::Light)
                 #(by_severity)
             }
             View {
-                Text(content: "  └── by status:   ", color: Color::DarkGrey)
-                Text(content: format!("{fixed} fixed, "))
-                Text(content: format!("{not_fixed} not-fixed, "))
-                Text(content: format!("{} ignored", summary.ignored))
-                Text(content: weak_matches, color: Color::DarkGrey)
+                Text(content: format!("  └── by status:   {fixed} fixed, {not_fixed} not-fixed, {} ignored{weak_matches}", summary.ignored), weight: Weight::Light)
             }
         }
     }
@@ -171,7 +167,7 @@ fn status_line(label: impl Into<String>, detail: String) -> Option<Element<'stat
                 Text(content: "✔ ", color: Color::Green)
                 Text(content: label, wrap: TextWrap::NoWrap)
             }
-            Text(content: detail, color: Color::DarkGrey, wrap: TextWrap::NoWrap)
+            Text(content: detail, weight: Weight::Light, wrap: TextWrap::NoWrap)
         }
     })
 }
@@ -200,6 +196,7 @@ fn weak_match_counts(findings: &[Finding]) -> String {
 }
 
 /// `1 critical, 2 high, ...` with each non-zero count in its band's color.
+/// The whole line is dim, like the rest of the status tree.
 fn severity_counts(findings: &[Finding]) -> Vec<Element<'static, Text>> {
     let bands = SeverityBand::ALL.iter().rev();
     let last = SeverityBand::ALL.len() - 1;
@@ -209,12 +206,12 @@ fn severity_counts(findings: &[Finding]) -> Vec<Element<'static, Text>> {
             let count = findings.iter().filter(|f| f.severity == *band).count();
             let separator = if i == last { "" } else { ", " };
             let color = if count == 0 {
-                Some(Color::DarkGrey)
+                None
             } else {
                 severity_color(*band)
             };
             element! {
-                Text(content: format!("{count} {}{separator}", band.name()), color: color)
+                Text(content: format!("{count} {}{separator}", band.name()), color: color, weight: Weight::Light)
             }
         })
         .collect()
@@ -231,7 +228,7 @@ fn findings_grid(
     style: OutputStyle,
     layout: &TableLayout,
 ) -> Element<'static, View> {
-    let headers: Vec<&'static str> = fields.iter().map(|field| field.header()).collect();
+    let headers: Vec<&'static str> = fields.iter().flat_map(|field| field.headers()).collect();
     let mut rows = Vec::with_capacity(findings.len());
     let mut previous: Option<&Finding> = None;
     for finding in field::sorted(findings, layout.sort_by) {
@@ -244,7 +241,7 @@ fn findings_grid(
         rows.push(
             fields
                 .iter()
-                .map(|field| field.cell(finding, context))
+                .flat_map(|field| field.cells(finding, context))
                 .collect(),
         );
         previous = Some(finding);
@@ -301,7 +298,8 @@ fn unchecked_table(
         .iter()
         .map(|package| {
             vec![
-                name_cell(&package.ecosystem, &package.package.to_string(), context),
+                kind_cell(&package.ecosystem, context),
+                name_cell(&package.package.to_string(), context),
                 Cell::new(package.version.clone().unwrap_or_else(|| "?".to_string())),
                 Cell::new(package.ecosystem.to_string()),
                 environments_cell(&package.environments),
@@ -313,7 +311,7 @@ fn unchecked_table(
             "Unchecked ({}) — no vulnerability database for these sources",
             unchecked.len()
         ),
-        grid(&["Name", "Version", "Source", "Environments"], rows),
+        grid(&["", "Name", "Version", "Source", "Environments"], rows),
     ))
 }
 
@@ -338,7 +336,7 @@ fn summary_line(report: &AuditReport) -> Element<'static, View> {
         return element! {
             View {
                 Text(content: "✔ No vulnerabilities found", color: Color::Green, weight: Weight::Bold)
-                Text(content: details, color: Color::DarkGrey)
+                Text(content: details, weight: Weight::Light)
             }
         };
     }
@@ -357,7 +355,7 @@ fn summary_line(report: &AuditReport) -> Element<'static, View> {
     element! {
         View {
             Text(content: headline, color: Color::Red, weight: Weight::Bold)
-            Text(content: details, color: Color::DarkGrey)
+            Text(content: details, weight: Weight::Light)
         }
     }
 }

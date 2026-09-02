@@ -2,9 +2,11 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use console::style;
+use iocraft::prelude::Weight;
 use pixi_audit::{
-    AuditReport, CondaPublication, Finding, IgnoreReason, MatchApplicability, PackageEcosystem,
-    PackageName, SeverityBand, UpstreamFix, UpstreamOrigin,
+    AuditReport, CondaPublication, EpssScore, Finding, IgnoreReason, KnownExploited,
+    MatchApplicability, PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore,
+    SeverityBand, ThreatSourceStatus, UpstreamFix, UpstreamOrigin,
 };
 use supports_hyperlinks::Stream;
 
@@ -29,6 +31,7 @@ impl RenderOptions {
 pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
     let mut out = String::new();
 
+    let columns = ThreatColumns::for_report(report);
     for group in grouped(&report.vulnerabilities) {
         writeln!(out, "{}", group.header).unwrap();
         for finding in group.members {
@@ -38,7 +41,8 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
                 .unwrap_or_default();
             writeln!(
                 out,
-                "  {id}{severity}{}{}",
+                "  {id}{severity}{}{}{}",
+                columns.cells(finding),
                 fix_note(finding),
                 match_note(finding)
                     .map(|note| format!("  {}", style(note).dim()))
@@ -172,17 +176,112 @@ fn finding_id(finding: &Finding, options: RenderOptions) -> String {
     }
 }
 
-/// A fixed-width, colored severity label, or `None` for unknown severity,
-/// which the human report leaves blank rather than shouting "UNKNOWN".
+/// A fixed-width severity label in the table's palette, or `None` for
+/// unknown severity, which the grouped report leaves blank rather than
+/// shouting "UNKNOWN".
 fn severity_cell(band: SeverityBand) -> Option<String> {
+    if band == SeverityBand::Unknown {
+        return None;
+    }
     let text = format!("{:<8}", band.name().to_uppercase());
-    let styled = match band {
-        SeverityBand::Critical | SeverityBand::High => style(text).red().bold(),
-        SeverityBand::Medium => style(text).yellow(),
-        SeverityBand::Low => style(text).dim(),
-        SeverityBand::Unknown => return None,
-    };
+    let mut styled = style(text).color256(table::field::severity_palette_index(band));
+    if table::field::severity_weight(band) == Weight::Bold {
+        styled = styled.bold();
+    }
     Some(styled.to_string())
+}
+
+/// Which threat-data cells a report's sources justify. Risk is shown when
+/// any source is configured, EPSS only when the EPSS source is. KEV
+/// entries are marked on the risk cell.
+#[derive(Clone, Copy)]
+struct ThreatColumns {
+    risk: bool,
+    epss: bool,
+}
+
+impl ThreatColumns {
+    fn for_report(report: &AuditReport) -> Self {
+        let configured = |status: &ThreatSourceStatus| match status {
+            ThreatSourceStatus::Disabled => false,
+            ThreatSourceStatus::Loaded { .. } | ThreatSourceStatus::Failed { .. } => true,
+        };
+        let epss = configured(&report.threat_data.epss);
+        Self {
+            risk: epss || configured(&report.threat_data.kev),
+            epss,
+        }
+    }
+
+    fn cells(self, finding: &Finding) -> String {
+        let mut cells = String::new();
+        if self.risk {
+            let label = risk_label(finding.risk).unwrap_or_else(|| "n/a".to_string());
+            cells.push_str(&format!("  risk {label:>5}"));
+            if let Some(kev) = kev_label(&finding.known_exploited) {
+                cells.push_str(&format!(
+                    " {}",
+                    style(format!("({kev})"))
+                        .color256(table::field::KEV_PALETTE_INDEX)
+                        .bold()
+                ));
+            }
+        }
+        if self.epss {
+            let label = epss_label(&finding.epss).unwrap_or_else(|| "n/a".to_string());
+            cells.push_str(&format!("  epss {label}"));
+        }
+        cells
+    }
+}
+
+/// The risk score with one decimal, `< 0.1` below that, or `None` when
+/// there is no threat data behind it.
+pub fn risk_label(risk: RiskScore) -> Option<String> {
+    let value = risk.value();
+    if value == 0.0 {
+        None
+    } else if value < 0.1 {
+        Some("< 0.1".to_string())
+    } else {
+        Some(format!("{value:.1}"))
+    }
+}
+
+/// The exploit probability as a percentage with its percentile rank, such
+/// as `90.8% (99th)`, or `None` without an EPSS record.
+pub fn epss_label(epss: &[EpssScore]) -> Option<String> {
+    let score = epss.first()?;
+    let probability = score.epss * 100.0;
+    let percentile = ordinal((score.percentile * 100.0).floor() as u32);
+    if probability < 0.1 {
+        Some(format!("< 0.1% ({percentile})"))
+    } else {
+        Some(format!("{probability:.1}% ({percentile})"))
+    }
+}
+
+fn ordinal(number: u32) -> String {
+    let suffix = match (number % 100, number % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{number}{suffix}")
+}
+
+/// `kev`, or `kev, ransomware` when any entry reports ransomware use;
+/// `None` for findings outside the catalog.
+pub fn kev_label(entries: &[KnownExploited]) -> Option<&'static str> {
+    if entries.is_empty() {
+        return None;
+    }
+    let ransomware = entries
+        .iter()
+        .any(|entry| entry.known_ransomware_campaign_use == RansomwareCampaignUse::Known);
+    Some(if ransomware { "kev, ransomware" } else { "kev" })
 }
 
 fn fix_note(finding: &Finding) -> String {

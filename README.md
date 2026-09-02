@@ -69,13 +69,25 @@ An ignore rule that matches no finding produces a warning on stderr, so suppress
 
 ### Set a severity threshold
 
-Use `--severity` to fail only on conda findings at or above a given level:
+Use `--severity` to fail only on findings at or above a given level:
 
 ```console
 pixi audit --severity high
 ```
 
-Accepted values are `low`, `medium`, `high`, and `critical`. Findings with unknown severity still fail the audit. The threshold does not apply to PyPI findings, which are currently reported with unknown severity.
+Accepted values are `low`, `medium`, `high`, and `critical`. Severity comes from the advisory's CVSS vectors, for conda-forge and PyPI packages alike. Findings without a parsable vector have unknown severity and still fail the audit.
+
+### Rank findings by risk
+
+Each finding carries the same threat data [grype](https://github.com/anchore/grype) reports:
+
+- **EPSS**: the probability that the CVE is exploited within 30 days, with its percentile rank among all scored CVEs.
+- **KEV**: whether the CVE is listed in CISA's Known Exploited Vulnerabilities catalog, and whether it is known to be used in ransomware campaigns.
+- **Risk**: a 0-100 score computed as `min(threat × severity × boost, 1) × 100`. Threat is 1.0 for a KEV-listed CVE and the EPSS probability otherwise. Severity averages the band's midpoint with the mean CVSS base score. The boost is 1.05 for KEV entries and 1.1 for known ransomware use.
+
+Findings are ordered by risk, and the table shows EPSS and risk columns by default. A finding in the KEV catalog reads `81.4 (kev)` in the risk column, or `(kev, ransomware)`. Sort by another column with `--sort-by`; `risk`, `severity`, `epss`, and `kev` sort highest first and break ties the way grype does. Threat data never changes the exit code; use `--severity` for that.
+
+If a feed cannot be reached, the audit still completes. Findings are reported without that data and a warning goes to stderr.
 
 ### Update vulnerable dependencies
 
@@ -97,19 +109,19 @@ The default report is a short status block followed by one row per finding:
    ├── by severity: 1 critical, 0 high, 1 medium, 0 low, 1 unknown
    └── by status:   2 fixed, 1 not-fixed, 0 ignored
 
- Name        Version  Fixed in  Vulnerability        Severity  Environments
- C openssl   3.1.0    3.1.1     CVE-2023-0464        Critical  default, prod
- C openssl   3.1.0              CVE-2023-2975        Medium    default, prod
- P requests  2.32.0   2.32.4    GHSA-9hjg-9r4m-mvj7  Unknown   default
+    Name      Version  Fixed in  Vulnerability        Severity  EPSS         Risk  Environments
+ C  openssl   3.1.0    3.1.1     CVE-2023-0464        Critical  3.7% (88th)  3.5   default, prod
+ C  openssl   3.1.0              CVE-2023-2975        Medium    0.6% (47th)  0.3   default, prod
+ P  requests  2.32.0   2.32.4    GHSA-9hjg-9r4m-mvj7  Medium    0.9% (57th)  0.5   default
 ```
 
-As in `pixi lock`, a green `C` marks a conda package and a blue `P` a PyPI package; without colors the marker reads `(conda)` or `(pypi)`. Rows are sorted most severe first. `--sort-by` picks another column, and `--fields` picks which columns to show and in what order, as in `pixi list`:
+As in `pixi lock`, a green `C` marks a conda package and a blue `P` a PyPI package; without colors the marker reads `(conda)` or `(pypi)`. The marker has its own column, so names stay aligned, and rows that repeat the package above are dimmed. Rows are sorted by risk. `--sort-by` picks another column, and `--fields` picks which columns to show and in what order, as in `pixi list`:
 
 ```console
 pixi audit --sort-by name --fields name,version,vulnerability,fixed-in,url
 ```
 
-Available fields are `name`, `version`, `fixed-in`, `kind`, `source`, `vulnerability`, `severity`, `environments`, `aliases`, `summary`, `url`, `ignored`, and `match`. Kind and source are off by default: the `C`/`P` marker already tells conda-forge and PyPI apart, and those are the only sources that are audited today. Unchecked packages keep a Source column, since the channel is what explains why they were skipped. An empty *Fixed in* cell means no fixed release is known. When a fix exists but not as a release in the audited ecosystem, the cell says where: `PyPI: 1.2.3` names the ecosystem that has it, `upstream: 1.2.3` means the project released it but conda-forge has no build yet, and `upstream: 1.2.3 (unconfirmed)` means basilisk could not tell whether conda-forge has a build. In JSON these appear under `upstream_fixes`, each with its `origin`.
+Available fields are `name`, `version`, `fixed-in`, `kind`, `source`, `vulnerability`, `severity`, `epss`, `risk`, `kev`, `environments`, `aliases`, `summary`, `url`, `ignored`, and `match`. Kind and source are off by default: the `C`/`P` marker already tells conda-forge and PyPI apart, and those are the only sources that are audited today. Unchecked packages keep a Source column, since the channel is what explains why they were skipped. An empty *Fixed in* cell means no fixed release is known. When a fix exists but not as a release in the audited ecosystem, the cell says where: `PyPI: 1.2.3` names the ecosystem that has it, `upstream: 1.2.3` means the project released it but conda-forge has no build yet, and `upstream: 1.2.3 (unconfirmed)` means basilisk could not tell whether conda-forge has a build. In JSON these appear under `upstream_fixes`, each with its `origin`.
 
 A fix in another ecosystem is only reported when it belongs to the package Basilisk matched: the entry whose package URL Basilisk recorded as the matched identity. An advisory matched through a CPE name never contributes fixes from other ecosystems, so conda-forge `libpq` does not inherit a fix from the npm package of the same name. Documents without a matched identity fall back to matching by name, but only when Basilisk evaluated the affected versions.
 
@@ -160,8 +172,12 @@ The default endpoints are:
 
 - `https://api.basilisk.prefix.dev` for conda-forge packages
 - `https://api.osv.dev` for PyPI packages
+- `https://api.first.org` for EPSS scores
+- `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` for the KEV catalog
 
-Override them with `PIXI_AUDIT_BASE_URL` and `PIXI_AUDIT_PYPI_BASE_URL` respectively. Each HTTP request has a 30-second timeout.
+Override them with `PIXI_AUDIT_BASE_URL`, `PIXI_AUDIT_PYPI_BASE_URL`, `PIXI_AUDIT_EPSS_BASE_URL`, and `PIXI_AUDIT_KEV_URL` respectively. Each HTTP request has a 30-second timeout.
+
+EPSS and KEV responses are cached under `pixi-audit/http-cache` in the pixi cache directory (`PIXI_CACHE_DIR`, else `RATTLER_CACHE_DIR`, else `rattler/cache` in the platform's cache directory), so the KEV catalog is revalidated instead of downloaded again on every run.
 
 ## Rust crates
 
