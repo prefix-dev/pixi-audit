@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use http_cache_reqwest::{CACacheManager, Cache, CacheMode, HttpCache, HttpCacheOptions};
 use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
@@ -18,6 +18,7 @@ use url::Url;
 mod annotations;
 mod config;
 mod fix;
+mod ignore;
 mod render;
 mod workspace;
 
@@ -33,6 +34,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Parser)]
 #[command(name = "pixi-audit", version)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to the pixi.lock file to audit. When omitted, searches the
     /// current directory and its parents for a pixi workspace.
     lockfile: Option<PathBuf>,
@@ -86,6 +90,12 @@ struct Cli {
     fields: Vec<Field>,
 }
 
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Record ignore rules in the workspace manifest
+    Ignore(ignore::IgnoreArgs),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 enum Format {
     /// A status summary and one row per finding. Colors and hyperlinks
@@ -102,7 +112,16 @@ enum Format {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(Command::Ignore(args)) = cli.command.take() {
+        return match ignore::run(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error:?}");
+                ExitCode::from(EXIT_ERROR)
+            }
+        };
+    }
     let format = if cli.json { Format::Json } else { cli.format };
     let layout = TableLayout {
         fields: cli.fields.clone(),

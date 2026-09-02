@@ -67,6 +67,23 @@ The finding returns as soon as either an ecosystem-specific or upstream fix is k
 
 An ignore rule that matches no finding produces a warning on stderr, so suppressions left behind after an upgrade stand out. The JSON report lists them under `unmatched_ignores`.
 
+Record rules in the manifest with `pixi audit ignore` instead of repeating them on the command line:
+
+```console
+pixi audit ignore CVE-2026-1234 --reason "only reachable through the TLS backend, which we do not ship"
+pixi audit ignore --until-fixed CVE-2026-7777
+```
+
+This appends to `ignore` or `ignore-until-fixed` in `[tool.pixi-audit]`, keeps the file's formatting, and leaves ids that are already listed alone. `--until 2026-12-01` records the last day the rule applies; after that the finding is reported again and the audit warns about the expired rule. In the manifest an entry is either a bare id or a table:
+
+```toml
+[tool.pixi-audit]
+ignore = [
+  "CVE-2023-0464",
+  { id = "CVE-2026-1234", reason = "only reachable through the TLS backend", until = 2026-12-01 },
+]
+```
+
 ### Set a severity threshold
 
 Use `--severity` to fail only on findings at or above a given level:

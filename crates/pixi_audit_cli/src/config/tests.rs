@@ -53,6 +53,80 @@ severity = "high"
 }
 
 #[test]
+fn ignore_entries_accept_tables_with_reason_and_until() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        r#"
+[tool.pixi-audit]
+ignore = [
+    "CVE-1",
+    { id = "CVE-2", reason = "test only", until = 2999-01-01 },
+    { id = "CVE-3", until = "2999-06-01" },
+]
+ignore-until-fixed = [{ id = "CVE-4" }]
+"#,
+    );
+    let config = load_config(&manifest).unwrap();
+    assert_eq!(config.ignore, vec!["CVE-1", "CVE-2", "CVE-3"]);
+    assert_eq!(config.ignore_until_fixed, vec!["CVE-4"]);
+}
+
+#[test]
+fn expired_ignore_rules_are_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", until = 2000-01-01 }, \"CVE-2\"]\n",
+    );
+    let config = load_config(&manifest).unwrap();
+    assert_eq!(config.ignore, vec!["CVE-2"]);
+}
+
+#[test]
+fn ignore_rules_apply_through_their_last_day() {
+    let entries = [IgnoreEntry::Rule(IgnoreRule {
+        id: "CVE-1".to_string(),
+        reason: None,
+        until: Some(toml::Value::String("2026-09-02".to_string())),
+    })];
+    let (active, expired) = effective_ignores(&entries, jiff::civil::date(2026, 9, 2)).unwrap();
+    assert_eq!(active, ["CVE-1"]);
+    assert!(expired.is_empty());
+
+    let (active, expired) = effective_ignores(&entries, jiff::civil::date(2026, 9, 3)).unwrap();
+    assert!(active.is_empty());
+    assert_eq!(
+        expired,
+        [ExpiredIgnore {
+            id: "CVE-1".to_string(),
+            until: jiff::civil::date(2026, 9, 2),
+        }]
+    );
+}
+
+#[test]
+fn malformed_ignore_rules_are_errors() {
+    let cases = [
+        "ignore = [{ id = \"CVE-1\", until = \"soon\" }]",
+        "ignore = [{ id = \"CVE-1\", until = 20260901 }]",
+        "ignore = [{ id = \"CVE-1\", reasn = \"typo\" }]",
+        "ignore = [{ reason = \"no id\" }]",
+    ];
+    for table in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write(
+            dir.path(),
+            "pixi.toml",
+            &format!("[tool.pixi-audit]\n{table}\n"),
+        );
+        assert!(load_config(&manifest).is_err(), "{table}");
+    }
+}
+
+#[test]
 fn missing_table_yields_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(dir.path(), "pixi.toml", "[workspace]\nname = \"demo\"\n");

@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use jiff::civil::Date;
 use miette::{Context, IntoDiagnostic, miette};
 use pixi_audit::SeverityBand;
 use serde::Deserialize;
 
-/// Persistent audit configuration from `[tool.pixi-audit]`.
+/// Persistent audit configuration from `[tool.pixi-audit]`, with expired
+/// ignore rules already dropped.
 #[derive(Debug, Default, PartialEq)]
 pub struct AuditConfig {
     pub ignore: Vec<String>,
@@ -21,11 +23,94 @@ pub struct AuditConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 struct RawConfig {
-    ignore: Vec<String>,
-    ignore_until_fixed: Vec<String>,
+    ignore: Vec<IgnoreEntry>,
+    ignore_until_fixed: Vec<IgnoreEntry>,
     severity: Option<String>,
     #[serde(flatten)]
     unknown: BTreeMap<String, toml::Value>,
+}
+
+/// One entry of an ignore list as written: a bare id, or a table naming
+/// the id with why it is ignored and, optionally, until when.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum IgnoreEntry {
+    Id(String),
+    Rule(IgnoreRule),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IgnoreRule {
+    pub id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// The last day the rule applies, as a TOML date or a `YYYY-MM-DD`
+    /// string. Validated when the config is resolved.
+    #[serde(default)]
+    pub until: Option<toml::Value>,
+}
+
+impl IgnoreEntry {
+    pub fn id(&self) -> &str {
+        match self {
+            IgnoreEntry::Id(id) => id,
+            IgnoreEntry::Rule(rule) => &rule.id,
+        }
+    }
+
+    /// The rule's expiry, if it has one.
+    fn until(&self) -> Result<Option<Date>, String> {
+        let IgnoreEntry::Rule(IgnoreRule {
+            until: Some(until), ..
+        }) = self
+        else {
+            return Ok(None);
+        };
+        let text = match until {
+            toml::Value::Datetime(datetime) => datetime.to_string(),
+            toml::Value::String(text) => text.clone(),
+            other => return Err(format!("'{other}' is not a date")),
+        };
+        text.trim()
+            .parse::<Date>()
+            .map(Some)
+            .map_err(|err| format!("'{text}' is not a date (expected YYYY-MM-DD): {err}"))
+    }
+}
+
+/// An ignore rule whose expiry has passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredIgnore {
+    pub id: String,
+    pub until: Date,
+}
+
+/// Splits `entries` into the ids that still apply on `today` and the
+/// rules that expired. A rule applies through its `until` day inclusive.
+pub fn effective_ignores(
+    entries: &[IgnoreEntry],
+    today: Date,
+) -> Result<(Vec<String>, Vec<ExpiredIgnore>), String> {
+    let mut active = Vec::new();
+    let mut expired = Vec::new();
+    for entry in entries {
+        match entry.until()? {
+            Some(until) if until < today => expired.push(ExpiredIgnore {
+                id: entry.id().to_string(),
+                until,
+            }),
+            Some(_) | None => active.push(entry.id().to_string()),
+        }
+    }
+    Ok((active, expired))
+}
+
+/// Today's date in UTC, the reference for ignore rule expiry.
+pub fn today() -> Date {
+    jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
 }
 
 /// Reads and parses `path` as TOML, naming the file in either error.
@@ -112,9 +197,28 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
             )
         })?;
 
+    let today = today();
+    let resolve = |key: &str, entries: &[IgnoreEntry]| -> miette::Result<Vec<String>> {
+        let (active, expired) = effective_ignores(entries, today).map_err(|err| {
+            miette!(
+                "invalid '{key}' entry in [tool.pixi-audit] of '{}': {err}",
+                manifest.display()
+            )
+        })?;
+        for rule in expired {
+            eprintln!(
+                "warning: ignore rule '{}' in [tool.pixi-audit] of '{}' expired on {} and no longer applies",
+                rule.id,
+                manifest.display(),
+                rule.until
+            );
+        }
+        Ok(active)
+    };
+
     Ok(AuditConfig {
-        ignore: raw.ignore,
-        ignore_until_fixed: raw.ignore_until_fixed,
+        ignore: resolve("ignore", &raw.ignore)?,
+        ignore_until_fixed: resolve("ignore-until-fixed", &raw.ignore_until_fixed)?,
         severity,
     })
 }

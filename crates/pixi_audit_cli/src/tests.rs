@@ -72,6 +72,40 @@ fn threat_fields_are_selectable() {
 }
 
 #[test]
+fn ignore_subcommand_parses() {
+    let cli = Cli::try_parse_from([
+        "pixi-audit",
+        "ignore",
+        "CVE-1",
+        "cve-2",
+        "--until-fixed",
+        "--reason",
+        "why",
+        "--until",
+        "2099-01-01",
+    ])
+    .unwrap();
+    assert!(matches!(cli.command, Some(Command::Ignore(_))));
+    let Some(Command::Ignore(args)) = cli.command else {
+        return;
+    };
+    assert_eq!(args.ids, ["CVE-1", "cve-2"]);
+    assert!(args.until_fixed);
+    assert_eq!(args.reason.as_deref(), Some("why"));
+    assert_eq!(args.until, Some(jiff::civil::date(2099, 1, 1)));
+
+    assert!(Cli::try_parse_from(["pixi-audit", "ignore"]).is_err());
+    assert!(Cli::try_parse_from(["pixi-audit", "ignore", "CVE-1", "--until", "tomorrow"]).is_err());
+    // A plain audit still parses without a subcommand.
+    assert!(
+        Cli::try_parse_from(["pixi-audit", "pixi.lock"])
+            .unwrap()
+            .command
+            .is_none()
+    );
+}
+
+#[test]
 fn invalid_severity_is_rejected_at_parse_time() {
     assert!(Cli::try_parse_from(["pixi-audit", "pixi.lock", "--severity", "severe"]).is_err());
 }

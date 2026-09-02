@@ -667,6 +667,73 @@ async fn discovery_and_config_file_drive_a_bare_invocation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ignore_subcommand_records_rules_in_the_manifest() {
+    let workspace = temp_workspace("pixi.toml", "[workspace]\nname = \"demo\"\n");
+    let base = spawn_mock(true).await;
+    let output = run_cli_in(
+        workspace.path().to_path_buf(),
+        base.clone(),
+        vec![
+            "ignore".to_string(),
+            "cve-2026-1234".to_string(),
+            "--reason".to_string(),
+            "known".to_string(),
+        ],
+        None,
+    )
+    .await;
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Ignoring cve-2026-1234 in"),
+        "stderr: {stderr}"
+    );
+    let manifest = std::fs::read_to_string(workspace.path().join("pixi.toml")).unwrap();
+    assert_eq!(
+        manifest,
+        "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore = [{ id = \"cve-2026-1234\", reason = \"known\" }]\n"
+    );
+
+    // The rule applies to the next audit.
+    let output = run_cli_in(workspace.path().to_path_buf(), base.clone(), vec![], None).await;
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Ignored (1)"), "stdout: {stdout}");
+
+    // Listing it again, in any spelling, changes nothing.
+    let output = run_cli_in(
+        workspace.path().to_path_buf(),
+        base,
+        vec!["ignore".to_string(), "CVE-2026-1234".to_string()],
+        None,
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("already listed"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("pixi.toml")).unwrap(),
+        manifest
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_ignore_rules_warn_and_no_longer_apply() {
+    let workspace = temp_workspace(
+        "pixi.toml",
+        "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore = [{ id = \"CVE-2026-1234\", until = 2000-01-01 }]\n",
+    );
+    let base = spawn_mock(true).await;
+    let output = run_cli_in(workspace.path().to_path_buf(), base, vec![], None).await;
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("ignore rule 'CVE-2026-1234'") && stderr.contains("expired on 2000-01-01"),
+        "stderr: {stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bare_invocation_outside_a_workspace_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     let base = spawn_mock(false).await;

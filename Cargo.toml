@@ -27,6 +27,7 @@ http-cache-reqwest = { version = "1.0.0-alpha.8", default-features = false, feat
   "url-standard",
 ] }
 iocraft = "0.8.5"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 miette = "7.6.0"
 osv_protocol = { path = "crates/osv_protocol", version = "0.1.0" }
 pixi_audit = { path = "crates/pixi_audit", version = "0.1.0" }

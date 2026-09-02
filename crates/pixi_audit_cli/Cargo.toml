@@ -21,6 +21,7 @@ console = { workspace = true }
 dirs = { workspace = true }
 http-cache-reqwest = { workspace = true }
 iocraft = { workspace = true }
+jiff = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 pixi_audit = { workspace = true }
 rattler_conda_types = { workspace = true }
