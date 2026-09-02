@@ -83,7 +83,7 @@ Accepted values are `low`, `medium`, `high`, and `critical`. Findings with unkno
 pixi audit --fix
 ```
 
-Existing upper bounds are preserved. Transitive dependencies and Git, path, or URL dependencies without a version are left alone.
+Existing upper bounds are preserved. Transitive dependencies and Git, path, or URL dependencies without a version are left alone. `pixi update` only runs when at least one finding has a fixed release in its own ecosystem. Fixes that exist only upstream are reported but cannot be installed.
 
 ### Write JSON
 

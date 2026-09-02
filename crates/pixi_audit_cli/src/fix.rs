@@ -14,16 +14,22 @@ mod constraint;
 
 /// Runs the whole `--fix` flow on top of `before`, the report of the
 /// current lock file: raises manifest constraints, runs `pixi update` for
-/// the vulnerable packages, then calls `reaudit` for the report of the
-/// updated lock file. Returns `before` untouched when there is nothing to
-/// fix.
+/// the fixable packages, then calls `reaudit` for the report of the
+/// updated lock file. Returns `before` untouched when no finding has a
+/// fixed release to move to.
 pub async fn apply(
     targets: &ResolvedTargets,
     before: AuditReport,
     reaudit: impl AsyncFn() -> miette::Result<AuditReport>,
 ) -> miette::Result<AuditReport> {
-    let names = vulnerable_package_names(&before);
+    let names = fixable_package_names(&before);
     if names.is_empty() {
+        if !before.vulnerabilities.is_empty() {
+            eprintln!(
+                "fixed: no fixed release is known for the vulnerable packages \
+                 (fixes may exist only upstream); skipping `pixi update`"
+            );
+        }
         return Ok(before);
     }
     let manifest = targets.manifest.as_deref().ok_or_else(|| {
@@ -51,11 +57,15 @@ pub async fn apply(
     Ok(after)
 }
 
-/// Distinct package names among the report's non-ignored findings, in
-/// first-appearance order.
-fn vulnerable_package_names(report: &AuditReport) -> Vec<String> {
+/// Distinct names of packages that have a fixed release in their own
+/// ecosystem among the report's non-ignored findings, in first-appearance
+/// order. Upstream-only fixes cannot be installed, so they do not count.
+fn fixable_package_names(report: &AuditReport) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for finding in &report.vulnerabilities {
+        if finding.fixed_versions.is_empty() {
+            continue;
+        }
         let name = finding.package.to_string();
         if !names.contains(&name) {
             names.push(name);

@@ -28,23 +28,28 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
 }
 
 #[test]
-fn vulnerable_package_names_dedupes_and_skips_ignored() {
+fn fixable_package_names_dedupes_and_skips_ignored_and_unfixed() {
+    let mut upstream_only = finding("pillow", "CVE-5");
+    upstream_only.upstream_fixed_versions = vec!["10.2.0".to_string()];
     let report = AuditReport {
         vulnerabilities: vec![
-            finding("openssl", "CVE-1"),
-            finding("openssl", "CVE-2"),
-            finding("pillow", "CVE-3"),
+            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            finding_with_fix("openssl", "CVE-2", "conda-forge", &["3.1.2"]),
+            finding_with_fix("zlib", "CVE-3", "conda-forge", &["1.3.1"]),
+            // No fixed release at all, or only upstream: nothing to update to.
+            finding("libexpat", "CVE-4"),
+            upstream_only,
         ],
-        ignored: vec![finding("zlib", "CVE-4")],
+        ignored: vec![finding_with_fix("curl", "CVE-6", "conda-forge", &["8.0"])],
         summary: AuditSummary::default(),
         ..Default::default()
     };
-    assert_eq!(vulnerable_package_names(&report), vec!["openssl", "pillow"]);
+    assert_eq!(fixable_package_names(&report), vec!["openssl", "zlib"]);
 }
 
 #[test]
 fn empty_report_yields_no_names() {
-    assert!(vulnerable_package_names(&AuditReport::default()).is_empty());
+    assert!(fixable_package_names(&AuditReport::default()).is_empty());
 }
 
 #[test]
