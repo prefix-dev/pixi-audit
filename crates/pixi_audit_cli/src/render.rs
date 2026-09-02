@@ -3,18 +3,40 @@ use std::fmt::Write as _;
 
 use console::style;
 use pixi_audit::{AuditReport, Finding, IgnoreReason, PackageEcosystem, PackageName, SeverityBand};
+use supports_hyperlinks::Stream;
 
-pub fn render_human(report: &AuditReport) -> String {
+/// How [`render_human`] adapts its output to the terminal it is written to.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions {
+    /// Wrap each advisory ID in an OSC 8 hyperlink instead of printing its URL
+    /// on a separate line.
+    pub hyperlinks: bool,
+}
+
+impl RenderOptions {
+    /// Detect what stdout supports. Hyperlinks require color to be enabled as
+    /// well, so `NO_COLOR` and piped output stay plain text.
+    pub fn detect_stdout() -> Self {
+        Self {
+            hyperlinks: console::colors_enabled() && supports_hyperlinks::on(Stream::Stdout),
+        }
+    }
+}
+
+pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
     let mut out = String::new();
 
     for group in grouped(&report.vulnerabilities) {
         writeln!(out, "{}", group.header).unwrap();
         for finding in group.members {
+            let id = finding_id(finding, options);
             let severity = severity_cell(finding.severity)
                 .map(|cell| format!("  {cell}"))
                 .unwrap_or_default();
-            writeln!(out, "  {}{severity}{}", finding.id, fix_note(finding)).unwrap();
-            if let Some(url) = &finding.url {
+            writeln!(out, "  {id}{severity}{}", fix_note(finding)).unwrap();
+            if let Some(url) = &finding.url
+                && !options.hyperlinks
+            {
                 writeln!(out, "  {}", style(url).dim()).unwrap();
             }
         }
@@ -128,6 +150,15 @@ fn grouped(findings: &[Finding]) -> Vec<Group<'_>> {
         }
     }
     groups
+}
+
+/// The advisory ID, wrapped in an OSC 8 hyperlink to its advisory page when
+/// the terminal renders those.
+fn finding_id(finding: &Finding, options: RenderOptions) -> String {
+    match (&finding.url, options.hyperlinks) {
+        (Some(url), true) => format!("\x1b]8;;{url}\x1b\\{}\x1b]8;;\x1b\\", finding.id),
+        (Some(_), false) | (None, _) => finding.id.clone(),
+    }
 }
 
 /// A fixed-width, colored severity label, or `None` for unknown severity,

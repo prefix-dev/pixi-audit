@@ -84,7 +84,10 @@ async fn main() -> ExitCode {
             serde_json::to_string_pretty(&report).expect("report serializes")
         );
     } else {
-        print!("{}", render::render_human(&report));
+        print!(
+            "{}",
+            render::render_human(&report, render::RenderOptions::detect_stdout())
+        );
     }
 
     match gate(&report, threshold) {
