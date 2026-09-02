@@ -273,7 +273,7 @@ pub async fn audit(
                 aliases: doc.aliases.clone(),
                 severity: query.backend.severity(doc),
                 fixed_versions: fixes.same_ecosystem,
-                upstream_fixed_versions: fixes.upstream,
+                upstream_fixes: fixes.upstream,
                 summary: query.backend.summary(doc),
                 url: query.backend.url(doc),
                 ignore_reason: None,
@@ -320,7 +320,7 @@ impl Suppressions {
                     .any(|alias| set.contains(&alias.to_lowercase()))
         };
         let has_known_fix =
-            !finding.fixed_versions.is_empty() || !finding.upstream_fixed_versions.is_empty();
+            !finding.fixed_versions.is_empty() || !finding.upstream_fixes.is_empty();
         if listed_in(&self.ignore) {
             Some(IgnoreReason::Always)
         } else if listed_in(&self.until_fixed) && !has_known_fix {

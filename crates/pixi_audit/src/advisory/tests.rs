@@ -1,5 +1,25 @@
 use super::*;
 use crate::test_support::{conda_name, pypi_name};
+
+fn on_pypi(version: &str) -> UpstreamFix {
+    UpstreamFix {
+        version: version.to_string(),
+        origin: UpstreamOrigin::Ecosystem {
+            ecosystem: "PyPI".to_string(),
+        },
+    }
+}
+
+fn project_release(version: &str, conda_publication: CondaPublication) -> UpstreamFix {
+    UpstreamFix {
+        version: version.to_string(),
+        origin: UpstreamOrigin::Project { conda_publication },
+    }
+}
+
+fn versions(fixes: &[UpstreamFix]) -> Vec<&str> {
+    fixes.iter().map(|fix| fix.version.as_str()).collect()
+}
 /// A document shaped like basilisk's real output: the conda-forge entry
 /// carries `versions` + `database_specific` (no ranges); the upstream
 /// PyPI entry carries the ranges with `fixed` events.
@@ -63,8 +83,16 @@ fn basilisk_fix_doc(conda_publication: &str) -> OsvVulnerability {
 fn basilisk_fix_is_classified_by_publication_state() {
     for (publication, expected_fixed, expected_upstream) in [
         ("published", vec!["2.8.2"], vec![]),
-        ("not_published", vec![], vec!["2.8.2"]),
-        ("unknown", vec![], vec!["2.8.2"]),
+        (
+            "not_published",
+            vec![],
+            vec![project_release("2.8.2", CondaPublication::NotPublished)],
+        ),
+        (
+            "unknown",
+            vec![],
+            vec![project_release("2.8.2", CondaPublication::Unknown)],
+        ),
     ] {
         let FixedVersions {
             same_ecosystem: fixed,
@@ -76,7 +104,7 @@ fn basilisk_fix_is_classified_by_publication_state() {
         );
         assert_eq!(fixed, expected_fixed, "publication: {publication}");
         assert_eq!(upstream, expected_upstream, "publication: {publication}");
-        assert!(!upstream.contains(&"9.9.9".to_string()));
+        assert!(!versions(&upstream).contains(&"9.9.9"));
     }
 }
 
@@ -90,7 +118,7 @@ fn fixed_versions_only_come_from_the_queried_ecosystem() {
         upstream,
     } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
     assert!(fixed.is_empty());
-    assert_eq!(upstream, vec!["10.2.0"]);
+    assert_eq!(upstream, vec![on_pypi("10.2.0")]);
 
     // Queried as PyPI, the same fix IS a same-ecosystem fixed version.
     let FixedVersions {
@@ -240,7 +268,7 @@ fn standard_range_fixes_and_basilisk_metadata_are_deduplicated() {
         upstream,
     } = fixed_versions(&doc, &conda_name("libexpat"), "conda-forge");
     assert_eq!(fixed, vec!["2.8.2", "2.8.3"]);
-    assert_eq!(upstream, vec!["2.8.4"]);
+    assert_eq!(upstream, vec![on_pypi("2.8.4")]);
 }
 
 #[test]
@@ -274,7 +302,7 @@ fn upstream_fixed_versions_require_a_name_match() {
         same_ecosystem: fixed,
         upstream,
     } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
-    assert!(!upstream.contains(&"5.0.2".to_string()));
+    assert!(!versions(&upstream).contains(&"5.0.2"));
     assert!(!fixed.contains(&"5.0.2".to_string()));
 }
 

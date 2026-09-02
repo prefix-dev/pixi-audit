@@ -17,6 +17,7 @@ clap = "4.6"
 console = "0.16"
 cvss = "2.0"
 futures = "0.3.31"
+iocraft = "0.8.5"
 miette = "7.6.0"
 osv_protocol = { path = "crates/osv_protocol", version = "0.1.0" }
 pixi_audit = { path = "crates/pixi_audit", version = "0.1.0" }

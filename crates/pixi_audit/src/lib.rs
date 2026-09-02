@@ -23,6 +23,7 @@ pub use osv_protocol::*;
 #[cfg(feature = "lock")]
 pub use rattler_lock;
 pub use report::{
-    AuditPackage, AuditReport, AuditSummary, Finding, IgnoreReason, IgnoreSpec, InvalidPackageName,
-    PackageEcosystem, PackageName, ParseSeverityBandError, SeverityBand, UncheckedPackage, audit,
+    AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, IgnoreReason, IgnoreSpec,
+    InvalidPackageName, PackageEcosystem, PackageName, ParseSeverityBandError, SeverityBand,
+    UncheckedPackage, UpstreamFix, UpstreamOrigin, audit,
 };
