@@ -32,8 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     eprintln!("Auditing {path} against {base_url} and {pypi_base_url} ...");
     let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
-    let client = BasiliskClient::new(http, base_url);
-    let pypi_client = PypiAuditClient::new(pypi_base_url)?;
+    let client = BasiliskClient::new(http.clone(), base_url);
+    let pypi_client = PypiAuditClient::new(http, pypi_base_url);
 
     let report = audit_lock_file(
         &client,

@@ -47,8 +47,6 @@ pub enum AuditError {
         "the vulnerability database at {url} returned more than {MAX_PAGINATION_ROUNDS} result pages for one batch"
     )]
     TooManyPages { url: Url },
-    #[error("failed to construct the PyPI audit HTTP client")]
-    PypiClient(#[source] reqwest::Error),
 }
 
 #[cfg(test)]

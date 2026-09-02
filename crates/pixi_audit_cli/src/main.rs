@@ -156,8 +156,8 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         .into_diagnostic()
         .wrap_err("failed to construct the HTTP client")?;
     let http = reqwest_middleware::ClientBuilder::new(http_client).build();
-    let client = BasiliskClient::new(http, base_url);
-    let pypi_client = PypiAuditClient::new(pypi_base_url).into_diagnostic()?;
+    let client = BasiliskClient::new(http.clone(), base_url);
+    let pypi_client = PypiAuditClient::new(http, pypi_base_url);
 
     let ignore_spec = pixi_audit::IgnoreSpec {
         ignore: &ignore,

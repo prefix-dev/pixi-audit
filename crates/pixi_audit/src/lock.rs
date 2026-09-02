@@ -132,7 +132,7 @@ pub async fn audit_lock_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{basilisk_client, spawn_router};
+    use crate::test_support::{basilisk_client, pypi_client as test_pypi_client, spawn_router};
 
     /// A small but realistic lock file: two environments sharing an openssl
     /// build from conda-forge, plus a bioconda package and a PyPI wheel in
@@ -315,7 +315,7 @@ packages:
             );
         let base = spawn_router(app).await;
         let client = basilisk_client(base.clone());
-        let pypi_client = PypiAuditClient::new(base).unwrap();
+        let pypi_client = test_pypi_client(base);
 
         let report = audit_lock_file(
             &client,

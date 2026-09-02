@@ -9,7 +9,9 @@ use url::Url;
 use super::*;
 use crate::{
     client::BasiliskClient,
-    test_support::{basilisk_client as test_client, spawn_router as spawn},
+    test_support::{
+        basilisk_client as test_client, pypi_client as test_pypi_client, spawn_router as spawn,
+    },
 };
 
 fn vuln_doc() -> serde_json::Value {
@@ -68,7 +70,7 @@ async fn audit(
             Json(serde_json::json!({"results": results}))
         }),
     );
-    let pypi_client = PypiAuditClient::new(spawn(app).await).unwrap();
+    let pypi_client = test_pypi_client(spawn(app).await);
     super::audit(client, &pypi_client, packages, ignore).await
 }
 
@@ -535,7 +537,7 @@ async fn short_pypi_batch_response_fails_the_audit() {
         "/v1/querybatch",
         post(|| async { Json(serde_json::json!({"results": []})) }),
     );
-    let pypi_client = PypiAuditClient::new(spawn(app).await).unwrap();
+    let pypi_client = test_pypi_client(spawn(app).await);
     let packages = vec![AuditPackage {
         name: "requests".to_string(),
         version: Some("2.32.0".to_string()),
@@ -560,7 +562,7 @@ async fn short_pypi_batch_response_fails_the_audit() {
 #[tokio::test]
 async fn pypi_package_is_audited_with_osv() {
     let conda_base = spawn_mock().await;
-    let pypi_client = PypiAuditClient::new(spawn_pypi_mock().await).unwrap();
+    let pypi_client = test_pypi_client(spawn_pypi_mock().await);
     let packages = vec![AuditPackage {
         name: "requests_test".to_string(),
         version: Some("2.32.0".to_string()),
