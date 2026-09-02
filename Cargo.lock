@@ -1775,6 +1775,7 @@ dependencies = [
  "pixi_audit",
  "rattler_conda_types 0.49.1",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
