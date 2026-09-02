@@ -1,6 +1,9 @@
 //! Audit inputs and report types.
 
-use serde::Serialize;
+use std::str::FromStr;
+
+use serde::{Serialize, Serializer};
+use thiserror::Error;
 
 use crate::types::OsvSeverity;
 
@@ -9,8 +12,7 @@ use crate::types::OsvSeverity;
 pub use crate::audit::audit;
 
 /// Where a locked package comes from, for vulnerability-query purposes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PackageEcosystem {
     /// A conda package from the conda-forge channel. The only ecosystem
     /// basilisk's query API answers for today.
@@ -25,19 +27,22 @@ pub enum PackageEcosystem {
 impl PackageEcosystem {
     /// Classifies a conda channel URL: conda-forge is the only ecosystem the
     /// vulnerability database can currently answer for; anything else is
-    /// `Other` named after the channel's last URL segment.
+    /// `Other` named after the channel. A label (`<channel>/label/<name>`)
+    /// publishes builds of the same packages under the same versions, so it
+    /// belongs to its channel's ecosystem.
     pub fn from_channel_url(channel_url: Option<&str>) -> Self {
-        match channel_url {
-            Some(url) => {
-                let trimmed = url.trim_end_matches('/');
-                if trimmed.ends_with("/conda-forge") {
-                    PackageEcosystem::CondaForge
-                } else {
-                    let name = trimmed.rsplit('/').next().unwrap_or("unknown");
-                    PackageEcosystem::Other(name.to_string())
-                }
-            }
-            None => PackageEcosystem::Other("unknown".to_string()),
+        let Some(url) = channel_url else {
+            return PackageEcosystem::Other("unknown".to_string());
+        };
+        let trimmed = url.trim_end_matches('/');
+        let channel = trimmed
+            .rsplit_once("/label/")
+            .map_or(trimmed, |(channel, _label)| channel);
+        if channel.ends_with("/conda-forge") {
+            PackageEcosystem::CondaForge
+        } else {
+            let name = channel.rsplit('/').next().unwrap_or("unknown");
+            PackageEcosystem::Other(name.to_string())
         }
     }
 
@@ -49,18 +54,115 @@ impl PackageEcosystem {
             PackageEcosystem::Other(origin) => origin,
         }
     }
+}
 
-    /// Whether an audit backend is configured for this ecosystem. Packages
-    /// outside this set are reported as "not checked".
-    pub fn is_audited(&self) -> bool {
-        matches!(self, PackageEcosystem::CondaForge | PackageEcosystem::Pypi)
+/// Displays as the OSV ecosystem string (`conda-forge`, `PyPI`, or the
+/// channel name). JSON output serializes the same string.
+impl std::fmt::Display for PackageEcosystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.osv_ecosystem())
+    }
+}
+
+impl Serialize for PackageEcosystem {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+/// A package name that carries its ecosystem's normalization rules, so two
+/// spellings compare equal exactly when the ecosystem says they do. Conda
+/// names are lowercased; PyPI names follow PEP 503, under which
+/// `Ruamel.YAML`, `ruamel_yaml`, and `ruamel-yaml` are one package.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PackageName {
+    Conda(rattler_conda_types::PackageName),
+    Pypi(uv_normalize::PackageName),
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum InvalidPackageName {
+    #[error("'{name}' is not a valid conda package name")]
+    Conda {
+        name: String,
+        #[source]
+        source: rattler_conda_types::InvalidPackageNameError,
+    },
+    #[error("'{name}' is not a valid PyPI package name")]
+    Pypi {
+        name: String,
+        #[source]
+        source: uv_normalize::InvalidNameError,
+    },
+}
+
+impl PackageName {
+    /// Parses a conda package name, lowercasing it.
+    pub fn conda(name: &str) -> Result<Self, InvalidPackageName> {
+        rattler_conda_types::PackageName::from_str(name)
+            .map(Self::Conda)
+            .map_err(|source| InvalidPackageName::Conda {
+                name: name.to_string(),
+                source,
+            })
+    }
+
+    /// Parses a PyPI package name, normalizing it per PEP 503.
+    pub fn pypi(name: &str) -> Result<Self, InvalidPackageName> {
+        uv_normalize::PackageName::from_str(name)
+            .map(Self::Pypi)
+            .map_err(|source| InvalidPackageName::Pypi {
+                name: name.to_string(),
+                source,
+            })
+    }
+
+    /// Parses `name` with the rules of `ecosystem`: PyPI names follow
+    /// PEP 503, every other ecosystem is a conda channel.
+    pub fn parse(ecosystem: &PackageEcosystem, name: &str) -> Result<Self, InvalidPackageName> {
+        match ecosystem {
+            PackageEcosystem::Pypi => Self::pypi(name),
+            PackageEcosystem::CondaForge | PackageEcosystem::Other(_) => Self::conda(name),
+        }
+    }
+
+    /// The normalized name, as sent in queries and written to reports.
+    pub fn as_str(&self) -> &str {
+        match self {
+            PackageName::Conda(name) => name.as_normalized(),
+            PackageName::Pypi(name) => name.as_str(),
+        }
+    }
+
+    /// Whether `spelling`, as written in an advisory or a manifest, names
+    /// this package under the ecosystem's normalization rules.
+    pub fn matches(&self, spelling: &str) -> bool {
+        match self {
+            PackageName::Conda(name) => name.as_normalized().eq_ignore_ascii_case(spelling),
+            PackageName::Pypi(name) => {
+                uv_normalize::PackageName::from_str(spelling).is_ok_and(|other| other == *name)
+            }
+        }
+    }
+}
+
+/// Displays as the normalized name. JSON output serializes the same string.
+impl std::fmt::Display for PackageName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for PackageName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
 /// A deduplicated locked package to audit.
 #[derive(Debug, Clone)]
 pub struct AuditPackage {
-    pub name: String,
+    pub name: PackageName,
     /// `None` when the version could not be determined (e.g. an unresolved
     /// conda source package). Such packages are never queried — a
     /// version-less OSV query matches every version ever affected — and are
@@ -82,6 +184,27 @@ pub enum SeverityBand {
 }
 
 impl SeverityBand {
+    /// Every band, least severe first.
+    pub const ALL: [SeverityBand; 5] = [
+        SeverityBand::Unknown,
+        SeverityBand::Low,
+        SeverityBand::Medium,
+        SeverityBand::High,
+        SeverityBand::Critical,
+    ];
+
+    /// The band's lowercase name, as used in JSON output and on the command
+    /// line.
+    pub fn name(self) -> &'static str {
+        match self {
+            SeverityBand::Critical => "critical",
+            SeverityBand::High => "high",
+            SeverityBand::Medium => "medium",
+            SeverityBand::Low => "low",
+            SeverityBand::Unknown => "unknown",
+        }
+    }
+
     /// The highest CVSS band across the document's severity entries.
     /// Understands the type labels basilisk emits: `CVSS_V3`/`CVSS_V3.0`/
     /// `CVSS_V3.1` (OSV and NVD sources), `CVSS_V4`, and `CVSS_V2.0`.
@@ -121,14 +244,23 @@ impl SeverityBand {
 
 impl std::fmt::Display for SeverityBand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            SeverityBand::Critical => "critical",
-            SeverityBand::High => "high",
-            SeverityBand::Medium => "medium",
-            SeverityBand::Low => "low",
-            SeverityBand::Unknown => "unknown",
-        };
-        f.write_str(name)
+        f.write_str(self.name())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("'{0}' is not a severity band")]
+pub struct ParseSeverityBandError(String);
+
+/// Parses the exact lowercase band names produced by [`SeverityBand::name`].
+impl FromStr for SeverityBand {
+    type Err = ParseSeverityBandError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|band| band.name() == s)
+            .ok_or_else(|| ParseSeverityBandError(s.to_string()))
     }
 }
 
@@ -157,9 +289,9 @@ pub struct IgnoreSpec<'a> {
 /// One (package, vulnerability) pair.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
-    pub package: String,
+    pub package: PackageName,
     pub version: String,
-    pub ecosystem: String,
+    pub ecosystem: PackageEcosystem,
     pub environments: Vec<String>,
     pub id: String,
     pub aliases: Vec<String>,
@@ -180,10 +312,10 @@ pub struct Finding {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UncheckedPackage {
-    pub package: String,
+    pub package: PackageName,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    pub ecosystem: String,
+    pub ecosystem: PackageEcosystem,
     pub environments: Vec<String>,
 }
 

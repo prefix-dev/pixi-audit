@@ -1,4 +1,5 @@
-use reqwest_middleware::ClientWithMiddleware;
+use reqwest_middleware::{ClientWithMiddleware, RequestBuilder};
+use serde::de::DeserializeOwned;
 use url::Url;
 
 use super::{AuditError, MAX_PAGINATION_ROUNDS};
@@ -45,18 +46,17 @@ impl BasiliskClient {
             // `MAX_PAGINATION_ROUNDS` so a server that always returns a
             // token can't make this loop forever.
             for round in 0.. {
-                let pending: Vec<(usize, OsvQuery)> = results
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, result)| {
-                        result.next_page_token.as_ref().map(|token| {
-                            let mut query = chunk[idx].clone();
-                            query.page_token = Some(token.clone());
-                            (idx, query)
-                        })
-                    })
-                    .collect();
-                if pending.is_empty() {
+                let mut pending_indices = Vec::new();
+                let mut follow_up = Vec::new();
+                for (idx, result) in results.iter().enumerate() {
+                    if let Some(token) = &result.next_page_token {
+                        let mut query = chunk[idx].clone();
+                        query.page_token = Some(token.clone());
+                        pending_indices.push(idx);
+                        follow_up.push(query);
+                    }
+                }
+                if follow_up.is_empty() {
                     break;
                 }
                 if round >= MAX_PAGINATION_ROUNDS {
@@ -64,9 +64,8 @@ impl BasiliskClient {
                         url: self.endpoint("v1/querybatch")?,
                     });
                 }
-                let follow_up: Vec<OsvQuery> = pending.iter().map(|(_, q)| q.clone()).collect();
                 let follow_up_results = self.query_batch_once(&follow_up).await?;
-                for ((idx, _), extra) in pending.into_iter().zip(follow_up_results) {
+                for (idx, extra) in pending_indices.into_iter().zip(follow_up_results) {
                     results[idx].vulns.extend(extra.vulns);
                     results[idx].next_page_token = extra.next_page_token;
                 }
@@ -79,28 +78,11 @@ impl BasiliskClient {
 
     async fn query_batch_once(&self, queries: &[OsvQuery]) -> Result<Vec<BatchResult>, AuditError> {
         let url = self.endpoint("v1/querybatch")?;
-        let response = self
+        let request = self
             .client
             .post(url.clone())
-            .json(&serde_json::json!({ "queries": queries }))
-            .send()
-            .await
-            .map_err(|source| AuditError::Request {
-                url: url.clone(),
-                source,
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(status_error(url, status, response).await);
-        }
-        let body: BatchResponse =
-            response
-                .json()
-                .await
-                .map_err(|source| AuditError::InvalidResponse {
-                    url: url.clone(),
-                    source,
-                })?;
+            .json(&serde_json::json!({ "queries": queries }));
+        let body: BatchResponse = self.send_json(url.clone(), request).await?;
         if body.results.len() != queries.len() {
             return Err(AuditError::UnexpectedResponse {
                 url,
@@ -119,15 +101,22 @@ impl BasiliskClient {
         url.path_segments_mut()
             .expect("an HTTP(S) URL can always be a base")
             .push(id);
-        let response = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|source| AuditError::Request {
-                url: url.clone(),
-                source,
-            })?;
+        let request = self.client.get(url.clone());
+        self.send_json(url, request).await
+    }
+
+    /// Sends `request` and decodes a successful JSON response, mapping
+    /// transport, status, and decoding failures to the matching
+    /// [`AuditError`] variant.
+    async fn send_json<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        request: RequestBuilder,
+    ) -> Result<T, AuditError> {
+        let response = request.send().await.map_err(|source| AuditError::Request {
+            url: url.clone(),
+            source,
+        })?;
         let status = response.status();
         if !status.is_success() {
             return Err(status_error(url, status, response).await);

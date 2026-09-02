@@ -85,6 +85,25 @@ fn wrong_type_is_an_error() {
 }
 
 #[test]
+fn non_table_value_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(dir.path(), "pixi.toml", "[tool]\npixi-audit = 5\n");
+    assert!(load_config(&manifest).is_err());
+}
+
+#[test]
+fn unknown_keys_are_tolerated() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        "[tool.pixi-audit]\nignore = [\"CVE-1\"]\nfuture-option = true\n",
+    );
+    let config = load_config(&manifest).unwrap();
+    assert_eq!(config.ignore, vec!["CVE-1"]);
+}
+
+#[test]
 fn unparsable_toml_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(dir.path(), "pixi.toml", "not toml [");

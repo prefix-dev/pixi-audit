@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::{
-    test_support::{basilisk_client as client, spawn_router as spawn},
+    test_support::{basilisk_client as client, pypi_client, spawn_router as spawn},
     types::*,
 };
 use axum::{
@@ -114,8 +114,8 @@ async fn query_batch_caps_unbounded_pagination() {
         "unexpected error: {err}"
     );
 
-    let err = PypiAuditClient::new(pypi_base)
-        .unwrap()
+    let err = pypi_client(pypi_base)
+        .osv_client()
         .query_batch(&[query("requests", "2.32.0")])
         .await
         .unwrap_err();
@@ -175,9 +175,10 @@ async fn pypi_base_url_with_deep_path_keeps_all_segments() {
     let base = spawn(app).await;
     let deep = base.join("a/b").unwrap();
     assert!(!deep.path().ends_with('/'));
-    let client = PypiAuditClient::new(deep).unwrap();
+    let client = pypi_client(deep);
 
     let results = client
+        .osv_client()
         .query_batch(&[query("requests", "2.32.0")])
         .await
         .unwrap();

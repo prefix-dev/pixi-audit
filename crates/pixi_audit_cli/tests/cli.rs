@@ -483,3 +483,58 @@ async fn fix_without_pixi_on_path_exits_2() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("is pixi on PATH?"), "stderr: {stderr}");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn fix_skips_pixi_update_when_no_fix_is_known() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The only fix is upstream (not published on conda-forge), so there is
+    // nothing to update to and `pixi update` must not run.
+    let workspace = temp_workspace(
+        "pixi.toml",
+        "[workspace]\nname = \"demo\"\n\n[dependencies]\nopenssl = \">=3\"\n",
+    );
+    let bin_dir = workspace.path().join("bin");
+    std::fs::create_dir(&bin_dir).unwrap();
+    let fake_pixi = bin_dir.join("pixi");
+    std::fs::write(
+        &fake_pixi,
+        format!(
+            "#!/bin/sh\necho \"$@\" > '{ws}/pixi-args.txt'\n",
+            ws = workspace.path().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_pixi, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path_override = {
+        let mut paths = vec![bin_dir.clone()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        std::env::join_paths(paths).unwrap()
+    };
+
+    let base = spawn_mock_versioned(vuln_doc_basilisk_upstream_fix(), "3.1.0").await;
+    let output = run_cli_in(
+        workspace.path().to_path_buf(),
+        base,
+        vec!["--fix".to_string()],
+        Some(path_override),
+    )
+    .await;
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("no fixed release is known for the vulnerable packages"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !workspace.path().join("pixi-args.txt").exists(),
+        "pixi update must not run"
+    );
+    let manifest = std::fs::read_to_string(workspace.path().join("pixi.toml")).unwrap();
+    assert!(
+        manifest.contains("openssl = \">=3\""),
+        "manifest: {manifest}"
+    );
+}

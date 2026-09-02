@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{conda_name, pypi_name};
 /// A document shaped like basilisk's real output: the conda-forge entry
 /// carries `versions` + `database_specific` (no ranges); the upstream
 /// PyPI entry carries the ranges with `fixed` events.
@@ -65,8 +66,14 @@ fn basilisk_fix_is_classified_by_publication_state() {
         ("not_published", vec![], vec!["2.8.2"]),
         ("unknown", vec![], vec!["2.8.2"]),
     ] {
-        let (fixed, upstream) =
-            fixed_versions(&basilisk_fix_doc(publication), "libexpat", "conda-forge");
+        let FixedVersions {
+            same_ecosystem: fixed,
+            upstream,
+        } = fixed_versions(
+            &basilisk_fix_doc(publication),
+            &conda_name("libexpat"),
+            "conda-forge",
+        );
         assert_eq!(fixed, expected_fixed, "publication: {publication}");
         assert_eq!(upstream, expected_upstream, "publication: {publication}");
         assert!(!upstream.contains(&"9.9.9".to_string()));
@@ -78,12 +85,18 @@ fn fixed_versions_only_come_from_the_queried_ecosystem() {
     let doc = basilisk_shaped_doc();
     // conda-forge entries carry no fixed events; the PyPI fix must not be
     // presented as a conda-forge fixed version.
-    let (fixed, upstream) = fixed_versions(&doc, "pillow", "conda-forge");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
     assert!(fixed.is_empty());
     assert_eq!(upstream, vec!["10.2.0"]);
 
     // Queried as PyPI, the same fix IS a same-ecosystem fixed version.
-    let (fixed, upstream) = fixed_versions(&doc, "pillow", "PyPI");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &pypi_name("pillow"), "PyPI");
     assert_eq!(fixed, vec!["10.2.0"]);
     assert!(upstream.is_empty());
 }
@@ -124,7 +137,10 @@ fn missing_or_malformed_basilisk_metadata_falls_back_to_osv_ranges() {
         }))
         .unwrap();
 
-        let (fixed, upstream) = fixed_versions(&doc, "libexpat", "conda-forge");
+        let FixedVersions {
+            same_ecosystem: fixed,
+            upstream,
+        } = fixed_versions(&doc, &conda_name("libexpat"), "conda-forge");
         assert_eq!(fixed, vec!["2.8.3"]);
         assert!(upstream.is_empty());
     }
@@ -159,7 +175,10 @@ fn basilisk_metadata_requires_matching_package_and_ecosystem() {
     }))
     .unwrap();
 
-    let (fixed, upstream) = fixed_versions(&doc, "libexpat", "conda-forge");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("libexpat"), "conda-forge");
     assert!(fixed.is_empty());
     assert!(upstream.is_empty());
 }
@@ -179,7 +198,10 @@ fn non_conda_queries_ignore_basilisk_metadata_but_keep_osv_ranges() {
     }))
     .unwrap();
 
-    let (fixed, upstream) = fixed_versions(&doc, "demo", "PyPI");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &pypi_name("demo"), "PyPI");
     assert_eq!(fixed, vec!["4.0.0"]);
     assert!(upstream.is_empty());
 }
@@ -213,7 +235,10 @@ fn standard_range_fixes_and_basilisk_metadata_are_deduplicated() {
     }))
     .unwrap();
 
-    let (fixed, upstream) = fixed_versions(&doc, "libexpat", "conda-forge");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("libexpat"), "conda-forge");
     assert_eq!(fixed, vec!["2.8.2", "2.8.3"]);
     assert_eq!(upstream, vec!["2.8.4"]);
 }
@@ -232,7 +257,10 @@ fn only_release_ranges_contribute_fixed_versions() {
     }))
     .unwrap();
 
-    let (fixed, upstream) = fixed_versions(&doc, "demo", "PyPI");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &pypi_name("demo"), "PyPI");
     assert_eq!(fixed, vec!["1.2.3"]);
     assert!(upstream.is_empty());
 }
@@ -242,7 +270,10 @@ fn upstream_fixed_versions_require_a_name_match() {
     // The django entry in the same advisory must not leak its fixed
     // version into pillow's report.
     let doc = basilisk_shaped_doc();
-    let (fixed, upstream) = fixed_versions(&doc, "pillow", "conda-forge");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
     assert!(!upstream.contains(&"5.0.2".to_string()));
     assert!(!fixed.contains(&"5.0.2".to_string()));
 }
@@ -263,7 +294,10 @@ fn fix_present_in_own_ecosystem_is_not_repeated_as_upstream() {
             ]
         }))
         .unwrap();
-    let (fixed, upstream) = fixed_versions(&doc, "pillow", "conda-forge");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
     assert_eq!(fixed, vec!["10.2.0"]);
     assert!(
         upstream.is_empty(),
@@ -320,7 +354,37 @@ fn affected_entry_without_package_counts_as_same_ecosystem() {
         }]
     }))
     .unwrap();
-    let (fixed, upstream) = fixed_versions(&doc, "anything", "conda-forge");
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("anything"), "conda-forge");
     assert_eq!(fixed, vec!["1.2.3"]);
     assert!(upstream.is_empty());
+}
+
+#[test]
+fn pypi_names_match_under_pep_503_normalization() {
+    // OSV.dev keeps the advisory's spelling (`ruamel.yaml`); the lock file
+    // and the query use the normalized `ruamel-yaml`. They are one package.
+    let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+        "id": "PYSEC-2026-2",
+        "affected": [{
+            "package": {"ecosystem": "PyPI", "name": "Ruamel.YAML"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "0.18.7"}]}]
+        }]
+    }))
+    .unwrap();
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &pypi_name("ruamel_yaml"), "PyPI");
+    assert_eq!(fixed, vec!["0.18.7"]);
+    assert!(upstream.is_empty());
+
+    // Conda names only fold case; `ruamel.yaml` and `ruamel-yaml` differ.
+    let FixedVersions {
+        same_ecosystem: fixed,
+        ..
+    } = fixed_versions(&doc, &conda_name("ruamel-yaml"), "PyPI");
+    assert!(fixed.is_empty());
 }

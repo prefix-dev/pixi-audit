@@ -21,8 +21,8 @@ required-features = ["lock"]
 [dependencies]
 cvss = { workspace = true }
 futures = { workspace = true }
-miette = { workspace = true }
 osv_protocol = { workspace = true }
+rattler_conda_types = { workspace = true }
 rattler_lock = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json"] }
 reqwest-middleware = { workspace = true, features = ["json"] }

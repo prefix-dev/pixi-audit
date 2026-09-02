@@ -1,9 +1,11 @@
 //! Workspace manifest discovery and `[tool.pixi-audit]` configuration.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use miette::{Context, IntoDiagnostic, miette};
 use pixi_audit::SeverityBand;
+use serde::Deserialize;
 
 /// Persistent audit configuration from `[tool.pixi-audit]`.
 #[derive(Debug, Default, PartialEq)]
@@ -13,7 +15,28 @@ pub struct AuditConfig {
     pub severity: Option<SeverityBand>,
 }
 
-const KNOWN_KEYS: &[&str] = &["ignore", "ignore-until-fixed", "severity"];
+/// The `[tool.pixi-audit]` table as written. Keys this tool does not know
+/// are collected rather than rejected, so a newer config still loads under
+/// an older binary, with a warning.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+struct RawConfig {
+    ignore: Vec<String>,
+    ignore_until_fixed: Vec<String>,
+    severity: Option<String>,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, toml::Value>,
+}
+
+/// Reads and parses `path` as TOML, naming the file in either error.
+fn read_toml(path: &Path) -> miette::Result<toml::Value> {
+    let content = std::fs::read_to_string(path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read '{}'", path.display()))?;
+    toml::from_str(&content)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("'{}' is not valid TOML", path.display()))
+}
 
 /// The workspace manifest in `dir`: `pixi.toml`, or `pyproject.toml` that
 /// contains a `[tool.pixi]` table.
@@ -30,12 +53,7 @@ pub fn find_manifest_in(dir: &Path) -> miette::Result<Option<PathBuf>> {
     }
     let pyproject = dir.join("pyproject.toml");
     if pyproject.is_file() {
-        let content = std::fs::read_to_string(&pyproject)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to read '{}'", pyproject.display()))?;
-        let value: toml::Value = toml::from_str(&content)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("'{}' is not valid TOML", pyproject.display()))?;
+        let value = read_toml(&pyproject)?;
         if value.get("tool").and_then(|t| t.get("pixi")).is_some() {
             return Ok(Some(pyproject));
         }
@@ -60,88 +78,65 @@ pub fn discover_workspace(start: &Path) -> miette::Result<Option<PathBuf>> {
 /// config; a present-but-invalid table is an error — a security tool must
 /// not silently drop configured suppressions. Unknown keys warn on stderr.
 pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
-    let content = std::fs::read_to_string(manifest)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read '{}'", manifest.display()))?;
-    let value: toml::Value = toml::from_str(&content)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("'{}' is not valid TOML", manifest.display()))?;
-
-    let Some(table) = value.get("tool").and_then(|t| t.get("pixi-audit")) else {
+    let mut value = read_toml(manifest)?;
+    let table = value
+        .get_mut("tool")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|tool| tool.remove("pixi-audit"));
+    let Some(table) = table else {
         return Ok(AuditConfig::default());
     };
-    let table = table.as_table().ok_or_else(|| {
-        miette!(
-            "[tool.pixi-audit] in '{}' must be a table",
+    let raw: RawConfig = table.try_into().into_diagnostic().wrap_err_with(|| {
+        format!(
+            "invalid [tool.pixi-audit] table in '{}'",
             manifest.display()
         )
     })?;
 
-    for key in table.keys() {
-        if !KNOWN_KEYS.contains(&key.as_str()) {
-            eprintln!(
-                "warning: unrecognized key '{key}' in [tool.pixi-audit] of '{}'",
-                manifest.display()
-            );
-        }
+    for key in raw.unknown.keys() {
+        eprintln!(
+            "warning: unrecognized key '{key}' in [tool.pixi-audit] of '{}'",
+            manifest.display()
+        );
     }
 
-    let string_list = |key: &str| -> miette::Result<Vec<String>> {
-        match table.get(key) {
-            None => Ok(Vec::new()),
-            Some(value) => value
-                .as_array()
-                .and_then(|items| {
-                    items
-                        .iter()
-                        .map(|item| item.as_str().map(str::to_string))
-                        .collect::<Option<Vec<_>>>()
-                })
-                .ok_or_else(|| {
-                    miette!(
-                        "'{key}' in [tool.pixi-audit] of '{}' must be an array of strings",
-                        manifest.display()
-                    )
-                }),
-        }
-    };
-
-    let severity = match table.get("severity") {
-        None => None,
-        Some(value) => {
-            let text = value.as_str().ok_or_else(|| {
-                miette!(
-                    "'severity' in [tool.pixi-audit] of '{}' must be a string",
-                    manifest.display()
-                )
-            })?;
-            Some(parse_band(text).map_err(|err| {
-                miette!(
-                    "invalid severity in [tool.pixi-audit] of '{}': {err}",
-                    manifest.display()
-                )
-            })?)
-        }
-    };
+    let severity = raw
+        .severity
+        .as_deref()
+        .map(parse_band)
+        .transpose()
+        .map_err(|err| {
+            miette!(
+                "invalid severity in [tool.pixi-audit] of '{}': {err}",
+                manifest.display()
+            )
+        })?;
 
     Ok(AuditConfig {
-        ignore: string_list("ignore")?,
-        ignore_until_fixed: string_list("ignore-until-fixed")?,
+        ignore: raw.ignore,
+        ignore_until_fixed: raw.ignore_until_fixed,
         severity,
     })
 }
 
-/// Parses a severity band name. Shared by clap's value parser and the
+/// Parses a severity threshold. Shared by clap's value parser and the
 /// config file, so both accept exactly the same values.
 pub fn parse_band(s: &str) -> Result<SeverityBand, String> {
-    match s {
-        "low" => Ok(SeverityBand::Low),
-        "medium" => Ok(SeverityBand::Medium),
-        "high" => Ok(SeverityBand::High),
-        "critical" => Ok(SeverityBand::Critical),
-        other => Err(format!(
-            "'{other}' is not a severity band (expected low, medium, high, or critical)"
-        )),
+    match s.parse::<SeverityBand>() {
+        // "unknown" is a valid band but never a threshold: it must always
+        // fail the audit, so it cannot be opted into.
+        Ok(SeverityBand::Unknown) | Err(_) => {
+            let expected: Vec<&str> = SeverityBand::ALL
+                .iter()
+                .filter(|band| **band != SeverityBand::Unknown)
+                .map(|band| band.name())
+                .collect();
+            Err(format!(
+                "'{s}' is not a severity band (expected one of {})",
+                expected.join(", ")
+            ))
+        }
+        Ok(band) => Ok(band),
     }
 }
 

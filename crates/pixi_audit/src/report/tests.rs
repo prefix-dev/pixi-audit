@@ -1,5 +1,46 @@
 use super::*;
 
+#[test]
+fn severity_band_round_trips_through_its_name() {
+    for band in SeverityBand::ALL {
+        assert_eq!(band.name().parse::<SeverityBand>(), Ok(band));
+        assert_eq!(band.to_string(), band.name());
+    }
+    assert!("HIGH".parse::<SeverityBand>().is_err());
+    assert!("severe".parse::<SeverityBand>().is_err());
+}
+
+#[test]
+fn package_names_normalize_per_ecosystem() {
+    let pypi = PackageName::pypi("Ruamel.YAML").unwrap();
+    assert_eq!(pypi.as_str(), "ruamel-yaml");
+    assert_eq!(pypi, PackageName::pypi("ruamel__yaml").unwrap());
+    assert!(pypi.matches("ruamel.yaml"));
+    assert!(!pypi.matches("ruamel"));
+
+    let conda = PackageName::conda("OpenSSL").unwrap();
+    assert_eq!(conda.as_str(), "openssl");
+    assert!(conda.matches("openssl"));
+    assert!(!conda.matches("open-ssl"));
+    assert!(PackageName::conda("not valid").is_err());
+
+    assert_eq!(
+        serde_json::to_value([&pypi, &conda]).unwrap(),
+        serde_json::json!(["ruamel-yaml", "openssl"])
+    );
+}
+
+#[test]
+fn ecosystem_serializes_as_osv_string() {
+    let json = serde_json::to_value([
+        PackageEcosystem::CondaForge,
+        PackageEcosystem::Pypi,
+        PackageEcosystem::Other("bioconda".to_string()),
+    ])
+    .unwrap();
+    assert_eq!(json, serde_json::json!(["conda-forge", "PyPI", "bioconda"]));
+}
+
 fn severity(kind: &str, score: &str) -> crate::types::OsvSeverity {
     crate::types::OsvSeverity {
         kind: kind.to_string(),
@@ -100,5 +141,23 @@ fn classify_channel_urls() {
     assert_eq!(
         PackageEcosystem::from_channel_url(None),
         PackageEcosystem::Other("unknown".to_string())
+    );
+}
+
+#[test]
+fn label_channels_belong_to_their_channel() {
+    assert_eq!(
+        PackageEcosystem::from_channel_url(Some(
+            "https://conda.anaconda.org/conda-forge/label/rust_dev/"
+        )),
+        PackageEcosystem::CondaForge
+    );
+    assert_eq!(
+        PackageEcosystem::from_channel_url(Some("https://prefix.dev/conda-forge/label/broken")),
+        PackageEcosystem::CondaForge
+    );
+    assert_eq!(
+        PackageEcosystem::from_channel_url(Some("https://conda.anaconda.org/bioconda/label/main")),
+        PackageEcosystem::Other("bioconda".to_string())
     );
 }

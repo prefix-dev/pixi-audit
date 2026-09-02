@@ -1,6 +1,5 @@
 //! Clients for the Basilisk and PyPI vulnerability backends.
 
-use miette::Diagnostic;
 use thiserror::Error;
 use url::Url;
 
@@ -12,7 +11,7 @@ pub use pypi::{DEFAULT_PYPI_BASE_URL, PYPI_BASE_URL_ENV_VAR, PypiAuditClient};
 
 const MAX_PAGINATION_ROUNDS: usize = 32;
 
-#[derive(Debug, Error, Diagnostic)]
+#[derive(Debug, Error)]
 pub enum AuditError {
     #[error("failed to contact the vulnerability database at {url}")]
     Request {
@@ -48,8 +47,6 @@ pub enum AuditError {
         "the vulnerability database at {url} returned more than {MAX_PAGINATION_ROUNDS} result pages for one batch"
     )]
     TooManyPages { url: Url },
-    #[error("failed to construct the PyPI audit HTTP client")]
-    PypiClient(#[source] reqwest::Error),
 }
 
 #[cfg(test)]
