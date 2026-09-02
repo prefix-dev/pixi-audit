@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 
 use clap::ValueEnum;
 use iocraft::prelude::{Color, Weight};
-use pixi_audit::{Finding, IgnoreReason, PackageEcosystem, SeverityBand};
+use pixi_audit::{Finding, IgnoreReason, MatchApplicability, PackageEcosystem, SeverityBand};
 
 use super::grid::{Cell, Span};
 
@@ -26,12 +26,16 @@ pub enum Field {
     Url,
     /// Why a finding sits in the ignored section; empty elsewhere.
     Ignored,
+    /// How confidently basilisk matched the advisory to the package.
+    Match,
 }
 
 /// Columns shown when `--fields` is not given, in this order. The package
 /// kind is not a column by default: like `pixi lock`, the name carries a
 /// `C`/`P` marker. Neither is the source: only conda-forge and PyPI are
 /// ever queried, so for a finding the marker already says which it is.
+/// Nor is the match: most matches are evaluated, so the Vulnerability
+/// column flags the ones that are not.
 pub const DEFAULT_FIELDS: [Field; 6] = [
     Field::Name,
     Field::Version,
@@ -52,6 +56,9 @@ pub struct RowContext {
     /// Colors are shown, so the kind marker can be a single colored letter
     /// instead of a word.
     pub color: bool,
+    /// The Match column is shown, so the Vulnerability cell need not flag
+    /// weak matches itself.
+    pub match_column: bool,
 }
 
 impl Field {
@@ -69,6 +76,7 @@ impl Field {
             Field::Summary => "Summary",
             Field::Url => "URL",
             Field::Ignored => "Ignored",
+            Field::Match => "Match",
         }
     }
 
@@ -85,7 +93,13 @@ impl Field {
             Field::Source => Cell::new(finding.ecosystem.to_string()),
             Field::Vulnerability => {
                 let url = finding.url.clone().filter(|_| context.hyperlinks);
-                Cell::new(finding.id.clone()).hyperlink(url)
+                let cell = Cell::new(finding.id.clone()).hyperlink(url);
+                match weak_match_label(finding.applicability) {
+                    Some(label) if !context.match_column => {
+                        cell.then(Span::new(format!(" ({label})")).color(Color::DarkGrey))
+                    }
+                    _ => cell,
+                }
             }
             Field::Severity => severity(finding.severity),
             Field::Environments => environments_cell(&finding.environments),
@@ -97,6 +111,11 @@ impl Field {
                     Cell::new("until a fix is released").color(Color::DarkGrey)
                 }
                 Some(IgnoreReason::Always) => Cell::new("always").color(Color::DarkGrey),
+                None => Cell::empty(),
+            },
+            Field::Match => match match_label(finding.applicability) {
+                Some(label) => Cell::new(label)
+                    .color(weak_match_label(finding.applicability).map(|_| Color::DarkGrey)),
                 None => Cell::empty(),
             },
         }
@@ -127,6 +146,8 @@ impl Field {
             Field::Summary => a.summary.cmp(&b.summary),
             Field::Url => a.url.cmp(&b.url),
             Field::Ignored => a.ignore_reason.is_some().cmp(&b.ignore_reason.is_some()),
+            // Most confident first; unspecified last.
+            Field::Match => b.applicability.cmp(&a.applicability),
         }
     }
 }
@@ -206,5 +227,27 @@ pub fn severity_color(band: SeverityBand) -> Option<Color> {
         SeverityBand::Medium => Some(Color::Yellow),
         SeverityBand::Low => None,
         SeverityBand::Unknown => Some(Color::DarkGrey),
+    }
+}
+
+/// The applicability as the Match column shows it; `None` when basilisk
+/// recorded none.
+pub fn match_label(applicability: MatchApplicability) -> Option<&'static str> {
+    match applicability {
+        MatchApplicability::Evaluated => Some("evaluated"),
+        MatchApplicability::Unevaluated => Some("unevaluated"),
+        MatchApplicability::VersionUnbounded => Some("unbounded"),
+        MatchApplicability::Unspecified => None,
+    }
+}
+
+/// The label of a match worth flagging next to the advisory: one basilisk
+/// could not evaluate, or one with no version bounds at all.
+pub fn weak_match_label(applicability: MatchApplicability) -> Option<&'static str> {
+    match applicability {
+        MatchApplicability::Unevaluated | MatchApplicability::VersionUnbounded => {
+            match_label(applicability)
+        }
+        MatchApplicability::Evaluated | MatchApplicability::Unspecified => None,
     }
 }

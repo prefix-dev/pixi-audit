@@ -1,4 +1,7 @@
-use pixi_audit::{AuditReport, AuditSummary, Finding, PackageEcosystem, PackageName, SeverityBand};
+use pixi_audit::{
+    AuditReport, AuditSummary, Finding, MatchApplicability, PackageEcosystem, PackageName,
+    SeverityBand,
+};
 
 use super::*;
 
@@ -21,6 +24,8 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
         severity: SeverityBand::High,
         fixed_versions: fixed_versions.iter().map(ToString::to_string).collect(),
         upstream_fixes: vec![],
+        applicability: MatchApplicability::Unspecified,
+        matched_identity: None,
         summary: None,
         url: None,
         ignore_reason: None,

@@ -624,3 +624,152 @@ async fn fix_skips_pixi_update_when_no_fix_is_known() {
         "manifest: {manifest}"
     );
 }
+
+/// Shaped like CVE-2022-25852 for conda-forge `libpq`: a CPE match with
+/// no version bounds, plus a same-name npm package that has a fix.
+fn vuln_doc_cpe_unbounded() -> serde_json::Value {
+    serde_json::json!({
+        "id": "CVE-2022-25852",
+        "summary": "About the npm bindings",
+        "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+        "affected": [
+            {
+                "package": {"ecosystem": "npm", "name": "openssl", "purl": "pkg:npm/openssl"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.8.10"}]}]
+            },
+            {
+                "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                "versions": ["3.1.0"],
+                "database_specific": {"basilisk": {
+                    "applicability": "version_unbounded",
+                    "comparator": "conda",
+                    "matcher_version": "v8",
+                    "matched_identity": {"kind": "cpe", "value": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*"}
+                }}
+            }
+        ]
+    })
+}
+
+/// Shaped like CVE-2026-50014 for conda-forge `pnpm`, which is npm's
+/// pnpm: matched through the npm purl, with the fixes on npm.
+fn vuln_doc_purl_matched() -> serde_json::Value {
+    serde_json::json!({
+        "id": "CVE-2026-50014",
+        "summary": "Fixed on npm",
+        "affected": [
+            {
+                "package": {"ecosystem": "npm", "name": "openssl", "purl": "pkg:npm/openssl"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "10.34.0"}]}]
+            },
+            {
+                "package": {"ecosystem": "npm", "name": "openssl", "purl": "pkg:npm/openssl"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "11.0.0"}, {"fixed": "11.4.0"}]}]
+            },
+            {
+                "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                "versions": ["3.1.0"],
+                "database_specific": {"basilisk": {
+                    "applicability": "evaluated",
+                    "comparator": "semver",
+                    "conda_publication": "not_published",
+                    "fix_version": "11.4.0",
+                    "matcher_version": "v8",
+                    "matched_identity": {"kind": "purl", "value": "pkg:npm/openssl"}
+                }}
+            }
+        ]
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cpe_match_without_version_bounds_shows_no_upstream_fix() {
+    let base = spawn_mock_versioned(vuln_doc_cpe_unbounded(), "3.1.0").await;
+    let output = run_cli(base.clone(), vec![lockfile()]).await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("CVE-2022-25852"))
+        .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        [
+            "(conda)",
+            "openssl",
+            "3.1.0",
+            "CVE-2022-25852",
+            "(unbounded)",
+            "Critical",
+            "default,",
+            "prod"
+        ],
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("npm"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("by status:   0 fixed, 1 not-fixed, 0 ignored, 1 unbounded"),
+        "stdout: {stdout}"
+    );
+
+    let output = run_cli(
+        base.clone(),
+        vec![
+            lockfile(),
+            "--fields".to_string(),
+            "vulnerability,match".to_string(),
+        ],
+    )
+    .await;
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("CVE-2022-25852"))
+        .unwrap();
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        ["CVE-2022-25852", "unbounded"]
+    );
+
+    let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let finding = &report["vulnerabilities"][0];
+    assert_eq!(finding["applicability"], "version-unbounded");
+    assert_eq!(finding["matched_identity"]["kind"], "cpe");
+    assert_eq!(finding["upstream_fixes"], serde_json::json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn purl_match_keeps_the_other_ecosystem_fixes() {
+    let base = spawn_mock_versioned(vuln_doc_purl_matched(), "3.1.0").await;
+    let output = run_cli(base.clone(), vec![lockfile()]).await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("CVE-2026-50014"))
+        .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
+    assert!(
+        row.contains("npm: 10.34.0, npm: 11.4.0  CVE-2026-50014  Unknown"),
+        "row: {row}"
+    );
+    assert!(!stdout.contains("unbounded"), "stdout: {stdout}");
+
+    let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let finding = &report["vulnerabilities"][0];
+    assert_eq!(finding["applicability"], "evaluated");
+    assert_eq!(
+        finding["matched_identity"],
+        serde_json::json!({"kind": "purl", "value": "pkg:npm/openssl"})
+    );
+    assert_eq!(
+        finding["upstream_fixes"],
+        serde_json::json!([
+            {"version": "10.34.0", "origin": "ecosystem", "ecosystem": "npm"},
+            {"version": "11.4.0", "origin": "ecosystem", "ecosystem": "npm"}
+        ])
+    );
+}

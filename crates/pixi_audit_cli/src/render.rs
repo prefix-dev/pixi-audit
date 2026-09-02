@@ -3,8 +3,8 @@ use std::fmt::Write as _;
 
 use console::style;
 use pixi_audit::{
-    AuditReport, CondaPublication, Finding, IgnoreReason, PackageEcosystem, PackageName,
-    SeverityBand, UpstreamFix, UpstreamOrigin,
+    AuditReport, CondaPublication, Finding, IgnoreReason, MatchApplicability, PackageEcosystem,
+    PackageName, SeverityBand, UpstreamFix, UpstreamOrigin,
 };
 use supports_hyperlinks::Stream;
 
@@ -36,7 +36,15 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
             let severity = severity_cell(finding.severity)
                 .map(|cell| format!("  {cell}"))
                 .unwrap_or_default();
-            writeln!(out, "  {id}{severity}{}", fix_note(finding)).unwrap();
+            writeln!(
+                out,
+                "  {id}{severity}{}{}",
+                fix_note(finding),
+                match_note(finding)
+                    .map(|note| format!("  {}", style(note).dim()))
+                    .unwrap_or_default()
+            )
+            .unwrap();
             if let Some(url) = &finding.url
                 && !options.hyperlinks
             {
@@ -187,6 +195,16 @@ fn fix_note(finding: &Finding) -> String {
         )
     } else {
         "  no known fixed version".to_string()
+    }
+}
+
+/// A note on how the advisory was matched, for matches that deserve a
+/// second look; `None` when basilisk evaluated it or recorded nothing.
+pub fn match_note(finding: &Finding) -> Option<&'static str> {
+    match finding.applicability {
+        MatchApplicability::VersionUnbounded => Some("match: version unbounded"),
+        MatchApplicability::Unevaluated => Some("match: unevaluated"),
+        MatchApplicability::Evaluated | MatchApplicability::Unspecified => None,
     }
 }
 

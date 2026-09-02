@@ -247,6 +247,7 @@ fn standard_range_fixes_and_basilisk_metadata_are_deduplicated() {
                     {"fixed": "2.8.3"}
                 ]}],
                 "database_specific": {"basilisk": {
+                    "applicability": "evaluated",
                     "fix_version": "2.8.2",
                     "conda_publication": "published"
                 }}
@@ -415,4 +416,373 @@ fn pypi_names_match_under_pep_503_normalization() {
         ..
     } = fixed_versions(&doc, &conda_name("ruamel-yaml"), "PyPI");
     assert!(fixed.is_empty());
+}
+
+fn on_npm(version: &str) -> UpstreamFix {
+    UpstreamFix {
+        version: version.to_string(),
+        origin: UpstreamOrigin::Ecosystem {
+            ecosystem: "npm".to_string(),
+        },
+    }
+}
+
+fn purl_identity(value: &str) -> MatchedIdentity {
+    MatchedIdentity {
+        kind: MatchedIdentityKind::Purl,
+        value: value.to_string(),
+    }
+}
+
+fn cpe_identity(value: &str) -> MatchedIdentity {
+    MatchedIdentity {
+        kind: MatchedIdentityKind::Cpe,
+        value: value.to_string(),
+    }
+}
+
+/// Shaped like CVE-2026-50014 for conda-forge `pnpm`, which really is
+/// npm's pnpm: basilisk matched it through the npm purl and evaluated the
+/// versions; the npm entries carry the fixes.
+fn pnpm_shaped_doc() -> OsvVulnerability {
+    serde_json::from_value(serde_json::json!({
+        "id": "CVE-2026-50014",
+        "affected": [
+            {
+                "package": {"ecosystem": "npm", "name": "pnpm", "purl": "pkg:npm/pnpm"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "10.34.0"}]}]
+            },
+            {
+                "package": {"ecosystem": "npm", "name": "pnpm", "purl": "pkg:npm/pnpm@11"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "11.0.0"}, {"fixed": "11.4.0"}]}]
+            },
+            {
+                "package": {"ecosystem": "conda-forge", "name": "pnpm", "purl": "pkg:conda/conda-forge/pnpm"},
+                "versions": ["10.33.0"],
+                "database_specific": {"basilisk": {
+                    "applicability": "evaluated",
+                    "comparator": "semver",
+                    "conda_publication": "not_published",
+                    "fix_version": "11.4.0",
+                    "matcher_version": "v8",
+                    "matched_identity": {"kind": "purl", "value": "pkg:npm/pnpm"},
+                    "reported_fixes": []
+                }}
+            }
+        ]
+    }))
+    .unwrap()
+}
+
+/// Shaped like CVE-2022-25852 for conda-forge `libpq` (PostgreSQL's C
+/// library): a CPE match with no version bounds, while the advisory is
+/// about the npm bindings of the same name.
+fn libpq_shaped_doc(basilisk: serde_json::Value) -> OsvVulnerability {
+    serde_json::from_value(serde_json::json!({
+        "id": "CVE-2022-25852",
+        "affected": [
+            {
+                "package": {"ecosystem": "npm", "name": "pg-native", "purl": "pkg:npm/pg-native"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "3.0.1"}]}]
+            },
+            {
+                "package": {"ecosystem": "npm", "name": "libpq", "purl": "pkg:npm/libpq"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.8.10"}]}]
+            },
+            {
+                "package": {"ecosystem": "conda-forge", "name": "libpq", "purl": "pkg:conda/conda-forge/libpq"},
+                "versions": ["16.0"],
+                "database_specific": {"basilisk": basilisk}
+            }
+        ]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn purl_identity_admits_fixes_from_that_purl_only() {
+    let doc = pnpm_shaped_doc();
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("pnpm"), "conda-forge");
+    assert!(fixed.is_empty());
+    // The version suffix on the second entry's purl does not matter, and
+    // the npm origin of 11.4.0 wins over basilisk's project release.
+    assert_eq!(upstream, vec![on_npm("10.34.0"), on_npm("11.4.0")]);
+
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("pnpm"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::Evaluated,
+            matched_identity: Some(purl_identity("pkg:npm/pnpm")),
+        })
+    );
+}
+
+#[test]
+fn purl_identity_matches_by_purl_not_by_name() {
+    // Basilisk matched libpq through the pg-native purl: only that entry's
+    // fix counts, even though its name differs; the same-name npm entry's
+    // fix does not.
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "applicability": "evaluated",
+        "matched_identity": {"kind": "purl", "value": "pkg:npm/pg-native@3.0.0?arch=x86"}
+    }));
+    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert_eq!(upstream, vec![on_npm("3.0.1")]);
+}
+
+#[test]
+fn cpe_identity_admits_no_cross_ecosystem_fixes() {
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "applicability": "version_unbounded",
+        "comparator": "conda",
+        "matcher_version": "v8",
+        "matched_identity": {"kind": "cpe", "value": "cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*"}
+    }));
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert!(fixed.is_empty());
+    assert!(
+        upstream.is_empty(),
+        "npm libpq is not conda-forge libpq: {upstream:?}"
+    );
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::VersionUnbounded,
+            matched_identity: Some(cpe_identity("cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*")),
+        })
+    );
+}
+
+#[test]
+fn cpe_identity_keeps_basilisk_project_fix() {
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "applicability": "evaluated",
+        "fix_version": "16.1",
+        "conda_publication": "not_published",
+        "matched_identity": {"kind": "cpe", "value": "cpe:2.3:a:postgresql:postgresql:*:*:*:*:*:*:*:*"}
+    }));
+    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert_eq!(
+        upstream,
+        vec![project_release("16.1", CondaPublication::NotPublished)]
+    );
+}
+
+#[test]
+fn without_identity_the_name_match_needs_an_evaluated_applicability() {
+    // Live documents predate `matched_identity`. The same-name npm fix is
+    // trusted only when basilisk evaluated the conda-forge match.
+    for (applicability, expected) in [
+        ("evaluated", vec![on_npm("1.8.10")]),
+        ("unevaluated", vec![]),
+        ("version_unbounded", vec![]),
+        ("something_new", vec![]),
+    ] {
+        let doc = libpq_shaped_doc(serde_json::json!({
+            "applicability": applicability,
+            "comparator": "conda",
+            "matcher_version": "v8"
+        }));
+        let FixedVersions { upstream, .. } =
+            fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+        assert_eq!(upstream, expected, "applicability: {applicability}");
+        assert_eq!(
+            basilisk_match(&doc, &conda_name("libpq"), "conda-forge").map(|m| m.matched_identity),
+            Some(None),
+            "applicability: {applicability}"
+        );
+    }
+}
+
+#[test]
+fn unknown_applicability_is_unspecified_and_trusts_nothing() {
+    let doc = libpq_shaped_doc(serde_json::json!({"comparator": "conda"}));
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::Unspecified,
+            matched_identity: None,
+        })
+    );
+    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert!(upstream.is_empty());
+
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "applicability": "evaluated",
+        "matched_identity": {"kind": "isbn", "value": "x"}
+    }));
+    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    // An identity kind this version does not know is no identity at all.
+    assert_eq!(upstream, vec![on_npm("1.8.10")]);
+}
+
+#[test]
+fn plain_osv_documents_keep_the_name_match() {
+    let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+        "id": "CVE-2022-25852",
+        "affected": [
+            {
+                "package": {"ecosystem": "npm", "name": "libpq"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.8.10"}]}]
+            },
+            {
+                "package": {"ecosystem": "conda-forge", "name": "libpq"},
+                "versions": ["16.0"]
+            }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        None
+    );
+    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert_eq!(upstream, vec![on_npm("1.8.10")]);
+}
+
+#[test]
+fn match_metadata_is_only_read_for_conda_forge_queries() {
+    let doc = pnpm_shaped_doc();
+    assert_eq!(basilisk_match(&doc, &pypi_name("pnpm"), "PyPI"), None);
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("other"), "conda-forge"),
+        None
+    );
+}
+
+#[test]
+fn merged_matches_take_the_purl_identity_and_the_strongest_applicability() {
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "matches": [
+            {
+                "applicability": "version_unbounded",
+                "comparator": "conda",
+                "matcher_version": "v8",
+                "matched_identity": {"kind": "cpe", "value": "cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*"}
+            },
+            {
+                "applicability": "unevaluated",
+                "comparator": "semver",
+                "matcher_version": "v8",
+                "matched_identity": {"kind": "purl", "value": "pkg:npm/libpq"}
+            }
+        ]
+    }));
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::Unevaluated,
+            matched_identity: Some(purl_identity("pkg:npm/libpq")),
+        })
+    );
+    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert_eq!(upstream, vec![on_npm("1.8.10")]);
+
+    // CPE-only matches stay CPE, and an empty array reads like no array.
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "matches": [
+            {"applicability": "version_unbounded", "matched_identity": {"kind": "cpe", "value": "cpe:a"}},
+            {"applicability": "evaluated", "matched_identity": {"kind": "cpe", "value": "cpe:b"}}
+        ]
+    }));
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::Evaluated,
+            matched_identity: Some(cpe_identity("cpe:a")),
+        })
+    );
+    let doc = libpq_shaped_doc(serde_json::json!({"applicability": "evaluated", "matches": []}));
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::Evaluated,
+            matched_identity: None,
+        })
+    );
+}
+
+#[test]
+fn purl_keys_ignore_version_qualifiers_subpath_and_case() {
+    for (purl, expected) in [
+        ("pkg:npm/pnpm", "pkg:npm/pnpm"),
+        ("pkg:npm/pnpm@11.4.0", "pkg:npm/pnpm"),
+        ("pkg:npm/pnpm?arch=x86#src", "pkg:npm/pnpm"),
+        ("pkg:npm/%40angular/core@1.0", "pkg:npm/@angular/core"),
+        ("pkg:npm/@angular/core", "pkg:npm/@angular/core"),
+        ("pkg:PyPI/Pillow/", "pkg:pypi/pillow"),
+        (
+            "pkg:conda/conda-forge/libpq@16.0?build=h1",
+            "pkg:conda/conda-forge/libpq",
+        ),
+    ] {
+        assert_eq!(purl_key(purl), expected, "purl: {purl}");
+    }
+}
+
+#[test]
+fn applicability_serializes_kebab_case_and_orders_by_confidence() {
+    assert_eq!(
+        serde_json::to_value([
+            MatchApplicability::Unspecified,
+            MatchApplicability::VersionUnbounded,
+            MatchApplicability::Unevaluated,
+            MatchApplicability::Evaluated,
+        ])
+        .unwrap(),
+        serde_json::json!([
+            "unspecified",
+            "version-unbounded",
+            "unevaluated",
+            "evaluated"
+        ])
+    );
+    assert!(MatchApplicability::Evaluated > MatchApplicability::Unevaluated);
+    assert!(MatchApplicability::Unevaluated > MatchApplicability::VersionUnbounded);
+    assert!(MatchApplicability::VersionUnbounded > MatchApplicability::Unspecified);
+    // `unspecified` is never something basilisk says.
+    assert!(
+        serde_json::from_value::<MatchApplicability>(serde_json::json!("unspecified")).is_err()
+    );
+}
+
+#[test]
+fn merged_form_keeps_fix_metadata_top_level_and_tolerates_null_comparator() {
+    // Basilisk's merged form: per-match fields inside `matches`, the fix
+    // metadata top-level, and `comparator` nullable.
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "matches": [
+            {
+                "applicability": "version_unbounded",
+                "comparator": null,
+                "matcher_version": "v8",
+                "matched_identity": {"kind": "cpe", "value": "cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*"}
+            }
+        ],
+        "fix_version": "16.1",
+        "conda_publication": "not_published",
+        "reported_fixes": []
+    }));
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::VersionUnbounded,
+            matched_identity: Some(cpe_identity("cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*")),
+        })
+    );
+    let FixedVersions {
+        same_ecosystem: fixed,
+        upstream,
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert!(fixed.is_empty());
+    assert_eq!(
+        upstream,
+        vec![project_release("16.1", CondaPublication::NotPublished)]
+    );
 }

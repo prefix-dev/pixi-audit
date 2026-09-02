@@ -3,14 +3,12 @@
 use serde::Deserialize;
 
 use crate::{
-    report::{CondaPublication, PackageName, UpstreamFix, UpstreamOrigin},
+    report::{
+        CondaPublication, MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageName,
+        UpstreamFix, UpstreamOrigin,
+    },
     types::{OsvAffected, OsvVulnerability},
 };
-
-#[derive(Debug, Deserialize)]
-struct BasiliskDatabaseSpecific {
-    basilisk: BasiliskFixMetadata,
-}
 
 #[derive(Debug, Deserialize)]
 struct BasiliskFixMetadata {
@@ -18,12 +16,163 @@ struct BasiliskFixMetadata {
     conda_publication: CondaPublication,
 }
 
-fn basilisk_fix_metadata(
-    database_specific: Option<&serde_json::Value>,
-) -> Option<BasiliskFixMetadata> {
-    let metadata: BasiliskDatabaseSpecific =
-        serde_json::from_value(database_specific?.clone()).ok()?;
-    (!metadata.basilisk.fix_version.trim().is_empty()).then_some(metadata.basilisk)
+/// The `basilisk` block of an affected entry's `database_specific`.
+fn basilisk_block(database_specific: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
+    database_specific?.get("basilisk")
+}
+
+fn basilisk_fix_metadata(block: &serde_json::Value) -> Option<BasiliskFixMetadata> {
+    let metadata: BasiliskFixMetadata = serde_json::from_value(block.clone()).ok()?;
+    (!metadata.fix_version.trim().is_empty()).then_some(metadata)
+}
+
+/// How basilisk matched an advisory to the queried conda-forge package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BasiliskMatch {
+    pub applicability: MatchApplicability,
+    pub matched_identity: Option<MatchedIdentity>,
+}
+
+impl BasiliskMatch {
+    /// Reads one match's fields. Each field is read on its own, so a value
+    /// this version does not understand leaves that field unspecified
+    /// instead of discarding the whole block.
+    fn from_value(value: &serde_json::Value) -> Self {
+        let field = |name: &str| value.get(name).cloned();
+        Self {
+            applicability: field("applicability")
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or(MatchApplicability::Unspecified),
+            matched_identity: field("matched_identity")
+                .and_then(|value| serde_json::from_value(value).ok()),
+        }
+    }
+
+    /// The block's match, or the merge of its `matches` when basilisk
+    /// combined several: the strongest applicability, and a purl identity
+    /// over a CPE one because only a purl can vouch for another ecosystem.
+    fn from_block(block: &serde_json::Value) -> Self {
+        let Some(matches) = block.get("matches").and_then(|m| m.as_array()) else {
+            return Self::from_value(block);
+        };
+        let matches: Vec<Self> = matches.iter().map(Self::from_value).collect();
+        if matches.is_empty() {
+            return Self::from_value(block);
+        }
+        let identity = |kind: MatchedIdentityKind| {
+            matches
+                .iter()
+                .filter_map(|m| m.matched_identity.as_ref())
+                .find(|identity| identity.kind == kind)
+                .cloned()
+        };
+        Self {
+            applicability: matches
+                .iter()
+                .map(|m| m.applicability)
+                .max()
+                .unwrap_or(MatchApplicability::Unspecified),
+            matched_identity: identity(MatchedIdentityKind::Purl)
+                .or_else(|| identity(MatchedIdentityKind::Cpe)),
+        }
+    }
+}
+
+/// Whether `affected` is a conda-forge entry that explicitly names the
+/// queried package, which is where basilisk puts its metadata.
+fn is_explicit_conda_forge_match(
+    affected: &OsvAffected,
+    package: &PackageName,
+    ecosystem: &str,
+) -> bool {
+    ecosystem.eq_ignore_ascii_case("conda-forge")
+        && affected.package.as_ref().is_some_and(|entry| {
+            entry
+                .name
+                .as_deref()
+                .is_some_and(|name| package.matches(name))
+                && entry
+                    .ecosystem
+                    .as_deref()
+                    .is_some_and(|entry| entry.eq_ignore_ascii_case(ecosystem))
+        })
+}
+
+/// Basilisk's match metadata for `package`, from the first conda-forge
+/// entry that names it and carries a `basilisk` block. `None` for other
+/// ecosystems and for plain OSV documents.
+pub(crate) fn basilisk_match(
+    doc: &OsvVulnerability,
+    package: &PackageName,
+    ecosystem: &str,
+) -> Option<BasiliskMatch> {
+    doc.affected
+        .iter()
+        .filter(|affected| is_explicit_conda_forge_match(affected, package, ecosystem))
+        .find_map(|affected| basilisk_block(affected.database_specific.as_ref()))
+        .map(BasiliskMatch::from_block)
+}
+
+/// Which entries in other ecosystems may contribute upstream fixes.
+#[derive(Debug, PartialEq, Eq)]
+enum CrossEcosystemRule {
+    /// Any entry naming the same package.
+    ByName,
+    /// Only entries whose purl is this one, as [`purl_key`] compares them.
+    ByPurl(String),
+    /// None: the match says nothing about other ecosystems.
+    Nothing,
+}
+
+impl CrossEcosystemRule {
+    /// A purl identity vouches for exactly that package elsewhere; a CPE
+    /// vouches for nothing outside conda-forge. Without an identity the
+    /// name is trusted only when basilisk evaluated the match, or when the
+    /// document is plain OSV with no basilisk metadata at all.
+    fn for_match(basilisk_match: Option<&BasiliskMatch>) -> Self {
+        let Some(basilisk_match) = basilisk_match else {
+            return Self::ByName;
+        };
+        match &basilisk_match.matched_identity {
+            Some(MatchedIdentity {
+                kind: MatchedIdentityKind::Purl,
+                value,
+            }) => Self::ByPurl(purl_key(value)),
+            Some(MatchedIdentity {
+                kind: MatchedIdentityKind::Cpe,
+                ..
+            }) => Self::Nothing,
+            None if basilisk_match.applicability == MatchApplicability::Evaluated => Self::ByName,
+            None => Self::Nothing,
+        }
+    }
+
+    fn accepts(&self, affected: &OsvAffected, package: &PackageName) -> bool {
+        let entry = affected.package.as_ref();
+        match self {
+            Self::ByName => entry
+                .and_then(|entry| entry.name.as_deref())
+                .is_none_or(|name| package.matches(name)),
+            Self::ByPurl(key) => entry
+                .and_then(|entry| entry.purl.as_deref())
+                .is_some_and(|purl| purl_key(purl) == *key),
+            Self::Nothing => false,
+        }
+    }
+}
+
+/// The part of a purl that identifies a package: `pkg:<type>/<namespace>/
+/// <name>`, without the version, qualifiers, or subpath, case-folded.
+fn purl_key(purl: &str) -> String {
+    let purl = purl.split(['?', '#']).next().unwrap_or_default();
+    let name_start = purl.rfind('/').map_or(0, |slash| slash + 1);
+    let end = purl[name_start..]
+        .find('@')
+        .map_or(purl.len(), |at| name_start + at);
+    purl[..end]
+        .trim_end_matches('/')
+        .replace("%40", "@")
+        .to_lowercase()
 }
 
 /// Fixed versions for one package from an OSV document, split by origin.
@@ -81,17 +230,22 @@ fn release_fixed_events(affected: &OsvAffected) -> impl Iterator<Item = &str> {
 /// Fixed versions for `package` from an OSV document, split by origin.
 ///
 /// Standard OSV `fixed` events retain their generic behavior: entries in the
-/// queried ecosystem (or entries naming no package) are same-ecosystem fixes,
-/// while matching package entries in other ecosystems are upstream fixes.
+/// queried ecosystem (or entries naming no package) are same-ecosystem fixes.
 /// Package names match under the ecosystem's own normalization, so an
 /// advisory spelling `ruamel.yaml` matches a PyPI query for `ruamel-yaml`.
-/// Basilisk's extension is more strict and is considered only for conda-forge
+///
+/// Entries in other ecosystems are upstream fixes only when
+/// [`CrossEcosystemRule`] admits them: a same-name entry for plain OSV
+/// documents and for matches basilisk evaluated, the entry whose purl
+/// basilisk matched through when it recorded one, and nothing for a CPE
+/// match. Basilisk's own fix metadata is considered only for conda-forge
 /// queries on entries that explicitly match both the package and ecosystem.
 pub(crate) fn fixed_versions(
     doc: &OsvVulnerability,
     package: &PackageName,
     ecosystem: &str,
 ) -> FixedVersions {
+    let rule = CrossEcosystemRule::for_match(basilisk_match(doc, package, ecosystem).as_ref());
     let mut fixes = FixedVersions::default();
     for affected in &doc.affected {
         let entry_name = affected.package.as_ref().and_then(|p| p.name.as_deref());
@@ -99,14 +253,17 @@ pub(crate) fn fixed_versions(
             .package
             .as_ref()
             .and_then(|p| p.ecosystem.as_deref());
-
-        // An entry naming no package applies to the queried one.
-        if !entry_name.is_none_or(|name| package.matches(name)) {
-            continue;
-        }
         let other_ecosystem =
             entry_ecosystem.filter(|entry| !entry.eq_ignore_ascii_case(ecosystem));
-        let same_ecosystem = other_ecosystem.is_none();
+
+        let accepted = match other_ecosystem {
+            // An entry naming no package applies to the queried one.
+            None => entry_name.is_none_or(|name| package.matches(name)),
+            Some(_) => rule.accepts(affected, package),
+        };
+        if !accepted {
+            continue;
+        }
 
         for fixed in release_fixed_events(affected) {
             match other_ecosystem {
@@ -120,12 +277,9 @@ pub(crate) fn fixed_versions(
             }
         }
 
-        let explicit_conda_forge_match = ecosystem.eq_ignore_ascii_case("conda-forge")
-            && entry_name.is_some()
-            && entry_ecosystem.is_some()
-            && same_ecosystem;
-        if explicit_conda_forge_match
-            && let Some(metadata) = basilisk_fix_metadata(affected.database_specific.as_ref())
+        if is_explicit_conda_forge_match(affected, package, ecosystem)
+            && let Some(metadata) =
+                basilisk_block(affected.database_specific.as_ref()).and_then(basilisk_fix_metadata)
         {
             // A CPE-matched fix is the project's own release; only a
             // published conda-forge build makes it a fixed version here.
