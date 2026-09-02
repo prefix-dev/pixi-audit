@@ -96,6 +96,8 @@ enum Format {
     Grouped,
     /// Pretty-printed JSON
     Json,
+    /// SARIF 2.1.0, for GitHub code scanning and similar dashboards
+    Sarif,
 }
 
 #[tokio::main]
@@ -123,6 +125,22 @@ async fn main() -> ExitCode {
             "{}",
             serde_json::to_string_pretty(&report).expect("report serializes")
         ),
+        Format::Sarif => {
+            // Only the package lines are looked up in the text; a lock
+            // file that cannot be re-read just loses those.
+            let contents = std::fs::read_to_string(&lockfile).unwrap_or_default();
+            let log = render::sarif::SarifLog::from_report(
+                &report,
+                &render::sarif::LockfileSource {
+                    path: &lockfile,
+                    contents: &contents,
+                },
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&log).expect("SARIF log serializes")
+            );
+        }
         Format::Grouped => print!(
             "{}",
             render::render_human(&report, render::RenderOptions::detect_stdout())

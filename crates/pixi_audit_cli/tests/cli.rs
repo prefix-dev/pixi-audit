@@ -224,6 +224,46 @@ async fn unreachable_threat_sources_warn_but_do_not_fail_the_audit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sarif_format_points_at_the_lock_file() {
+    let base = spawn_mock(true).await;
+    let output = run_cli(
+        base,
+        vec![lockfile(), "--format".to_string(), "sarif".to_string()],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let log: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is exactly one SARIF document");
+    assert_eq!(log["version"], "2.1.0");
+    let run = &log["runs"][0];
+    assert_eq!(run["tool"]["driver"]["name"], "pixi-audit");
+    let rule = &run["tool"]["driver"]["rules"][0];
+    assert_eq!(rule["id"], "BSLK-1-openssl");
+    assert_eq!(rule["properties"]["security-severity"], "9.8");
+    assert!(
+        rule["help"]["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("| 50.0% (90th) | 98.7 | kev |"),
+        "{rule}"
+    );
+    let result = &run["results"][0];
+    assert_eq!(result["ruleId"], "BSLK-1-openssl");
+    assert_eq!(result["level"], "error");
+    let location = &result["locations"][0]["physicalLocation"];
+    assert!(
+        location["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("tests/data/pixi.lock"),
+        "{location}"
+    );
+    // The openssl package URL is on line 8 of the fixture.
+    assert_eq!(location["region"]["startLine"], 8);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn clean_lockfile_exits_0() {
     let base = spawn_mock(false).await;
     let output = run_cli(base, vec![lockfile()]).await;

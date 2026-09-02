@@ -350,6 +350,22 @@ pub fn upstream_fix_label(fix: &UpstreamFix) -> String {
     }
 }
 
+/// Where a finding's fix stands, as a sentence fragment: `fixed in 3.1.1`,
+/// `fix released elsewhere: ...`, or `no known fixed version`.
+pub fn fix_summary(finding: &Finding) -> String {
+    if !finding.fixed_versions.is_empty() {
+        format!("fixed in {}", finding.fixed_versions.join(", "))
+    } else if !finding.upstream_fixes.is_empty() {
+        format!(
+            "fix released elsewhere: {}",
+            describe_upstream_fixes(finding)
+        )
+    } else {
+        "no known fixed version".to_string()
+    }
+}
+
+pub mod sarif;
 pub mod table;
 
 #[cfg(test)]

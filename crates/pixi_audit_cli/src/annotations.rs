@@ -47,16 +47,7 @@ pub fn github_annotations(report: &AuditReport, level: Level) -> String {
 }
 
 fn message(finding: &Finding) -> String {
-    let fix = if !finding.fixed_versions.is_empty() {
-        format!("fixed in {}", finding.fixed_versions.join(", "))
-    } else if !finding.upstream_fixes.is_empty() {
-        format!(
-            "fix released elsewhere: {}",
-            crate::render::describe_upstream_fixes(finding)
-        )
-    } else {
-        "no known fixed version".to_string()
-    };
+    let fix = crate::render::fix_summary(finding);
     let match_note = crate::render::match_note(finding)
         .map(|note| format!(", {note}"))
         .unwrap_or_default();

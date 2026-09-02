@@ -137,6 +137,16 @@ pixi audit --json > audit-report.json
 
 Progress and diagnostics go to stderr. The report goes to stdout, so redirecting or piping JSON is safe.
 
+`--format sarif` writes a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log with one rule per vulnerability and package and one result per finding, located at the package's line in `pixi.lock`. Ignored findings are included as suppressed results. GitHub code scanning derives its severity label from the CVSS score in each rule:
+
+```yaml
+- run: pixi audit --format sarif > pixi-audit.sarif
+  continue-on-error: true
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: pixi-audit.sarif
+```
+
 ### Continuous integration
 
 Inside GitHub Actions, every finding is also emitted as a [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) on stderr, so vulnerabilities show up as annotations on the job and on the pull request. They are errors when the audit fails and warnings when every finding sits below the `--severity` threshold.
