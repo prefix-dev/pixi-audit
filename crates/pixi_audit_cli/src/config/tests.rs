@@ -74,6 +74,47 @@ ignore-until-fixed = [{ id = "CVE-4" }]
 }
 
 #[test]
+fn package_scoped_entries_become_package_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        r#"
+[tool.pixi-audit]
+ignore = [
+    "CVE-1",
+    { package = "vendored-thing", reason = "never runs" },
+    { id = "CVE-2", package = "requests" },
+]
+ignore-until-fixed = [{ package = "libfoo", until = 2999-01-01 }]
+"#,
+    );
+    let config = load_config(&manifest).unwrap();
+    assert_eq!(config.ignore, vec!["CVE-1"]);
+    assert!(config.ignore_until_fixed.is_empty());
+    assert_eq!(
+        config.package_rules,
+        vec![
+            PackageIgnore {
+                package: "vendored-thing".to_string(),
+                id: None,
+                until_fixed: false,
+            },
+            PackageIgnore {
+                package: "requests".to_string(),
+                id: Some("CVE-2".to_string()),
+                until_fixed: false,
+            },
+            PackageIgnore {
+                package: "libfoo".to_string(),
+                id: None,
+                until_fixed: true,
+            },
+        ]
+    );
+}
+
+#[test]
 fn expired_ignore_rules_are_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(
@@ -87,13 +128,17 @@ fn expired_ignore_rules_are_dropped() {
 
 #[test]
 fn ignore_rules_apply_through_their_last_day() {
+    let rule = ResolvedIgnore {
+        id: Some("CVE-1".to_string()),
+        package: None,
+    };
     let entries = [IgnoreEntry::Rule(IgnoreRule {
-        id: "CVE-1".to_string(),
-        reason: None,
+        id: Some("CVE-1".to_string()),
         until: Some(toml::Value::String("2026-09-02".to_string())),
+        ..IgnoreRule::default()
     })];
     let (active, expired) = effective_ignores(&entries, jiff::civil::date(2026, 9, 2)).unwrap();
-    assert_eq!(active, ["CVE-1"]);
+    assert_eq!(active, std::slice::from_ref(&rule));
     assert!(expired.is_empty());
 
     let (active, expired) = effective_ignores(&entries, jiff::civil::date(2026, 9, 3)).unwrap();
@@ -101,7 +146,7 @@ fn ignore_rules_apply_through_their_last_day() {
     assert_eq!(
         expired,
         [ExpiredIgnore {
-            id: "CVE-1".to_string(),
+            rule,
             until: jiff::civil::date(2026, 9, 2),
         }]
     );
@@ -113,7 +158,7 @@ fn malformed_ignore_rules_are_errors() {
         "ignore = [{ id = \"CVE-1\", until = \"soon\" }]",
         "ignore = [{ id = \"CVE-1\", until = 20260901 }]",
         "ignore = [{ id = \"CVE-1\", reasn = \"typo\" }]",
-        "ignore = [{ reason = \"no id\" }]",
+        "ignore = [{ reason = \"neither id nor package\" }]",
     ];
     for table in cases {
         let dir = tempfile::tempdir().unwrap();

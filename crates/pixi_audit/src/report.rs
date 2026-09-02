@@ -320,6 +320,30 @@ pub struct IgnoreSpec<'a> {
     pub ignore: &'a [String],
     /// Suppress these only while no fixed release is known.
     pub ignore_until_fixed: &'a [String],
+    /// Suppressions scoped to one package.
+    pub package_rules: &'a [PackageIgnore],
+}
+
+/// A suppression scoped to one package: every finding in it, or only the
+/// vulnerability `id`. The package name is matched under its ecosystem's
+/// normalization rules, so `Ruamel.YAML` finds `ruamel-yaml` on PyPI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageIgnore {
+    pub package: String,
+    pub id: Option<String>,
+    /// Suppress only while no fixed release is known.
+    pub until_fixed: bool,
+}
+
+impl PackageIgnore {
+    pub fn applies_to(&self, finding: &Finding) -> bool {
+        finding.package.matches(&self.package)
+            && self.id.as_ref().is_none_or(|id| {
+                std::iter::once(&finding.id)
+                    .chain(&finding.aliases)
+                    .any(|candidate| candidate.eq_ignore_ascii_case(id))
+            })
+    }
 }
 
 /// What basilisk knows about a conda-forge build of a fixed release.

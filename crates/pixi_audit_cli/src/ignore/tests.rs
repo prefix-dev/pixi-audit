@@ -10,10 +10,61 @@ fn apply(
     reason: Option<&str>,
     until: Option<Date>,
 ) -> (String, Outcome) {
+    apply_to_package(content, list, ids, None, reason, until)
+}
+
+fn apply_to_package(
+    content: &str,
+    list: IgnoreList,
+    ids: &[&str],
+    package: Option<&str>,
+    reason: Option<&str>,
+    until: Option<Date>,
+) -> (String, Outcome) {
     let mut document = content.parse::<DocumentMut>().unwrap();
     let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
-    let outcome = add_rules(&mut document, list, &ids, reason, until).unwrap();
+    let outcome = add_rules(&mut document, list, &ids, package, reason, until).unwrap();
     (document.to_string(), outcome)
+}
+
+#[test]
+fn package_rules_are_written_and_deduplicated_by_id_and_package() {
+    // Whole package.
+    let (text, outcome) = apply_to_package(
+        "",
+        IgnoreList::Always,
+        &[],
+        Some("vendored"),
+        Some("never runs"),
+        None,
+    );
+    assert_eq!(
+        text,
+        "[tool.pixi-audit]\nignore = [{ package = \"vendored\", reason = \"never runs\" }]\n"
+    );
+    assert_eq!(outcome.added, ["package 'vendored'"]);
+
+    // One id in a package is distinct from the same id everywhere and from
+    // the whole package, but equal to itself in any spelling.
+    let (text, outcome) = apply_to_package(
+        &text,
+        IgnoreList::Always,
+        &["CVE-1", "cve-1"],
+        Some("Vendored"),
+        None,
+        None,
+    );
+    assert_eq!(outcome.added, ["CVE-1 in package 'Vendored'"]);
+    assert_eq!(outcome.existing, ["cve-1 in package 'Vendored'"]);
+    assert!(
+        text.contains("{ id = \"CVE-1\", package = \"Vendored\" }"),
+        "{text}"
+    );
+    let (_, outcome) = apply(&text, IgnoreList::Always, &["CVE-1"], None, None);
+    assert_eq!(outcome.added, ["CVE-1"]);
+    let (_, outcome) =
+        apply_to_package(&text, IgnoreList::Always, &[], Some("VENDORED"), None, None);
+    assert_eq!(outcome.existing, ["package 'VENDORED'"]);
 }
 
 #[test]
@@ -101,6 +152,7 @@ fn a_list_that_is_not_an_array_is_an_error() {
             &mut document,
             IgnoreList::Always,
             &["CVE-2".to_string()],
+            None,
             None,
             None
         )

@@ -198,6 +198,7 @@ fn ignore_until_fixed(ids: &[String]) -> IgnoreSpec<'_> {
     IgnoreSpec {
         ignore: &[],
         ignore_until_fixed: ids,
+        package_rules: &[],
     }
 }
 
@@ -257,6 +258,74 @@ async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
     );
 }
 
+fn package_rule(package: &str, id: Option<&str>, until_fixed: bool) -> PackageIgnore {
+    PackageIgnore {
+        package: package.to_string(),
+        id: id.map(str::to_string),
+        until_fixed,
+    }
+}
+
+#[tokio::test]
+async fn package_rules_scope_suppression_to_one_package() {
+    // BSLK-1 (alias CVE-2026-1234) affects openssl; nothing else is found.
+    let cases: [(PackageIgnore, Option<IgnoreReason>); 6] = [
+        // Every finding in the package, matched case-insensitively.
+        (
+            package_rule("OpenSSL", None, false),
+            Some(IgnoreReason::Always),
+        ),
+        // Another package: no effect.
+        (package_rule("zlib", None, false), None),
+        // One id in the package, by alias.
+        (
+            package_rule("openssl", Some("cve-2026-1234"), false),
+            Some(IgnoreReason::Always),
+        ),
+        // A different id in the package: no effect.
+        (package_rule("openssl", Some("CVE-9999-1"), false), None),
+        // Until-fixed lapses because BSLK-1 has a fix.
+        (package_rule("openssl", None, true), None),
+        // Until-fixed by id lapses the same way.
+        (package_rule("openssl", Some("BSLK-1"), true), None),
+    ];
+    for (rule, expected) in cases {
+        let base = spawn_mock().await;
+        let rules = [rule.clone()];
+        let spec = IgnoreSpec {
+            package_rules: &rules,
+            ..IgnoreSpec::default()
+        };
+        let report = audit(&test_client(base), packages(), spec).await.unwrap();
+        let actual = report
+            .ignored
+            .first()
+            .and_then(|finding| finding.ignore_reason);
+        assert_eq!(actual, expected, "rule: {rule:?}");
+        assert_eq!(
+            report.vulnerabilities.len() + report.ignored.len(),
+            1,
+            "rule: {rule:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn package_rules_apply_until_fixed_when_no_fix_is_known() {
+    let base = spawn_mock_serving(vuln_doc_nofix()).await;
+    let rules = [package_rule("openssl", None, true)];
+    let spec = IgnoreSpec {
+        package_rules: &rules,
+        ..IgnoreSpec::default()
+    };
+    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    assert!(report.vulnerabilities.is_empty());
+    assert_eq!(
+        report.ignored[0].ignore_reason,
+        Some(IgnoreReason::UntilFixed)
+    );
+}
+
 #[tokio::test]
 async fn ignore_rules_that_match_no_finding_are_reported() {
     // BSLK-1 (alias CVE-2026-1234) is the only finding. Matching is by id
@@ -272,6 +341,7 @@ async fn ignore_rules_that_match_no_finding_are_reported() {
     let spec = IgnoreSpec {
         ignore: &ignore,
         ignore_until_fixed: &until_fixed,
+        ..IgnoreSpec::default()
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
 
@@ -318,6 +388,7 @@ async fn ignore_wins_over_until_fixed() {
     let spec = IgnoreSpec {
         ignore: &ignore,
         ignore_until_fixed: &until,
+        package_rules: &[],
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
     assert!(report.vulnerabilities.is_empty());
@@ -332,6 +403,7 @@ async fn plain_ignored_findings_carry_reason_always_and_it_serializes() {
     let spec = IgnoreSpec {
         ignore: &ignore,
         ignore_until_fixed: &[],
+        package_rules: &[],
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
     assert_eq!(report.ignored[0].ignore_reason, Some(IgnoreReason::Always));
@@ -391,6 +463,7 @@ async fn ignored_findings_are_sorted_like_vulnerabilities() {
     let spec = IgnoreSpec {
         ignore: &ignore,
         ignore_until_fixed: &[],
+        package_rules: &[],
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
 
@@ -406,6 +479,7 @@ async fn ignore_list_matches_id_and_aliases_case_insensitively() {
     let spec = IgnoreSpec {
         ignore: &ignore,
         ignore_until_fixed: &[],
+        package_rules: &[],
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
 
@@ -667,6 +741,39 @@ async fn short_pypi_batch_response_fails_the_audit() {
         matches!(err, AuditError::UnexpectedResponse { .. }),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn package_rules_match_pypi_names_under_pep_503() {
+    let conda_base = spawn_mock().await;
+    let pypi_client = test_pypi_client(spawn_pypi_mock().await);
+    let packages = vec![AuditPackage {
+        name: pypi_name("requests_test"),
+        version: Some("2.32.0".to_string()),
+        ecosystem: PackageEcosystem::Pypi,
+        environments: vec!["default".to_string()],
+    }];
+    let rules = [PackageIgnore {
+        package: "Requests.Test".to_string(),
+        id: None,
+        until_fixed: false,
+    }];
+    let report = super::audit(
+        &test_client(conda_base),
+        &pypi_client,
+        packages,
+        IgnoreSpec {
+            package_rules: &rules,
+            ..IgnoreSpec::default()
+        },
+        ThreatSources::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(report.vulnerabilities.is_empty());
+    assert_eq!(report.ignored.len(), 1);
+    assert_eq!(report.ignored[0].ignore_reason, Some(IgnoreReason::Always));
 }
 
 #[tokio::test]
@@ -989,7 +1096,7 @@ async fn threat_data_is_attached_to_findings_and_ranks_them() {
         packages(),
         IgnoreSpec {
             ignore: &ignore,
-            ignore_until_fixed: &[],
+            ..IgnoreSpec::default()
         },
         threat,
     )

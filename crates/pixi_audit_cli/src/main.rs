@@ -323,6 +323,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         ignore: IgnoreSpec {
             ignore: &ignore,
             ignore_until_fixed: &ignore_until_fixed,
+            package_rules: &config.package_rules,
         },
     };
 

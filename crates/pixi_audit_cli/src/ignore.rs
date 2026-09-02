@@ -13,9 +13,14 @@ use crate::config;
 
 #[derive(Debug, Args)]
 pub struct IgnoreArgs {
-    /// Vulnerability ids or aliases to ignore
-    #[arg(required = true, value_name = "ID")]
+    /// Vulnerability ids or aliases to ignore. With --package, only in
+    /// that package; without any id, --package ignores the whole package.
+    #[arg(required_unless_present = "package", value_name = "ID")]
     pub ids: Vec<String>,
+
+    /// Limit the rule to this package, or ignore every finding in it
+    #[arg(long, value_name = "NAME")]
+    pub package: Option<String>,
 
     /// Ignore only while no fixed release is known
     #[arg(long)]
@@ -76,6 +81,7 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
         &mut document,
         list,
         &args.ids,
+        args.package.as_deref(),
         args.reason.as_deref(),
         args.until,
     )?;
@@ -85,9 +91,9 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
             .wrap_err_with(|| format!("failed to update manifest '{}'", manifest.display()))?;
     }
 
-    for id in &outcome.added {
+    for rule in &outcome.added {
         eprintln!(
-            "Ignoring {id}{} in '{}'",
+            "Ignoring {rule}{} in '{}'",
             match list {
                 IgnoreList::Always => "",
                 IgnoreList::UntilFixed => " until a fix is released",
@@ -95,9 +101,9 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
             manifest.display()
         );
     }
-    for id in &outcome.existing {
+    for rule in &outcome.existing {
         eprintln!(
-            "note: '{id}' is already listed under '{}' in [tool.pixi-audit] of '{}'",
+            "note: {rule} is already listed under '{}' in [tool.pixi-audit] of '{}'",
             list.key(),
             manifest.display()
         );
@@ -121,21 +127,40 @@ impl IgnoreList {
     }
 }
 
-/// Which ids a call recorded and which were already listed.
+/// Which rules a call recorded and which were already listed, as labels
+/// such as `CVE-1`, `package 'x'`, or `CVE-1 in package 'x'`.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub added: Vec<String>,
     pub existing: Vec<String>,
 }
 
-/// Appends a rule for each of `ids` to `list` in `document`, creating the
-/// `[tool.pixi-audit]` table and the list as needed. Ids already listed,
+/// What one rule suppresses, lowercased for comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuleKey {
+    id: Option<String>,
+    package: Option<String>,
+}
+
+impl RuleKey {
+    fn new(id: Option<&str>, package: Option<&str>) -> Self {
+        Self {
+            id: id.map(str::to_lowercase),
+            package: package.map(str::to_lowercase),
+        }
+    }
+}
+
+/// Appends a rule for each of `ids` to `list` in `document`, or one rule
+/// for the whole `package` when no id is given, creating the
+/// `[tool.pixi-audit]` table and the list as needed. Rules already listed,
 /// compared case-insensitively, are left alone and reported as existing.
 /// Formatting and comments elsewhere in the document are untouched.
 pub fn add_rules(
     document: &mut DocumentMut,
     list: IgnoreList,
     ids: &[String],
+    package: Option<&str>,
     reason: Option<&str>,
     until: Option<Date>,
 ) -> miette::Result<Outcome> {
@@ -147,23 +172,32 @@ pub fn add_rules(
         .as_array_mut()
         .ok_or_else(|| miette!("'{}' in [tool.pixi-audit] is not an array", list.key()))?;
 
+    let targets: Vec<Option<&str>> = if ids.is_empty() {
+        vec![None]
+    } else {
+        ids.iter().map(|id| Some(id.as_str())).collect()
+    };
     let mut outcome = Outcome::default();
-    for id in ids {
+    let mut added_keys: Vec<RuleKey> = Vec::new();
+    for id in targets {
+        let key = RuleKey::new(id, package);
+        let label = match (id, package) {
+            (Some(id), Some(package)) => format!("{id} in package '{package}'"),
+            (Some(id), None) => id.to_string(),
+            (None, Some(package)) => format!("package '{package}'"),
+            (None, None) => return Err(miette!("an ignore rule needs an id or a package")),
+        };
         let listed = array
             .iter()
-            .filter_map(entry_id)
-            .any(|existing| existing.eq_ignore_ascii_case(id));
-        if listed
-            || outcome
-                .added
-                .iter()
-                .any(|added| added.eq_ignore_ascii_case(id))
-        {
-            outcome.existing.push(id.clone());
+            .filter_map(entry_key)
+            .any(|existing| existing == key);
+        if listed || added_keys.contains(&key) {
+            outcome.existing.push(label);
             continue;
         }
-        array.push(rule_value(id, reason, until));
-        outcome.added.push(id.clone());
+        array.push(rule_value(id, package, reason, until));
+        added_keys.push(key);
+        outcome.added.push(label);
     }
     Ok(outcome)
 }
@@ -186,11 +220,16 @@ fn audit_table(document: &mut DocumentMut) -> miette::Result<&mut Table> {
         .ok_or_else(|| miette!("[tool.pixi-audit] in the manifest is not a table"))
 }
 
-/// The id an ignore list entry names, for both the bare and table forms.
-fn entry_id(entry: &Value) -> Option<&str> {
+/// What an ignore list entry suppresses, for both the bare and table
+/// forms. Entries of another shape are skipped here; the config loader
+/// reports them.
+fn entry_key(entry: &Value) -> Option<RuleKey> {
     match entry {
-        Value::String(id) => Some(id.value()),
-        Value::InlineTable(rule) => rule.get("id").and_then(Value::as_str),
+        Value::String(id) => Some(RuleKey::new(Some(id.value()), None)),
+        Value::InlineTable(rule) => Some(RuleKey::new(
+            rule.get("id").and_then(Value::as_str),
+            rule.get("package").and_then(Value::as_str),
+        )),
         Value::Integer(_)
         | Value::Float(_)
         | Value::Boolean(_)
@@ -200,13 +239,23 @@ fn entry_id(entry: &Value) -> Option<&str> {
 }
 
 /// A bare id when there is nothing else to record, otherwise an inline
-/// table with the reason and the expiry as a TOML date.
-fn rule_value(id: &str, reason: Option<&str>, until: Option<Date>) -> Value {
-    if reason.is_none() && until.is_none() {
+/// table with the package, the reason, and the expiry as a TOML date.
+fn rule_value(
+    id: Option<&str>,
+    package: Option<&str>,
+    reason: Option<&str>,
+    until: Option<Date>,
+) -> Value {
+    if let (Some(id), None, None, None) = (id, package, reason, until) {
         return Value::from(id);
     }
     let mut rule = InlineTable::new();
-    rule.insert("id", Value::from(id));
+    if let Some(id) = id {
+        rule.insert("id", Value::from(id));
+    }
+    if let Some(package) = package {
+        rule.insert("package", Value::from(package));
+    }
     if let Some(reason) = reason {
         rule.insert("reason", Value::from(reason));
     }
