@@ -58,7 +58,7 @@ fn invalid_severity_is_rejected_at_parse_time() {
 }
 
 #[test]
-fn gate_exit_applies_threshold_with_unknown_failsafe() {
+fn gate_applies_threshold_with_unknown_failsafe() {
     let finding = |severity| pixi_audit::Finding {
         package: "p".into(),
         version: "1".into(),
@@ -82,26 +82,32 @@ fn gate_exit_applies_threshold_with_unknown_failsafe() {
         ..Default::default()
     };
     // No threshold: any vulnerability fails.
-    assert!(gate_exit(&report(SeverityBand::Low), None));
-    // Threshold high: medium passes, high and critical fail.
-    assert!(!gate_exit(
-        &report(SeverityBand::Medium),
-        Some(SeverityBand::High)
-    ));
-    assert!(gate_exit(
-        &report(SeverityBand::High),
-        Some(SeverityBand::High)
-    ));
-    assert!(gate_exit(
-        &report(SeverityBand::Critical),
-        Some(SeverityBand::High)
-    ));
+    assert_eq!(gate(&report(SeverityBand::Low), None), Gate::Fail);
+    // Threshold high: medium passes with a note, high and critical fail.
+    assert_eq!(
+        gate(&report(SeverityBand::Medium), Some(SeverityBand::High)),
+        Gate::BelowThreshold {
+            band: SeverityBand::High,
+            count: 1
+        }
+    );
+    assert_eq!(
+        gate(&report(SeverityBand::High), Some(SeverityBand::High)),
+        Gate::Fail
+    );
+    assert_eq!(
+        gate(&report(SeverityBand::Critical), Some(SeverityBand::High)),
+        Gate::Fail
+    );
     // Unknown always fails, even against critical.
-    assert!(gate_exit(
-        &report(SeverityBand::Unknown),
-        Some(SeverityBand::Critical)
-    ));
+    assert_eq!(
+        gate(&report(SeverityBand::Unknown), Some(SeverityBand::Critical)),
+        Gate::Fail
+    );
     // Clean report never fails.
-    assert!(!gate_exit(&AuditReport::default(), Some(SeverityBand::Low)));
-    assert!(!gate_exit(&AuditReport::default(), None));
+    assert_eq!(
+        gate(&AuditReport::default(), Some(SeverityBand::Low)),
+        Gate::Clean
+    );
+    assert_eq!(gate(&AuditReport::default(), None), Gate::Clean);
 }
