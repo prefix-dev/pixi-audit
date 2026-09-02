@@ -304,6 +304,58 @@ zope__interface = ">=0.5"
 }
 
 #[test]
+fn raising_a_constraint_replaces_implied_lower_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("pixi.toml");
+    std::fs::write(
+        &manifest,
+        r#"[workspace]
+name = "demo"
+
+[dependencies]
+openssl = ">=1,<4"
+zlib = ">1.2"
+
+[pypi-dependencies]
+requests = ">=2,<3"
+urllib3 = ">1.0,!=1.5"
+"#,
+    )
+    .unwrap();
+    let report = AuditReport {
+        vulnerabilities: vec![
+            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            finding_with_fix("zlib", "CVE-2", "conda-forge", &["1.3"]),
+            finding_with_fix("requests", "PYSEC-1", "PyPI", &["2.10.0"]),
+            finding_with_fix("urllib3", "PYSEC-2", "PyPI", &["2.0"]),
+        ],
+        ..Default::default()
+    };
+
+    assert_eq!(bump_manifest_constraints(&manifest, &report).unwrap(), 4);
+    let content = std::fs::read_to_string(&manifest).unwrap();
+    let value: toml::Value = toml::from_str(&content).unwrap();
+    // The old lower bound is gone, the upper bound and exclusions stay.
+    assert_eq!(
+        value["dependencies"]["openssl"].as_str(),
+        Some("<4,>=3.1.1")
+    );
+    assert_eq!(value["dependencies"]["zlib"].as_str(), Some(">=1.3"));
+    assert_eq!(
+        value["pypi-dependencies"]["requests"].as_str(),
+        Some(">=2.10.0, <3")
+    );
+    assert_eq!(
+        value["pypi-dependencies"]["urllib3"].as_str(),
+        Some("!=1.5, >=2.0")
+    );
+
+    // A second run with the same fixes is a no-op.
+    assert_eq!(bump_manifest_constraints(&manifest, &report).unwrap(), 0);
+    assert_eq!(std::fs::read_to_string(&manifest).unwrap(), content);
+}
+
+#[test]
 fn leaves_constraint_unchanged_when_no_fix_satisfies_it() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("pixi.toml");

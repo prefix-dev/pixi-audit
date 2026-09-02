@@ -151,9 +151,10 @@ fn set_string_value(value: &mut Value, fixed: &FixVersion) -> bool {
     true
 }
 
-/// Adds `>= fixed` to `current`, keeping its other bounds. Returns `None`
-/// when `current` cannot be parsed or already excludes `fixed`, in which
-/// case the requirement is left alone.
+/// Adds `>= fixed` to `current`, keeping its other bounds. Lower bounds that
+/// `>= fixed` already implies are dropped, so repeated `--fix` runs do not
+/// pile up `>=` clauses. Returns `None` when `current` cannot be parsed or
+/// already excludes `fixed`, in which case the requirement is left alone.
 fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
     match fixed {
         FixVersion::Pypi(fixed) => {
@@ -168,6 +169,7 @@ fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
             Some(
                 current
                     .iter()
+                    .filter(|specifier| !is_implied_lower_bound_pypi(specifier, fixed))
                     .cloned()
                     .chain(std::iter::once(lower_bound))
                     .collect::<VersionSpecifiers>()
@@ -184,7 +186,11 @@ fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
                 return None;
             }
             let lower_bound = VersionSpec::Range(RangeOperator::GreaterEquals, fixed.clone());
-            current.version = Some(match current.version.take() {
+            let remaining = current
+                .version
+                .take()
+                .and_then(|existing| without_implied_lower_bounds_conda(existing, fixed));
+            current.version = Some(match remaining {
                 None | Some(VersionSpec::Any) => lower_bound,
                 Some(existing) => {
                     VersionSpec::Group(LogicalOperator::And, vec![existing, lower_bound])
@@ -192,5 +198,40 @@ fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
             });
             Some(current.to_string())
         }
+    }
+}
+
+/// Whether `>= fixed` makes `specifier` redundant: a `>=` or `>` bound at
+/// or below `fixed`.
+fn is_implied_lower_bound_pypi(specifier: &VersionSpecifier, fixed: &PypiVersion) -> bool {
+    match specifier.operator() {
+        uv_pep440::Operator::GreaterThanEqual => specifier.version() <= fixed,
+        uv_pep440::Operator::GreaterThan => specifier.version() < fixed,
+        _ => false,
+    }
+}
+
+/// Removes `>=`/`>` bounds that `>= fixed` implies from an `And` tree.
+/// Returns `None` when nothing else is left. `Or` groups are kept intact:
+/// dropping one alternative would change their meaning.
+fn without_implied_lower_bounds_conda(
+    spec: VersionSpec,
+    fixed: &CondaVersion,
+) -> Option<VersionSpec> {
+    match spec {
+        VersionSpec::Range(RangeOperator::GreaterEquals, version) if version <= *fixed => None,
+        VersionSpec::Range(RangeOperator::Greater, version) if version < *fixed => None,
+        VersionSpec::Group(LogicalOperator::And, items) => {
+            let mut kept: Vec<VersionSpec> = items
+                .into_iter()
+                .filter_map(|item| without_implied_lower_bounds_conda(item, fixed))
+                .collect();
+            match kept.len() {
+                0 => None,
+                1 => kept.pop(),
+                _ => Some(VersionSpec::Group(LogicalOperator::And, kept)),
+            }
+        }
+        other => Some(other),
     }
 }
