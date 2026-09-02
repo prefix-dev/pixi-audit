@@ -1778,6 +1778,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "supports-hyperlinks",
  "tempfile",
  "tokio",
  "toml",
