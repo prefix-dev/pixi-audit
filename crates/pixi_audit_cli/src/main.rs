@@ -1,9 +1,11 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use http_cache_reqwest::{CACacheManager, Cache, CacheMode, HttpCache, HttpCacheOptions};
+use iocraft::prelude::*;
 use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
     AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL,
@@ -26,6 +28,30 @@ const EXIT_VULNERABLE: u8 = 1;
 const EXIT_ERROR: u8 = 2;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+
+#[derive(Default, Props)]
+struct AuditSpinnerProps {
+    message: String,
+}
+
+#[component]
+fn AuditSpinner(mut hooks: Hooks, props: &AuditSpinnerProps) -> impl Into<AnyElement<'static>> {
+    let mut frame = hooks.use_state(|| 0);
+    hooks.use_future(async move {
+        let mut interval = tokio::time::interval(SPINNER_INTERVAL);
+        loop {
+            interval.tick().await;
+            frame.set((frame.get() + 1) % SPINNER_FRAMES.len());
+        }
+    });
+
+    element! {
+        Text(content: format!("{} {}", SPINNER_FRAMES[frame.get()], props.message))
+    }
+}
 
 /// Audit a pixi.lock file for known vulnerabilities.
 ///
@@ -279,6 +305,31 @@ impl Auditor<'_> {
     }
 }
 
+async fn audit_with_progress(
+    auditor: &Auditor<'_>,
+    message: String,
+) -> miette::Result<AuditReport> {
+    if !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal() {
+        eprintln!("{message}");
+        return auditor.audit().await;
+    }
+
+    let mut spinner = element!(AuditSpinner(message));
+    let audit = auditor.audit();
+    tokio::pin!(audit);
+    let report = {
+        let render = spinner.render_loop();
+        tokio::pin!(render);
+        tokio::select! {
+            biased;
+            _ = &mut render => audit.await,
+            report = &mut audit => report,
+        }
+    };
+    let _ = console::Term::stdout().clear_last_lines(1);
+    report
+}
+
 /// The base URL from `var`, or `default` when it is unset.
 fn base_url_from_env(var: &str, default: &str) -> miette::Result<Url> {
     let raw = std::env::var(var).unwrap_or_else(|_| default.to_string());
@@ -306,7 +357,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let pypi_base_url = base_url_from_env(PYPI_BASE_URL_ENV_VAR, DEFAULT_PYPI_BASE_URL)?;
     let epss_base_url = base_url_from_env(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?;
     let kev_url = base_url_from_env(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?;
-    eprintln!(
+    let audit_message = format!(
         "Auditing {} against {base_url} and {pypi_base_url} ...",
         targets.lockfile.display()
     );
@@ -334,7 +385,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         },
     };
 
-    let report = auditor.audit().await?;
+    let report = audit_with_progress(&auditor, audit_message).await?;
     warn_unavailable_threat_data(&report.threat_data);
     let report = if cli.fix {
         fix::apply(&targets, report, || auditor.audit()).await?
