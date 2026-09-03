@@ -20,6 +20,8 @@ pub struct RenderOptions {
     pub fix_attempted: bool,
     /// Whether `--fix` can edit a manifest beside the audited lock file.
     pub manifest_available: bool,
+    /// Whether to explain report terminology after the recommended actions.
+    pub explain: bool,
 }
 
 impl Default for RenderOptions {
@@ -28,6 +30,7 @@ impl Default for RenderOptions {
             hyperlinks: false,
             fix_attempted: false,
             manifest_available: true,
+            explain: false,
         }
     }
 }
@@ -39,6 +42,33 @@ impl RenderOptions {
         Self {
             hyperlinks: console::colors_enabled() && supports_hyperlinks::on(Stream::Stdout),
             ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GuidanceOptions {
+    pub fix_attempted: bool,
+    pub manifest_available: bool,
+    pub explain: bool,
+}
+
+impl Default for GuidanceOptions {
+    fn default() -> Self {
+        Self {
+            fix_attempted: false,
+            manifest_available: true,
+            explain: false,
+        }
+    }
+}
+
+impl From<RenderOptions> for GuidanceOptions {
+    fn from(options: RenderOptions) -> Self {
+        Self {
+            fix_attempted: options.fix_attempted,
+            manifest_available: options.manifest_available,
+            explain: options.explain,
         }
     }
 }
@@ -135,12 +165,7 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
         )
         .unwrap();
     }
-    render_guidance(
-        &mut out,
-        report,
-        options.fix_attempted,
-        options.manifest_available,
-    );
+    render_guidance(&mut out, report, options.into());
     out
 }
 
@@ -149,6 +174,51 @@ enum KevSummary {
     Loaded(usize),
     Unavailable,
     NotChecked,
+}
+
+pub(crate) const EXPLAIN_HINT: &str = "Add `--explain` for scoring and report definitions.";
+pub(crate) const EXPLANATION_TERM_PALETTE_INDEX: u8 = 14;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExplanationEntry {
+    pub(crate) label: &'static str,
+    pub(crate) text: &'static str,
+    pub(crate) indent: usize,
+}
+
+impl ExplanationEntry {
+    const fn new(label: &'static str, text: &'static str) -> Self {
+        Self {
+            label,
+            text,
+            indent: 0,
+        }
+    }
+
+    const fn child(label: &'static str, text: &'static str) -> Self {
+        Self {
+            label,
+            text,
+            indent: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExplanationSection {
+    pub(crate) title: &'static str,
+    pub(crate) entries: Vec<ExplanationEntry>,
+}
+
+impl ExplanationSection {
+    pub(crate) fn label_width(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|entry| entry.label.len())
+            .max()
+            .unwrap_or(0)
+            + 2
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,7 +321,7 @@ impl Guidance {
             KevSummary::NotChecked => "n/a — CISA KEV catalog not checked".to_string(),
         };
         vec![
-            assessment_line("Highest finding risk score:", highest_risk),
+            assessment_line("Highest finding prioritization score:", highest_risk),
             assessment_line("CISA KEV matches:", kev),
             assessment_line("Critical/high findings:", self.severe.to_string()),
             assessment_line(
@@ -301,7 +371,7 @@ impl Guidance {
                 && number > 0
             {
                 lines.push(format!(
-                    "Prioritize {}; exploitation has been confirmed in the wild.",
+                    "Prioritize {} because exploitation has been confirmed in the wild.",
                     count(number, "CISA KEV match", "CISA KEV matches")
                 ));
             }
@@ -341,7 +411,7 @@ impl Guidance {
                     ("fixes", "them")
                 };
                 lines.push(format!(
-                    "{} {} {fix} only upstream; `--fix` cannot install {pronoun}. Wait for an ecosystem build or change dependency source.",
+                    "{} {} {fix} only upstream. `--fix` cannot install {pronoun}. Wait for an ecosystem build or change dependency source.",
                     count(
                         self.upstream_only,
                         "vulnerability",
@@ -352,7 +422,7 @@ impl Guidance {
             }
             if self.unfixed > 0 {
                 lines.push(format!(
-                    "{} {} no known fix. Remove, replace, or mitigate the affected dependencies; use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.",
+                    "{} {} no known fix. Remove, replace, or mitigate the affected dependencies. Use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.",
                     count(self.unfixed, "vulnerability", "vulnerabilities"),
                     if self.unfixed == 1 { "has" } else { "have" }
                 ));
@@ -360,32 +430,156 @@ impl Guidance {
         }
         if self.unchecked > 0 {
             lines.push(if self.unchecked == 1 {
-                "Review 1 unchecked package; its source is not covered by the configured vulnerability databases.".to_string()
+                "Review 1 unchecked package. Its source is not covered by the configured vulnerability databases.".to_string()
             } else {
                 format!(
-                    "Review {} unchecked packages; their sources are not covered by the configured vulnerability databases.",
+                    "Review {} unchecked packages. Their sources are not covered by the configured vulnerability databases.",
                     self.unchecked
                 )
             });
         }
         lines
     }
+
+    pub(crate) fn explanation_sections(&self, report: &AuditReport) -> Vec<ExplanationSection> {
+        let mut sections = vec![ExplanationSection {
+            title: "Counts",
+            entries: vec![
+                ExplanationEntry::new("Package", "One locked name, version, and source."),
+                ExplanationEntry::new("Finding", "One vulnerability record affecting a package."),
+                ExplanationEntry::new(
+                    "CVE IDs",
+                    "Standard vulnerability IDs. One finding can reference several.",
+                ),
+            ],
+        }];
+
+        if self.total > 0 {
+            let mut threat = vec![
+                ExplanationEntry::new("EPSS", "Estimated chance of exploitation within 30 days."),
+                ExplanationEntry::new(
+                    "Percentile",
+                    "Rank among scored CVEs. 90th is higher than 90% of them.",
+                ),
+                ExplanationEntry::new("KEV", "CISA confirms exploitation in the wild."),
+                ExplanationEntry::new(
+                    "Boost",
+                    "KEV adds 5%. Known ransomware use raises this to 10%.",
+                ),
+            ];
+            if report
+                .vulnerabilities
+                .iter()
+                .any(|finding| !finding.known_exploited.is_empty())
+            {
+                threat.push(ExplanationEntry::new(
+                    "Markers",
+                    "`kev, ransomware` means CISA records known ransomware use. `kev` alone means CISA does not mark that use as Known.",
+                ));
+            }
+            sections.push(ExplanationSection {
+                title: "Threat signals",
+                entries: threat,
+            });
+
+            sections.push(ExplanationSection {
+                title: "Prioritization",
+                entries: vec![
+                    ExplanationEntry::new(
+                        "Risk",
+                        "A 0–100 score for ordering individual findings.",
+                    ),
+                    ExplanationEntry::child(
+                        "Formula",
+                        "min(threat × severity × boost, 1) × 100.",
+                    ),
+                    ExplanationEntry::new(
+                        "Threat",
+                        "1.0 for any KEV match. Otherwise the highest EPSS probability, or 0 without data.",
+                    ),
+                    ExplanationEntry::new(
+                        "Severity",
+                        "Critical .90, high .75, medium/unknown .50, low .30. Averaged equally with CVSS when available.",
+                    ),
+                ],
+            });
+
+            sections.push(ExplanationSection {
+                title: "Fixes",
+                entries: vec![
+                    ExplanationEntry::new(
+                        "Ecosystem fix",
+                        "A fixed release exists for the audited package source. The `Fixed in` column lists it.",
+                    ),
+                    ExplanationEntry::new(
+                        "Fix only upstream",
+                        "A fix exists elsewhere. `--fix` cannot install it.",
+                    ),
+                    ExplanationEntry::new(
+                        "No known fix",
+                        "Audit sources list no fixed release. Mitigation may still be possible.",
+                    ),
+                    ExplanationEntry::new(
+                        "`--fix`",
+                        "Raises matching direct constraints, runs `pixi update`, and audits again. A listed fix does not guarantee selection.",
+                    ),
+                ],
+            });
+        }
+
+        let mut coverage = Vec::new();
+        if self.ignored > 0 {
+            coverage.push(ExplanationEntry::new(
+                "Ignored",
+                "Excluded from active totals and the failure decision. The package is not patched.",
+            ));
+        }
+        if self.unchecked > 0 {
+            coverage.push(ExplanationEntry::new(
+                "Unchecked",
+                "The package source lacks vulnerability database coverage. Safety is unknown.",
+            ));
+        }
+
+        let findings = report.vulnerabilities.iter().chain(report.ignored.iter());
+        let (version_unbounded, unevaluated) = findings.fold((false, false), |state, finding| {
+            (
+                state.0 || finding.applicability == MatchApplicability::VersionUnbounded,
+                state.1 || finding.applicability == MatchApplicability::Unevaluated,
+            )
+        });
+        if version_unbounded {
+            coverage.push(ExplanationEntry::new(
+                "Unbounded",
+                "The advisory has no affected version range, so every version matches.",
+            ));
+        }
+        if unevaluated {
+            coverage.push(ExplanationEntry::new(
+                "Unevaluated",
+                "The source lacks enough version data to decide whether this version is affected.",
+            ));
+        }
+        if !coverage.is_empty() {
+            sections.push(ExplanationSection {
+                title: "Coverage",
+                entries: coverage,
+            });
+        }
+
+        sections
+    }
 }
 
 fn assessment_line(label: &str, value: String) -> String {
-    format!("{label:<36}{value}")
+    format!("{label:<39}{value}")
 }
 
 fn count(number: usize, singular: &str, plural: &str) -> String {
     format!("{number} {}", if number == 1 { singular } else { plural })
 }
 
-fn render_guidance(
-    out: &mut String,
-    report: &AuditReport,
-    fix_attempted: bool,
-    manifest_available: bool,
-) {
+fn render_guidance(out: &mut String, report: &AuditReport, options: GuidanceOptions) {
     let guidance = Guidance::for_report(report);
     let assessment = guidance.assessment_lines();
     if !assessment.is_empty() {
@@ -395,8 +589,32 @@ fn render_guidance(
         }
     }
     writeln!(out, "\n{}", style("Next steps").bold()).unwrap();
-    for line in guidance.next_step_lines(fix_attempted, manifest_available) {
+    for line in guidance.next_step_lines(options.fix_attempted, options.manifest_available) {
         writeln!(out, "  • {line}").unwrap();
+    }
+    if options.explain {
+        writeln!(out, "\n{}", style("How this report works").bold()).unwrap();
+        for section in guidance.explanation_sections(report) {
+            let width = section.label_width();
+            writeln!(out, "\n  {}", style(section.title).bold()).unwrap();
+            for entry in section.entries {
+                let label = format!(
+                    "{:indent$}{:<width$}",
+                    "",
+                    entry.label,
+                    indent = entry.indent
+                );
+                write!(
+                    out,
+                    "    {}",
+                    style(label).color256(EXPLANATION_TERM_PALETTE_INDEX).bold()
+                )
+                .unwrap();
+                writeln!(out, "{}", entry.text).unwrap();
+            }
+        }
+    } else {
+        writeln!(out, "\n{}", style(EXPLAIN_HINT).dim()).unwrap();
     }
 }
 
@@ -527,7 +745,7 @@ pub fn risk_label(risk: RiskScore) -> Option<String> {
 /// The percentile rank followed by exploit probability, such as
 /// `99th · 90.8%`, or `None` without an EPSS record.
 pub fn epss_label(epss: &[EpssScore]) -> Option<String> {
-    let score = epss.first()?;
+    let score = highest_epss(epss)?;
     let probability = score.epss * 100.0;
     let percentile = ordinal((score.percentile * 100.0).floor() as u32);
     if probability < 0.1 {
@@ -540,7 +758,7 @@ pub fn epss_label(epss: &[EpssScore]) -> Option<String> {
 /// EPSS probability followed by percentile for established machine-oriented
 /// renderers whose text is kept stable.
 pub fn epss_probability_first_label(epss: &[EpssScore]) -> Option<String> {
-    let score = epss.first()?;
+    let score = highest_epss(epss)?;
     let probability = score.epss * 100.0;
     let percentile = ordinal((score.percentile * 100.0).floor() as u32);
     if probability < 0.1 {
@@ -548,6 +766,11 @@ pub fn epss_probability_first_label(epss: &[EpssScore]) -> Option<String> {
     } else {
         Some(format!("{probability:.1}% ({percentile})"))
     }
+}
+
+fn highest_epss(epss: &[EpssScore]) -> Option<&EpssScore> {
+    epss.iter()
+        .max_by(|left, right| left.epss.total_cmp(&right.epss))
 }
 
 fn ordinal(number: u32) -> String {

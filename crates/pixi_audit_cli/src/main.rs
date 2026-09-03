@@ -84,6 +84,10 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Table)]
     format: Format,
 
+    /// Explain the terms and scoring used in human-readable reports
+    #[arg(long)]
+    explain: bool,
+
     /// Column to sort table rows by. Risk, severity, EPSS, and KEV sort
     /// highest first; other columns ascend. Only affects `--format table`.
     #[arg(long, value_enum, default_value = "risk", value_name = "FIELD")]
@@ -128,6 +132,13 @@ async fn main() -> ExitCode {
         };
     }
     let format = if cli.json { Format::Json } else { cli.format };
+    if cli.explain && matches!(format, Format::Json | Format::Sarif) {
+        eprintln!(
+            "error: `--explain` is available only with `--format table` or `--format grouped`"
+        );
+        return ExitCode::from(EXIT_ERROR);
+    }
+    let explain = cli.explain;
     let fix_attempted = cli.fix;
     let layout = TableLayout {
         fields: cli.fields.clone(),
@@ -173,6 +184,7 @@ async fn main() -> ExitCode {
                 &report,
                 render::RenderOptions {
                     fix_attempted,
+                    explain,
                     manifest_available,
                     ..render::RenderOptions::detect_stdout()
                 },
@@ -183,8 +195,11 @@ async fn main() -> ExitCode {
             &lockfile.display().to_string(),
             OutputStyle::detect_stdout(),
             &layout,
-            fix_attempted,
-            manifest_available,
+            render::GuidanceOptions {
+                fix_attempted,
+                manifest_available,
+                explain,
+            },
             std::io::stdout().lock(),
         )
         .expect("write report to stdout"),

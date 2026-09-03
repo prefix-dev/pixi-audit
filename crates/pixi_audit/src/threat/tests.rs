@@ -54,6 +54,18 @@ fn risk_is_epss_times_severity_scaled_to_100() {
 }
 
 #[test]
+fn risk_uses_the_highest_epss_probability() {
+    let scores = [epss(0.1), epss(0.7)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_close(risk(SeverityBand::High, None, &scores, &[]), 52.5);
+
+    let reversed = scores.into_iter().rev().collect::<Vec<_>>();
+    assert_close(risk(SeverityBand::High, None, &reversed, &[]), 52.5);
+}
+
+#[test]
 fn risk_without_threat_data_is_zero() {
     assert_close(risk(SeverityBand::Critical, Some(9.8), &[], &[]), 0.0);
     assert_eq!(

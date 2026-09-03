@@ -1,7 +1,7 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, EpssScore, Finding, KnownExploited, MatchApplicability,
-    PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore, SeverityBand,
-    ThreatDataStatus, ThreatSourceStatus, UncheckedPackage,
+    AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited, PackageEcosystem,
+    PackageName, RansomwareCampaignUse, RiskScore, SeverityBand, ThreatDataStatus,
+    ThreatSourceStatus, UncheckedPackage,
 };
 
 use pixi_audit::{CondaPublication, UpstreamFix, UpstreamOrigin};
@@ -96,12 +96,20 @@ fn kev_entry(cve: &str, ransomware: RansomwareCampaignUse) -> KnownExploited {
 #[test]
 fn threat_cells_render_risk_epss_and_kev() {
     let mut scored = finding("openssl", "CVE-2026-0001", SeverityBand::Critical);
-    scored.epss = vec![EpssScore {
-        cve: "CVE-2026-0001".to_string(),
-        epss: 0.9077,
-        percentile: 0.99796,
-        date: "2026-09-01".to_string(),
-    }];
+    scored.epss = vec![
+        EpssScore {
+            cve: "CVE-2026-0000".to_string(),
+            epss: 0.01,
+            percentile: 0.4,
+            date: "2026-09-01".to_string(),
+        },
+        EpssScore {
+            cve: "CVE-2026-0001".to_string(),
+            epss: 0.9077,
+            percentile: 0.99796,
+            date: "2026-09-01".to_string(),
+        },
+    ];
     scored.known_exploited = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Known)];
     scored.risk = RiskScore::compute(scored.severity, None, &scored.epss, &scored.known_exploited);
     let mut tiny = finding("openssl", "CVE-2026-0002", SeverityBand::Low);
@@ -141,23 +149,28 @@ fn threat_cells_render_risk_epss_and_kev() {
         "{text}"
     );
     assert!(
-        text.contains(
-            "  • Highest finding risk score:         99.0 / 100\n  \
-         • CISA KEV matches:                   1 CVE — exploitation confirmed in the wild"
-        ),
+        text.lines().any(|line| {
+            line.contains("Highest finding prioritization score:") && line.ends_with("99.0 / 100")
+        }),
         "{text}"
     );
     assert!(
-        text.contains(
-            "  • Fix available in audited ecosystem: 3 of 3 vulnerabilities across 1 audited package"
-        ),
+        text.lines().any(|line| {
+            line.contains("CISA KEV matches:")
+                && line.ends_with("1 CVE — exploitation confirmed in the wild")
+        }),
         "{text}"
     );
     assert!(
-        text.contains(
-            "  • Prioritize 1 CISA KEV match; exploitation has been confirmed in the wild."
-        )
+        text.lines().any(|line| {
+            line.contains("Fix available in audited ecosystem:")
+                && line.ends_with("3 of 3 vulnerabilities across 1 audited package")
+        }),
+        "{text}"
     );
+    assert!(text.contains(
+        "  • Prioritize 1 CISA KEV match because exploitation has been confirmed in the wild."
+    ));
 }
 
 #[test]
@@ -199,10 +212,10 @@ fn unavailable_kev_catalog_is_not_reported_as_zero() {
     };
 
     let text = render_human(&report, RenderOptions::default());
-    assert!(
-        text.contains("  • CISA KEV matches:                   n/a — CISA KEV catalog unavailable")
-    );
-    assert!(!text.contains("CISA KEV matches:                   0 CVEs"));
+    assert!(text.lines().any(|line| {
+        line.contains("CISA KEV matches:") && line.ends_with("n/a — CISA KEV catalog unavailable")
+    }));
+    assert!(!text.contains("CISA KEV matches:                      0 CVEs"));
 }
 
 #[test]
@@ -233,6 +246,85 @@ fn kev_is_marked_on_the_risk_cell() {
 }
 
 #[test]
+fn explain_adds_contextual_definitions_after_actions() {
+    let mut listed = finding("openssl", "CVE-2026-0001", SeverityBand::High);
+    listed.epss = vec![EpssScore {
+        cve: "CVE-2026-0001".to_string(),
+        epss: 0.5,
+        percentile: 0.9,
+        date: "2026-09-01".to_string(),
+    }];
+    listed.known_exploited = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Unknown)];
+    listed.applicability = MatchApplicability::VersionUnbounded;
+    listed.risk = RiskScore::compute(listed.severity, None, &listed.epss, &listed.known_exploited);
+
+    let mut ignored = finding("libxml2", "CVE-2026-0002", SeverityBand::Low);
+    ignored.ignore_reason = Some(IgnoreReason::Always);
+    let report = AuditReport {
+        vulnerabilities: vec![listed],
+        ignored: vec![ignored],
+        unchecked: vec![UncheckedPackage {
+            package: PackageName::conda("samtools").unwrap(),
+            version: Some("1.2".to_string()),
+            ecosystem: PackageEcosystem::Other("bioconda".to_string()),
+            environments: vec!["default".to_string()],
+        }],
+        summary: AuditSummary {
+            audited: 3,
+            vulnerable: 1,
+            ignored: 1,
+            unchecked: 1,
+        },
+        threat_data: loaded_threat_data(),
+        ..Default::default()
+    };
+    let text = render_human(
+        &report,
+        RenderOptions {
+            explain: true,
+            ..Default::default()
+        },
+    );
+    let actions = text.find("Next steps").unwrap();
+    let explanation = text.find("How this report works").unwrap();
+    assert!(actions < explanation, "{text}");
+    assert!(
+        text.contains(
+            "How this report works\n\n  Counts\n    Package  One locked name, version, and source.\n"
+        ),
+        "{text}"
+    );
+    let threat = text.find("\n  Threat signals\n").unwrap();
+    let prioritization = text.find("\n  Prioritization\n").unwrap();
+    assert!(threat < prioritization, "{text}");
+    assert!(
+        text.contains(
+            "\n    Risk      A 0–100 score for ordering individual findings.\n      Formula   min(threat × severity × boost, 1) × 100.\n    Threat"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\n  Fixes\n"), "{text}");
+    assert!(text.contains("\n  Coverage\n"), "{text}");
+    for expected in [
+        "A 0–100 score for ordering individual findings.",
+        "highest EPSS probability",
+        "Critical .90, high .75, medium/unknown .50, low .30.",
+        "CISA confirms exploitation in the wild.",
+        "Estimated chance of exploitation within 30 days.",
+        "`kev` alone means CISA does not mark that use as Known.",
+        "A fixed release exists for the audited package source.",
+        "Fix only upstream",
+        "Audit sources list no fixed release.",
+        "Excluded from active totals and the failure decision.",
+        "The package source lacks vulnerability database coverage.",
+        "The advisory has no affected version range",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+    assert!(!text.contains("\n    Unevaluated"), "{text}");
+}
+
+#[test]
 fn unknown_severity_keeps_threat_cells() {
     let mut unknown = finding("requests", "PYSEC-2026-1", SeverityBand::Unknown);
     unknown.ecosystem = PackageEcosystem::Pypi;
@@ -258,7 +350,10 @@ fn unknown_severity_keeps_threat_cells() {
         text.contains("  PYSEC-2026-1  risk  12.5  epss 95th · 25.0%  fixed in: 3.1.4\n"),
         "{text}"
     );
-    assert!(text.contains("  • CISA KEV matches:                   0 CVEs"));
+    assert!(
+        text.lines()
+            .any(|line| line.contains("CISA KEV matches:") && line.ends_with("0 CVEs"))
+    );
 }
 
 #[test]
@@ -273,7 +368,7 @@ fn empty_report_renders_clean_summary() {
     let text = render_human(&report, RenderOptions::default());
     assert_eq!(
         text,
-        "No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)\n\nNext steps\n  • None. No vulnerabilities were found in checked packages.\n"
+        "No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)\n\nNext steps\n  • None. No vulnerabilities were found in checked packages.\n\nAdd `--explain` for scoring and report definitions.\n"
     );
 }
 
@@ -307,15 +402,22 @@ fn findings_are_grouped_per_package_with_fix_and_url() {
     assert!(
         text.contains("2 vulnerabilities in 1 package(s) (10 audited, 0 ignored, 0 unchecked)")
     );
-    assert!(text.contains(
-        "  • Fix available in audited ecosystem: 1 of 2 vulnerabilities across 1 audited package"
-    ));
-    assert!(text.contains("  • Fix only upstream:                  1 vulnerability"));
-    assert!(text.contains("  • No known fix:                       0 vulnerabilities"));
+    assert!(text.lines().any(|line| {
+        line.contains("Fix available in audited ecosystem:")
+            && line.ends_with("1 of 2 vulnerabilities across 1 audited package")
+    }));
+    assert!(
+        text.lines()
+            .any(|line| line.contains("Fix only upstream:") && line.ends_with("1 vulnerability"))
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains("No known fix:") && line.ends_with("0 vulnerabilities"))
+    );
     assert!(text.contains(
         "Re-run this audit with `--fix` to ask pixi to update 1 package name. Fixed releases in the audited ecosystem are available for 1 vulnerability."
     ));
-    assert!(text.contains("1 vulnerability has a fix only upstream; `--fix` cannot install it."));
+    assert!(text.contains("1 vulnerability has a fix only upstream. `--fix` cannot install it."));
 }
 
 #[test]
@@ -369,9 +471,10 @@ fn findings_from_different_ecosystems_are_separate_packages() {
     assert!(text.contains("openssl 3.1.0 (conda-forge) — default, prod"));
     assert!(text.contains("openssl 3.1.0 (PyPI) — docs"));
     assert!(text.contains("2 vulnerabilities in 2 package(s)"));
-    assert!(text.contains(
-        "Fix available in audited ecosystem: 2 of 2 vulnerabilities across 2 audited packages"
-    ));
+    assert!(text.lines().any(|line| {
+        line.contains("Fix available in audited ecosystem:")
+            && line.ends_with("2 of 2 vulnerabilities across 2 audited packages")
+    }));
     assert!(text.contains("Re-run this audit with `--fix` to ask pixi to update 1 package name."));
 }
 
@@ -475,7 +578,7 @@ fn ignored_and_unchecked_sections_render() {
     assert!(text.contains("No active vulnerabilities were found in checked packages."));
     assert!(text.contains("Review 1 ignored finding periodically."));
     assert!(text.contains(
-        "Review 1 unchecked package; its source is not covered by the configured vulnerability databases."
+        "Review 1 unchecked package. Its source is not covered by the configured vulnerability databases."
     ));
 }
 
