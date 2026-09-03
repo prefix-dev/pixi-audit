@@ -322,6 +322,9 @@ pub struct IgnoreSpec<'a> {
     pub ignore_until_fixed: &'a [String],
     /// Suppressions scoped to one package.
     pub package_rules: &'a [PackageIgnore],
+    /// Suppress every finding for which no fixed release is known, as if
+    /// each were listed in `ignore_until_fixed`.
+    pub ignore_unfixed: bool,
 }
 
 /// A suppression scoped to one package: every finding in it, or only the

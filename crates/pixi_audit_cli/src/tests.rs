@@ -52,6 +52,12 @@ fn new_flags_parse() {
     assert!(cli.fix);
     assert_eq!(cli.sort_by, Field::Risk);
     assert_eq!(cli.fields, DEFAULT_FIELDS.to_vec());
+    assert!(!cli.ignore_unfixed);
+    assert!(
+        Cli::try_parse_from(["pixi-audit", "--ignore-unfixed"])
+            .unwrap()
+            .ignore_unfixed
+    );
 }
 
 #[test]

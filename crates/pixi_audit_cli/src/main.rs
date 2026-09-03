@@ -59,6 +59,11 @@ struct Cli {
     #[arg(long = "ignore-until-fixed", value_name = "ID")]
     ignore_until_fixed: Vec<String>,
 
+    /// Ignore every finding that has no fixed release yet. Each returns
+    /// once a fix is published. Same as the config file's `ignore-unfixed`.
+    #[arg(long)]
+    ignore_unfixed: bool,
+
     /// Fail (exit 1) only for conda findings at or above this severity band.
     /// Severity filtering does not apply to PyPI findings. Overrides the
     /// config file's `severity`.
@@ -295,6 +300,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let mut ignore_until_fixed = config.ignore_until_fixed;
     ignore_until_fixed.extend(cli.ignore_until_fixed.iter().cloned());
     let threshold = cli.severity.or(config.severity);
+    let ignore_unfixed = cli.ignore_unfixed || config.ignore_unfixed;
 
     let base_url = base_url_from_env(BASE_URL_ENV_VAR, DEFAULT_BASE_URL)?;
     let pypi_base_url = base_url_from_env(PYPI_BASE_URL_ENV_VAR, DEFAULT_PYPI_BASE_URL)?;
@@ -324,6 +330,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
             ignore: &ignore,
             ignore_until_fixed: &ignore_until_fixed,
             package_rules: &config.package_rules,
+            ignore_unfixed,
         },
     };
 

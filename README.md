@@ -65,6 +65,8 @@ pixi audit --ignore-until-fixed CVE-2026-7777
 
 The finding returns as soon as either an ecosystem-specific or upstream fix is known.
 
+To apply that to every finding at once, so CI only fails on what can be acted on today, use `--ignore-unfixed` or set `ignore-unfixed = true` in the manifest. Unfixed findings stay listed in the ignored section and come back the moment a fix is published.
+
 An ignore rule that matches no finding produces a warning on stderr, so suppressions left behind after an upgrade stand out. The JSON report lists them under `unmatched_ignores`.
 
 Record rules in the manifest with `pixi audit ignore` instead of repeating them on the command line:

@@ -115,6 +115,25 @@ ignore-until-fixed = [{ package = "libfoo", until = 2999-01-01 }]
 }
 
 #[test]
+fn ignore_unfixed_is_read_as_a_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        "[tool.pixi-audit]\nignore-unfixed = true\n",
+    );
+    assert!(load_config(&manifest).unwrap().ignore_unfixed);
+    let manifest = write(dir.path(), "pixi.toml", "[tool.pixi-audit]\n");
+    assert!(!load_config(&manifest).unwrap().ignore_unfixed);
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        "[tool.pixi-audit]\nignore-unfixed = \"yes\"\n",
+    );
+    assert!(load_config(&manifest).is_err());
+}
+
+#[test]
 fn expired_ignore_rules_are_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(
