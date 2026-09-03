@@ -2117,6 +2117,7 @@ dependencies = [
  "dirs",
  "http-cache-reqwest",
  "iocraft",
+ "jiff",
  "miette 7.6.0",
  "pixi_audit",
  "rattler_conda_types",
