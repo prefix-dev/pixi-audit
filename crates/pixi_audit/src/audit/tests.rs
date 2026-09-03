@@ -463,7 +463,10 @@ async fn audit_reports_findings_and_unchecked() {
     assert_eq!(finding.id, "BSLK-1");
     assert_eq!(finding.severity, SeverityBand::Critical);
     assert_eq!(finding.fixed_versions, vec!["3.1.1"]);
-    assert_eq!(finding.url.as_deref(), Some("https://example.com/adv"));
+    assert_eq!(
+        finding.url.as_deref(),
+        Some("https://basilisk.prefix.dev/advisories/BSLK-1")
+    );
 
     // PyPI and clean conda-forge packages are audited and not listed as unchecked.
     assert!(report.unchecked.is_empty());

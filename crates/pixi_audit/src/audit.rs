@@ -8,7 +8,7 @@ use futures::{StreamExt, TryStreamExt};
 
 use crate::{
     advisory::{
-        BasiliskMatch, FixedVersions, advisory_url, basilisk_match, fixed_versions,
+        BasiliskMatch, FixedVersions, basilisk_advisory_url, basilisk_match, fixed_versions,
         pypi_advisory_url,
     },
     client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
@@ -70,10 +70,10 @@ impl Backend {
     }
 
     fn url(self, doc: &OsvVulnerability) -> Option<String> {
-        match self {
-            Backend::Basilisk => advisory_url(doc),
-            Backend::Pypi => Some(pypi_advisory_url(doc)),
-        }
+        Some(match self {
+            Backend::Basilisk => basilisk_advisory_url(doc),
+            Backend::Pypi => pypi_advisory_url(doc),
+        })
     }
 
     fn fixed_versions(self, doc: &OsvVulnerability, package: &AuditPackage) -> FixedVersions {

@@ -302,7 +302,12 @@ async fn fields_and_sort_by_shape_the_table() {
     let row = stdout.lines().find(|line| line.contains("BSLK-1")).unwrap();
     assert_eq!(
         row.split_whitespace().collect::<Vec<_>>(),
-        ["BSLK-1", "(conda)", "openssl", "https://example.com/adv"]
+        [
+            "BSLK-1",
+            "(conda)",
+            "openssl",
+            "https://basilisk.prefix.dev/advisories/BSLK-1"
+        ]
     );
 }
 
@@ -322,9 +327,9 @@ async fn grouped_format_prints_findings_per_package() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("fixed in: 3.1.1"));
-    // Without hyperlink support the grouped format prints the advisory URL.
+    // Without hyperlink support the grouped format prints the Basilisk URL.
     assert!(
-        stdout.contains("https://example.com/adv"),
+        stdout.contains("https://basilisk.prefix.dev/advisories/BSLK-1"),
         "stdout: {stdout}"
     );
 }
