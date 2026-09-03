@@ -84,10 +84,10 @@ fn build(
     layout: &TableLayout,
 ) -> Element<'static, View> {
     let sections: Vec<AnyElement<'static>> = [
+        unchecked_table(&report.unchecked, style).map(|e| e.into_any()),
         Some(status_block(report, lockfile).into_any()),
         findings_table(&report.vulnerabilities, style, layout).map(|e| e.into_any()),
         ignored_table(&report.ignored, style, layout).map(|e| e.into_any()),
-        unchecked_table(&report.unchecked, style).map(|e| e.into_any()),
         Some(summary_line(report).into_any()),
     ]
     .into_iter()

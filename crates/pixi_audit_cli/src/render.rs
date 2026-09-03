@@ -30,6 +30,26 @@ impl RenderOptions {
 
 pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
     let mut out = String::new();
+    if !report.unchecked.is_empty() {
+        writeln!(
+            out,
+            "{} package(s) could not be checked:",
+            report.unchecked.len()
+        )
+        .unwrap();
+        for package in &report.unchecked {
+            writeln!(
+                out,
+                "  {} {} ({}) — {}",
+                package.package,
+                package.version.as_deref().unwrap_or("?"),
+                package.ecosystem,
+                package.environments.join(", ")
+            )
+            .unwrap();
+        }
+        out.push('\n');
+    }
 
     let columns = ThreatColumns::for_report(report);
     for group in grouped(&report.vulnerabilities) {
@@ -69,27 +89,6 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
                 out,
                 "  {} ({} {}){marker}",
                 finding.id, finding.package, finding.version
-            )
-            .unwrap();
-        }
-        out.push('\n');
-    }
-
-    if !report.unchecked.is_empty() {
-        writeln!(
-            out,
-            "{} package(s) could not be checked:",
-            report.unchecked.len()
-        )
-        .unwrap();
-        for package in &report.unchecked {
-            writeln!(
-                out,
-                "  {} {} ({}) — {}",
-                package.package,
-                package.version.as_deref().unwrap_or("?"),
-                package.ecosystem,
-                package.environments.join(", ")
             )
             .unwrap();
         }
