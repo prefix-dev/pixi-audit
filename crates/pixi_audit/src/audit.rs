@@ -14,7 +14,8 @@ use crate::{
     client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, MatchApplicability,
-        PackageEcosystem, SeverityBand, SortStrategy, UncheckedPackage, mean_cvss_base_score,
+        PackageEcosystem, PackageIgnore, SeverityBand, SortStrategy, UncheckedPackage,
+        mean_cvss_base_score,
     },
     threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
@@ -421,23 +422,25 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     message
 }
 
-/// Lowercased suppression lists, ready for case-insensitive matching, and
-/// a record of which ids matched a finding.
-struct Suppressions {
+/// Lowercased suppression lists, ready for case-insensitive matching, the
+/// package-scoped rules, and a record of which ids matched a finding.
+struct Suppressions<'a> {
     ignore: BTreeSet<String>,
     until_fixed: BTreeSet<String>,
+    package_rules: &'a [PackageIgnore],
     /// Lowercased ids from either list that matched a finding's id or
     /// alias, whether or not that finding ended up suppressed: an
     /// `until_fixed` id for a finding with a known fix has still matched.
     matched: BTreeSet<String>,
 }
 
-impl Suppressions {
-    fn from_spec(spec: IgnoreSpec<'_>) -> Self {
+impl<'a> Suppressions<'a> {
+    fn from_spec(spec: IgnoreSpec<'a>) -> Self {
         let lowercase = |ids: &[String]| ids.iter().map(|id| id.to_lowercase()).collect();
         Self {
             ignore: lowercase(spec.ignore),
             until_fixed: lowercase(spec.ignore_until_fixed),
+            package_rules: spec.package_rules,
             matched: BTreeSet::new(),
         }
     }
@@ -450,18 +453,24 @@ impl Suppressions {
             .find(|id| set.contains(id))
     }
 
-    /// Why `finding` is suppressed, if it is. `ignore` wins over
-    /// `until_fixed`, and `until_fixed` lapses once any fix is known.
+    /// Why `finding` is suppressed, if it is. An unconditional rule, by id
+    /// or by package, wins over an until-fixed one, and until-fixed rules
+    /// lapse once any fix is known.
     fn reason_for(&mut self, finding: &Finding) -> Option<IgnoreReason> {
         let ignored = Self::listed_in(&self.ignore, finding);
         let until_fixed = Self::listed_in(&self.until_fixed, finding);
         self.matched
             .extend(ignored.iter().chain(until_fixed.iter()).cloned());
+        let package_rule = |until_fixed: bool| {
+            self.package_rules
+                .iter()
+                .any(|rule| rule.until_fixed == until_fixed && rule.applies_to(finding))
+        };
         let has_known_fix =
             !finding.fixed_versions.is_empty() || !finding.upstream_fixes.is_empty();
-        if ignored.is_some() {
+        if ignored.is_some() || package_rule(false) {
             Some(IgnoreReason::Always)
-        } else if until_fixed.is_some() && !has_known_fix {
+        } else if (until_fixed.is_some() || package_rule(true)) && !has_known_fix {
             Some(IgnoreReason::UntilFixed)
         } else {
             None

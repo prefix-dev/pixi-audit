@@ -718,6 +718,41 @@ async fn ignore_subcommand_records_rules_in_the_manifest() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ignore_subcommand_can_scope_a_rule_to_a_package() {
+    let workspace = temp_workspace("pixi.toml", "[workspace]\nname = \"demo\"\n");
+    let base = spawn_mock(true).await;
+    let output = run_cli_in(
+        workspace.path().to_path_buf(),
+        base.clone(),
+        vec![
+            "ignore".to_string(),
+            "--package".to_string(),
+            "OpenSSL".to_string(),
+            "--reason".to_string(),
+            "vendored".to_string(),
+        ],
+        None,
+    )
+    .await;
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Ignoring package 'OpenSSL' in"),
+        "stderr: {stderr}"
+    );
+    let manifest = std::fs::read_to_string(workspace.path().join("pixi.toml")).unwrap();
+    assert!(
+        manifest.contains("ignore = [{ package = \"OpenSSL\", reason = \"vendored\" }]"),
+        "{manifest}"
+    );
+
+    let output = run_cli_in(workspace.path().to_path_buf(), base, vec![], None).await;
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Ignored (1)"), "stdout: {stdout}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn expired_ignore_rules_warn_and_no_longer_apply() {
     let workspace = temp_workspace(
         "pixi.toml",

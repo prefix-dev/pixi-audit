@@ -27,8 +27,8 @@ pub use rattler_lock;
 pub use report::{
     AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, IgnoreReason, IgnoreSpec,
     InvalidPackageName, MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem,
-    PackageName, ParseSeverityBandError, SeverityBand, SortStrategy, UncheckedPackage, UpstreamFix,
-    UpstreamOrigin, audit,
+    PackageIgnore, PackageName, ParseSeverityBandError, SeverityBand, SortStrategy,
+    UncheckedPackage, UpstreamFix, UpstreamOrigin, audit,
 };
 pub use threat::{
     EpssScore, KnownExploited, RansomwareCampaignUse, RiskScore, ThreatDataStatus,

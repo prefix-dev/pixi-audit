@@ -74,13 +74,21 @@ pixi audit ignore CVE-2026-1234 --reason "only reachable through the TLS backend
 pixi audit ignore --until-fixed CVE-2026-7777
 ```
 
-This appends to `ignore` or `ignore-until-fixed` in `[tool.pixi-audit]`, keeps the file's formatting, and leaves ids that are already listed alone. `--until 2026-12-01` records the last day the rule applies; after that the finding is reported again and the audit warns about the expired rule. In the manifest an entry is either a bare id or a table:
+This appends to `ignore` or `ignore-until-fixed` in `[tool.pixi-audit]`, keeps the file's formatting, and leaves rules that are already listed alone. `--until 2026-12-01` records the last day the rule applies; after that the finding is reported again and the audit warns about the expired rule. `--package` scopes a rule to one package, or ignores every finding in it when no id is given:
+
+```console
+pixi audit ignore --package vendored-thing --reason "never runs, only shipped for its data files"
+pixi audit ignore CVE-2026-1234 --package requests
+```
+
+Package names are matched under their ecosystem's rules, so `Ruamel.YAML` finds `ruamel-yaml` on PyPI. In the manifest an entry is either a bare id or a table with an `id`, a `package`, or both:
 
 ```toml
 [tool.pixi-audit]
 ignore = [
   "CVE-2023-0464",
   { id = "CVE-2026-1234", reason = "only reachable through the TLS backend", until = 2026-12-01 },
+  { package = "vendored-thing", reason = "never runs, only shipped for its data files" },
 ]
 ```
 
