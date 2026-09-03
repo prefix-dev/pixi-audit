@@ -169,6 +169,8 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     assert!(!stdout.contains('\x1b'), "stdout: {stdout}");
     assert!(stdout.contains("Unchecked (1)"));
     let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Auditing "), "stderr: {stderr}");
+    assert!(!stderr.contains('\x1b'), "stderr: {stderr}");
     assert!(
         stderr.contains("error: audit found vulnerabilities"),
         "stderr: {stderr}"
