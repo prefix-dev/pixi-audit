@@ -134,6 +134,10 @@ async fn main() -> ExitCode {
         .expect("write report to stdout"),
     }
 
+    for id in &report.unmatched_ignores {
+        eprintln!("warning: ignore rule '{id}' matched no finding");
+    }
+
     let gate = gate(&report, threshold);
     if annotations::on_github_actions() {
         let level = match gate {
