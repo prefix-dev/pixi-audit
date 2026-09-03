@@ -251,7 +251,12 @@ fn default_layout_sorts_by_severity_and_marks_kind_like_pixi_lock() {
     let text = render_table(&full_report(), "pixi.lock", &TableLayout::default());
     assert_eq!(
         text,
-        " ✔ Audited pixi.lock                 [10 packages audited, 1 unchecked]
+        " Unchecked (1) — no vulnerability database for these sources
+
+          Name      Version  Source    Environments
+ (conda)  samtools  1.2      bioconda  default
+
+ ✔ Audited pixi.lock                 [10 packages audited, 1 unchecked]
  ✔ Scanned for vulnerabilities       [3 vulnerability matches]
    ├── by severity: 1 critical, 0 high, 1 medium, 0 low, 1 unknown
    └── by status:   1 fixed, 2 not-fixed, 1 ignored
@@ -265,11 +270,6 @@ fn default_layout_sorts_by_severity_and_marks_kind_like_pixi_lock() {
 
           Name     Version  Fixed in  Vulnerability  Severity  EPSS  Risk  Environments   Ignored
  (conda)  libxml2  3.1.0    3.1.4     CVE-2026-0003  Low                   default, prod  until a fix is released
-
- Unchecked (1) — no vulnerability database for these sources
-
-          Name      Version  Source    Environments
- (conda)  samtools  1.2      bioconda  default
 
  ✖ 3 vulnerabilities in 2 package(s) (10 audited, 1 ignored, 1 unchecked)
 "

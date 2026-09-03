@@ -349,6 +349,10 @@ fn ignored_and_unchecked_sections_render() {
         ..Default::default()
     };
     let text = render_human(&report, RenderOptions::default());
+    assert!(
+        text.starts_with("1 package(s) could not be checked:"),
+        "{text}"
+    );
     assert!(text.contains("Ignored 1 finding(s):"));
     assert!(text.contains("  CVE-2026-0001 (openssl 3.1.0)"));
     assert!(text.contains("1 package(s) could not be checked:"));

@@ -128,9 +128,14 @@ Existing upper bounds are preserved. Transitive dependencies and Git, path, or U
 
 ### Choose an output format
 
-The default report is a short status block followed by one row per finding:
+The default report puts packages from unsupported sources first, then shows a short status block followed by one row per finding:
 
 ```console
+ Unchecked (1) — no vulnerability database for these sources
+
+    Name      Version  Source    Environments
+ C  samtools  1.19     bioconda  default
+
  ✔ Audited pixi.lock                 [312 packages audited, 1 unchecked]
  ✔ Scanned for vulnerabilities       [3 vulnerability matches]
    ├── by severity: 1 critical, 0 high, 1 medium, 0 low, 1 unknown
