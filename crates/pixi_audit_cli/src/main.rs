@@ -3,13 +3,16 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
+use http_cache_reqwest::{CACacheManager, Cache, CacheMode, HttpCache, HttpCacheOptions};
 use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
-    AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,
-    IgnoreSpec, PYPI_BASE_URL_ENV_VAR, PypiAuditClient, SeverityBand, audit_lock_file,
-    rattler_lock::LockFile,
+    AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL,
+    DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, IgnoreSpec,
+    KEV_URL_ENV_VAR, KevClient, PYPI_BASE_URL_ENV_VAR, PypiAuditClient, SeverityBand,
+    ThreatDataStatus, ThreatSourceStatus, ThreatSources, audit_lock_file, rattler_lock::LockFile,
 };
 use render::table::{DEFAULT_FIELDS, Field, OutputStyle, TableLayout};
+use reqwest_middleware::ClientWithMiddleware;
 use url::Url;
 
 mod annotations;
@@ -72,9 +75,9 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Table)]
     format: Format,
 
-    /// Column to sort table rows by. Severity sorts most severe first;
-    /// other columns ascend. Only affects `--format table`.
-    #[arg(long, value_enum, default_value = "severity", value_name = "FIELD")]
+    /// Column to sort table rows by. Risk, severity, EPSS, and KEV sort
+    /// highest first; other columns ascend. Only affects `--format table`.
+    #[arg(long, value_enum, default_value = "risk", value_name = "FIELD")]
     sort_by: Field,
 
     /// Columns to show in the table, and their order (comma-separated).
@@ -204,6 +207,8 @@ struct RunOutcome {
 struct Auditor<'a> {
     client: BasiliskClient,
     pypi_client: PypiAuditClient,
+    epss_client: EpssClient,
+    kev_client: KevClient,
     lockfile: &'a Path,
     environments: &'a [String],
     platforms: &'a [String],
@@ -222,6 +227,10 @@ impl Auditor<'_> {
             self.environments,
             self.platforms,
             self.ignore,
+            ThreatSources {
+                epss: Some(&self.epss_client),
+                kev: Some(&self.kev_client),
+            },
         )
         .await
         .into_diagnostic()
@@ -252,6 +261,8 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
 
     let base_url = base_url_from_env(BASE_URL_ENV_VAR, DEFAULT_BASE_URL)?;
     let pypi_base_url = base_url_from_env(PYPI_BASE_URL_ENV_VAR, DEFAULT_PYPI_BASE_URL)?;
+    let epss_base_url = base_url_from_env(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?;
+    let kev_url = base_url_from_env(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?;
     eprintln!(
         "Auditing {} against {base_url} and {pypi_base_url} ...",
         targets.lockfile.display()
@@ -262,10 +273,13 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         .build()
         .into_diagnostic()
         .wrap_err("failed to construct the HTTP client")?;
-    let http = reqwest_middleware::ClientBuilder::new(http_client).build();
+    let http = reqwest_middleware::ClientBuilder::new(http_client.clone()).build();
+    let threat_http = threat_http_client(http_client);
     let auditor = Auditor {
         client: BasiliskClient::new(http.clone(), base_url),
         pypi_client: PypiAuditClient::new(http, pypi_base_url),
+        epss_client: EpssClient::new(threat_http.clone(), epss_base_url),
+        kev_client: KevClient::new(threat_http, kev_url),
         lockfile: &targets.lockfile,
         environments: &cli.environments,
         platforms: &cli.platforms,
@@ -276,6 +290,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     };
 
     let report = auditor.audit().await?;
+    warn_unavailable_threat_data(&report.threat_data);
     let report = if cli.fix {
         fix::apply(&targets, report, || auditor.audit()).await?
     } else {
@@ -286,6 +301,42 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         threshold,
         lockfile: targets.lockfile,
     })
+}
+
+/// HTTP client for the threat-data feeds. Responses are cached on disk so
+/// the KEV catalog is revalidated rather than downloaded on every run.
+fn threat_http_client(client: reqwest::Client) -> ClientWithMiddleware {
+    let mut builder = reqwest_middleware::ClientBuilder::new(client);
+    if let Some(path) = http_cache_dir() {
+        builder = builder.with(Cache(HttpCache {
+            mode: CacheMode::Default,
+            manager: CACacheManager::new(path, false),
+            options: HttpCacheOptions::default(),
+        }));
+    }
+    builder.build()
+}
+
+/// `pixi-audit/http-cache` inside pixi's cache directory: `PIXI_CACHE_DIR`,
+/// else `RATTLER_CACHE_DIR`, else `rattler/cache` in the platform's cache
+/// directory.
+fn http_cache_dir() -> Option<PathBuf> {
+    let root = std::env::var_os("PIXI_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("RATTLER_CACHE_DIR").map(PathBuf::from))
+        .or_else(|| dirs::cache_dir().map(|dir| dir.join("rattler").join("cache")))?;
+    Some(root.join("pixi-audit").join("http-cache"))
+}
+
+fn warn_unavailable_threat_data(status: &ThreatDataStatus) {
+    for (name, source) in [("EPSS scores", &status.epss), ("KEV catalog", &status.kev)] {
+        match source {
+            ThreatSourceStatus::Failed { error } => {
+                eprintln!("warning: {name} unavailable, findings are ranked without them: {error}");
+            }
+            ThreatSourceStatus::Disabled | ThreatSourceStatus::Loaded { .. } => {}
+        }
+    }
 }
 
 #[cfg(test)]

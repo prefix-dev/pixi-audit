@@ -6,9 +6,12 @@ use std::cmp::Ordering;
 
 use clap::ValueEnum;
 use iocraft::prelude::{Color, Weight};
-use pixi_audit::{Finding, IgnoreReason, MatchApplicability, PackageEcosystem, SeverityBand};
+use pixi_audit::{
+    Finding, IgnoreReason, MatchApplicability, PackageEcosystem, SeverityBand, SortStrategy,
+};
 
 use super::grid::{Cell, Span};
+use crate::render::{epss_label, kev_label, risk_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Field {
@@ -20,6 +23,14 @@ pub enum Field {
     Source,
     Vulnerability,
     Severity,
+    /// EPSS exploit probability and percentile.
+    Epss,
+    /// The 0-100 risk score.
+    Risk,
+    /// `kev` for findings in CISA's KEV catalog, `kev, ransomware` when
+    /// used in ransomware campaigns; empty otherwise. The risk column
+    /// already marks these, so this is mostly a sort key.
+    Kev,
     Environments,
     Aliases,
     Summary,
@@ -31,17 +42,19 @@ pub enum Field {
 }
 
 /// Columns shown when `--fields` is not given, in this order. The package
-/// kind is not a column by default: like `pixi lock`, the name carries a
-/// `C`/`P` marker. Neither is the source: only conda-forge and PyPI are
+/// kind is not a column by default: like `pixi lock`, a `C`/`P` marker
+/// precedes the name. Neither is the source: only conda-forge and PyPI are
 /// ever queried, so for a finding the marker already says which it is.
 /// Nor is the match: most matches are evaluated, so the Vulnerability
 /// column flags the ones that are not.
-pub const DEFAULT_FIELDS: [Field; 6] = [
+pub const DEFAULT_FIELDS: [Field; 8] = [
     Field::Name,
     Field::Version,
     Field::FixedIn,
     Field::Vulnerability,
     Field::Severity,
+    Field::Epss,
+    Field::Risk,
     Field::Environments,
 ];
 
@@ -61,6 +74,18 @@ pub struct RowContext {
     pub match_column: bool,
 }
 
+impl RowContext {
+    /// The weight of an identifying cell: dim when the row repeats the
+    /// package above, otherwise `normal`.
+    fn identity_weight(self, normal: Weight) -> Weight {
+        if self.repeated_package {
+            Weight::Light
+        } else {
+            normal
+        }
+    }
+}
+
 impl Field {
     pub fn header(self) -> &'static str {
         match self {
@@ -71,6 +96,9 @@ impl Field {
             Field::Source => "Source",
             Field::Vulnerability => "Vulnerability",
             Field::Severity => "Severity",
+            Field::Epss => "EPSS",
+            Field::Risk => "Risk",
+            Field::Kev => "KEV",
             Field::Environments => "Environments",
             Field::Aliases => "Aliases",
             Field::Summary => "Summary",
@@ -80,11 +108,33 @@ impl Field {
         }
     }
 
-    pub fn cell(self, finding: &Finding, context: RowContext) -> Cell {
-        let dim_if_repeated = context.repeated_package.then_some(Color::DarkGrey);
+    /// The header of each grid column this field occupies. The name field
+    /// spans two: the kind marker and the name itself, so names line up
+    /// whatever the marker's width.
+    pub fn headers(self) -> Vec<&'static str> {
         match self {
-            Field::Name => name_cell(&finding.ecosystem, &finding.package.to_string(), context),
-            Field::Version => Cell::new(finding.version.clone()).color(dim_if_repeated),
+            Field::Name => vec!["", "Name"],
+            other => vec![other.header()],
+        }
+    }
+
+    /// One cell per column of [`Field::headers`].
+    pub fn cells(self, finding: &Finding, context: RowContext) -> Vec<Cell> {
+        match self {
+            Field::Name => vec![
+                kind_cell(&finding.ecosystem, context),
+                name_cell(&finding.package.to_string(), context),
+            ],
+            other => vec![other.cell(finding, context)],
+        }
+    }
+
+    pub fn cell(self, finding: &Finding, context: RowContext) -> Cell {
+        match self {
+            Field::Name => name_cell(&finding.package.to_string(), context),
+            Field::Version => {
+                Cell::new(finding.version.clone()).weight(context.identity_weight(Weight::Normal))
+            }
             Field::FixedIn => fixed_in(finding),
             Field::Kind => {
                 let (name, color) = kind(&finding.ecosystem);
@@ -96,35 +146,46 @@ impl Field {
                 let cell = Cell::new(finding.id.clone()).hyperlink(url);
                 match weak_match_label(finding.applicability) {
                     Some(label) if !context.match_column => {
-                        cell.then(Span::new(format!(" ({label})")).color(Color::DarkGrey))
+                        cell.then(Span::new(format!(" ({label})")).weight(Weight::Light))
                     }
                     _ => cell,
                 }
             }
             Field::Severity => severity(finding.severity),
+            Field::Epss => epss_label(&finding.epss).map_or_else(Cell::empty, Cell::new),
+            Field::Risk => risk_cell(finding),
+            Field::Kev => kev_label(&finding.known_exploited).map_or_else(Cell::empty, |label| {
+                Cell::new(label).color(KEV_COLOR).weight(Weight::Bold)
+            }),
             Field::Environments => environments_cell(&finding.environments),
             Field::Aliases => Cell::new(finding.aliases.join(", ")),
             Field::Summary => Cell::new(finding.summary.clone().unwrap_or_default()),
             Field::Url => Cell::new(finding.url.clone().unwrap_or_default()),
             Field::Ignored => match finding.ignore_reason {
                 Some(IgnoreReason::UntilFixed) => {
-                    Cell::new("until a fix is released").color(Color::DarkGrey)
+                    Cell::new("until a fix is released").weight(Weight::Light)
                 }
-                Some(IgnoreReason::Always) => Cell::new("always").color(Color::DarkGrey),
+                Some(IgnoreReason::Always) => Cell::new("always").weight(Weight::Light),
                 None => Cell::empty(),
             },
             Field::Match => match match_label(finding.applicability) {
-                Some(label) => Cell::new(label)
-                    .color(weak_match_label(finding.applicability).map(|_| Color::DarkGrey)),
+                Some(label) => {
+                    let cell = Cell::new(label);
+                    if weak_match_label(finding.applicability).is_some() {
+                        cell.weight(Weight::Light)
+                    } else {
+                        cell
+                    }
+                }
                 None => Cell::empty(),
             },
         }
     }
 
     /// The order two findings take when the table is sorted by this field.
-    /// Severity sorts most severe first; everything else ascends. Ties keep
-    /// their existing order, so sorting is stable over the report's own
-    /// severity ordering.
+    /// Risk, severity, EPSS, and KEV sort highest first and break ties the
+    /// way the report's [`SortStrategy`] does; everything else ascends,
+    /// ties keeping their existing order.
     pub fn compare(self, a: &Finding, b: &Finding) -> Ordering {
         match self {
             // By spelling, not by `PackageName`'s ecosystem-first derive.
@@ -140,7 +201,10 @@ impl Field {
             Field::Kind => kind(&a.ecosystem).0.cmp(kind(&b.ecosystem).0),
             Field::Source => a.ecosystem.cmp(&b.ecosystem),
             Field::Vulnerability => a.id.cmp(&b.id),
-            Field::Severity => b.severity.cmp(&a.severity),
+            Field::Severity => SortStrategy::Severity.compare(a, b),
+            Field::Epss => SortStrategy::Epss.compare(a, b),
+            Field::Risk => SortStrategy::Risk.compare(a, b),
+            Field::Kev => SortStrategy::Kev.compare(a, b),
             Field::Environments => a.environments.cmp(&b.environments),
             Field::Aliases => a.aliases.cmp(&b.aliases),
             Field::Summary => a.summary.cmp(&b.summary),
@@ -167,23 +231,26 @@ fn kind(ecosystem: &PackageEcosystem) -> (&'static str, Color) {
     }
 }
 
-/// The kind marker `pixi lock` puts before a package name: a bold green
-/// `C` or blue `P` when colors show, `(conda)` or `(pypi)` otherwise.
-pub fn kind_marker(ecosystem: &PackageEcosystem, color: bool) -> Span {
+/// The kind marker `pixi lock` puts before a package name, in a column of
+/// its own: a bold green `C` or blue `P` when colors show, `(conda)` or
+/// `(pypi)` otherwise. Dimmed like the name when the row repeats the
+/// package above.
+pub fn kind_cell(ecosystem: &PackageEcosystem, context: RowContext) -> Cell {
     let (name, tint) = kind(ecosystem);
-    if color {
+    let span = if context.color {
         let letter = name[..1].to_ascii_uppercase();
-        Span::new(letter).color(tint).weight(Weight::Bold)
+        Span::new(letter)
+            .color(tint)
+            .weight(context.identity_weight(Weight::Bold))
     } else {
-        Span::new(format!("({name})"))
-    }
+        Span::new(format!("({name})")).weight(context.identity_weight(Weight::Normal))
+    };
+    Cell::from(span)
 }
 
-/// `<marker> <name>`, the name dimmed when the row repeats the package above.
-pub fn name_cell(ecosystem: &PackageEcosystem, name: &str, context: RowContext) -> Cell {
-    let dim_if_repeated = context.repeated_package.then_some(Color::DarkGrey);
-    Cell::from(kind_marker(ecosystem, context.color))
-        .then(Span::new(format!(" {name}")).color(dim_if_repeated))
+/// The package name, dimmed when the row repeats the package above.
+pub fn name_cell(name: &str, context: RowContext) -> Cell {
+    Cell::new(name).weight(context.identity_weight(Weight::Normal))
 }
 
 /// Environment names in the color pixi uses for them.
@@ -202,9 +269,26 @@ fn fixed_in(finding: &Finding) -> Cell {
             .iter()
             .map(crate::render::upstream_fix_label)
             .collect();
-        Cell::new(labels.join(", ")).color(Color::DarkGrey)
+        Cell::new(labels.join(", ")).weight(Weight::Light)
     } else {
         Cell::empty()
+    }
+}
+
+/// The risk score, with grype's `(kev)` marker after it for findings in
+/// the catalog. Blank without threat data.
+fn risk_cell(finding: &Finding) -> Cell {
+    let Some(risk) = risk_label(finding.risk) else {
+        return Cell::empty();
+    };
+    let cell = Cell::new(risk);
+    match kev_label(&finding.known_exploited) {
+        Some(kev) => cell.then(
+            Span::new(format!(" ({kev})"))
+                .color(KEV_COLOR)
+                .weight(Weight::Bold),
+        ),
+        None => cell,
     }
 }
 
@@ -213,20 +297,27 @@ fn severity(band: SeverityBand) -> Cell {
     if let Some(first) = name.get_mut(0..1) {
         first.make_ascii_uppercase();
     }
-    let weight = match band {
-        SeverityBand::Critical => Weight::Bold,
-        _ => Weight::Normal,
-    };
-    Cell::new(name).color(severity_color(band)).weight(weight)
+    Cell::new(name)
+        .color(severity_color(band))
+        .weight(severity_weight(band))
 }
 
-/// The color a severity band carries wherever it is shown.
+/// The color a severity band carries wherever it is shown: grype's
+/// palette, as 256-color indexes so it reads the same on any terminal
+/// theme.
 pub fn severity_color(band: SeverityBand) -> Option<Color> {
+    Some(Color::AnsiValue(severity_palette_index(band)))
+}
+
+/// The 256-color palette index behind [`severity_color`], for renderers
+/// that do not go through iocraft.
+pub fn severity_palette_index(band: SeverityBand) -> u8 {
     match band {
-        SeverityBand::Critical | SeverityBand::High => Some(Color::Red),
-        SeverityBand::Medium => Some(Color::Yellow),
-        SeverityBand::Low => None,
-        SeverityBand::Unknown => Some(Color::DarkGrey),
+        SeverityBand::Critical => 198, // bright pink
+        SeverityBand::High => 203,     // salmon
+        SeverityBand::Medium => 178,   // gold
+        SeverityBand::Low => 36,       // teal
+        SeverityBand::Unknown => 12,   // light blue
     }
 }
 
@@ -251,3 +342,21 @@ pub fn weak_match_label(applicability: MatchApplicability) -> Option<&'static st
         MatchApplicability::Evaluated | MatchApplicability::Unspecified => None,
     }
 }
+
+/// The weight a severity band carries wherever it is shown: critical
+/// stands out.
+pub fn severity_weight(band: SeverityBand) -> Weight {
+    match band {
+        SeverityBand::Critical => Weight::Bold,
+        SeverityBand::High | SeverityBand::Medium | SeverityBand::Low | SeverityBand::Unknown => {
+            Weight::Normal
+        }
+    }
+}
+
+/// The 256-color palette index of the KEV marker: grype's bright pink,
+/// shared with critical.
+pub const KEV_PALETTE_INDEX: u8 = 198;
+
+/// The color of the KEV marker.
+pub const KEV_COLOR: Color = Color::AnsiValue(KEV_PALETTE_INDEX);

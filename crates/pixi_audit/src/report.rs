@@ -1,11 +1,15 @@
 //! Audit inputs and report types.
 
+use std::cmp::Ordering;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::types::OsvSeverity;
+use crate::{
+    threat::{EpssScore, KnownExploited, RiskScore, ThreatDataStatus},
+    types::OsvSeverity,
+};
 
 // Keep the established `pixi_audit::report::audit` path while the engine
 // lives in its own module.
@@ -212,21 +216,12 @@ impl SeverityBand {
     pub fn from_severities(severities: &[OsvSeverity]) -> Self {
         severities
             .iter()
-            .filter_map(|s| {
-                if s.kind.starts_with("CVSS_V3") {
-                    let base = s.score.parse::<cvss::v3::Base>().ok()?;
-                    Some(Self::from_score(base.score().value()))
-                } else if s.kind.starts_with("CVSS_V4") {
-                    let vector = s.score.parse::<cvss::v4::Vector>().ok()?;
-                    Some(Self::from_score(vector.score().value()))
-                } else if s.kind.starts_with("CVSS_V2") {
-                    // CVSS v2's qualitative scale has no critical band
-                    // (high is 7.0-10.0), so cap the mapping there.
-                    let score = crate::cvss_v2::base_score(&s.score)?;
-                    Some(Self::from_score(score).min(SeverityBand::High))
-                } else {
-                    None
-                }
+            .filter_map(parse_base_score)
+            .map(|(version, score)| match version {
+                CvssVersion::V3 | CvssVersion::V4 => Self::from_score(score),
+                // CVSS v2's qualitative scale has no critical band
+                // (high is 7.0-10.0), so cap the mapping there.
+                CvssVersion::V2 => Self::from_score(score).min(SeverityBand::High),
             })
             .max()
             .unwrap_or(SeverityBand::Unknown)
@@ -239,6 +234,47 @@ impl SeverityBand {
             s if s >= 4.0 => SeverityBand::Medium,
             _ => SeverityBand::Low,
         }
+    }
+}
+
+enum CvssVersion {
+    V2,
+    V3,
+    V4,
+}
+
+/// The CVSS version and base score of one severity entry, when its vector
+/// parses. Understands the type labels basilisk emits: `CVSS_V3`/
+/// `CVSS_V3.0`/`CVSS_V3.1` (OSV and NVD sources), `CVSS_V4`, and `CVSS_V2.0`.
+fn parse_base_score(severity: &OsvSeverity) -> Option<(CvssVersion, f64)> {
+    if severity.kind.starts_with("CVSS_V3") {
+        let base = severity.score.parse::<cvss::v3::Base>().ok()?;
+        Some((CvssVersion::V3, base.score().value()))
+    } else if severity.kind.starts_with("CVSS_V4") {
+        let vector = severity.score.parse::<cvss::v4::Vector>().ok()?;
+        Some((CvssVersion::V4, vector.score().value()))
+    } else if severity.kind.starts_with("CVSS_V2") {
+        let score = crate::cvss_v2::base_score(&severity.score)?;
+        Some((CvssVersion::V2, score))
+    } else {
+        None
+    }
+}
+
+/// The mean CVSS base score across the entries whose vectors parse, or
+/// `None` when there is none. A zero score is not a valid base score and
+/// is left out so it cannot drag the mean down.
+pub fn mean_cvss_base_score(severities: &[OsvSeverity]) -> Option<f64> {
+    let scores: Vec<f64> = severities
+        .iter()
+        .filter_map(parse_base_score)
+        .map(|(_, score)| score)
+        .filter(|score| *score > 0.0)
+        .collect();
+    if scores.is_empty() {
+        None
+    } else {
+        Some(scores.iter().sum::<f64>() / scores.len() as f64)
     }
 }
 
@@ -367,6 +403,9 @@ pub struct Finding {
     pub id: String,
     pub aliases: Vec<String>,
     pub severity: SeverityBand,
+    /// Mean CVSS base score across the advisory's parsable severity entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cvss_base_score: Option<f64>,
     /// Fixed versions in the package's own ecosystem.
     pub fixed_versions: Vec<String>,
     /// Fixes known outside the package's own ecosystem, each with where it
@@ -379,9 +418,31 @@ pub struct Finding {
     pub matched_identity: Option<MatchedIdentity>,
     pub summary: Option<String>,
     pub url: Option<String>,
+    /// EPSS records for the finding's CVE ids, sorted by CVE.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub epss: Vec<EpssScore>,
+    /// KEV catalog entries for the finding's CVE ids.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub known_exploited: Vec<KnownExploited>,
+    pub risk: RiskScore,
     /// Set only on findings in the ignored bucket.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignore_reason: Option<IgnoreReason>,
+}
+
+impl Finding {
+    /// The finding's CVE ids: its own id and any CVE alias, deduplicated
+    /// case-insensitively and upper-cased.
+    pub fn cve_ids(&self) -> Vec<String> {
+        let mut cves: Vec<String> = std::iter::once(&self.id)
+            .chain(&self.aliases)
+            .filter(|id| id.len() > 4 && id[..4].eq_ignore_ascii_case("CVE-"))
+            .map(|id| id.to_ascii_uppercase())
+            .collect();
+        cves.sort();
+        cves.dedup();
+        cves
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,6 +473,143 @@ pub struct AuditReport {
     /// written and without duplicates. Usually a suppression left behind
     /// after the package was upgraded.
     pub unmatched_ignores: Vec<String>,
+    pub threat_data: ThreatDataStatus,
+}
+
+impl AuditReport {
+    /// Orders the vulnerable and ignored findings by `strategy`.
+    pub fn sort(&mut self, strategy: SortStrategy) {
+        self.vulnerabilities.sort_by(|a, b| strategy.compare(a, b));
+        self.ignored.sort_by(|a, b| strategy.compare(a, b));
+    }
+}
+
+/// How findings are ordered in a report. Every strategy is a total order:
+/// after its primary key it falls through the remaining keys so equal
+/// findings keep a stable, predictable order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortStrategy {
+    /// Highest [`RiskScore`] first.
+    #[default]
+    Risk,
+    /// Highest [`SeverityBand`] first.
+    Severity,
+    /// Highest EPSS percentile first.
+    Epss,
+    /// KEV-listed findings first.
+    Kev,
+    /// Package name, version, and ecosystem.
+    Package,
+    /// Vulnerability id.
+    Vulnerability,
+}
+
+impl SortStrategy {
+    pub const ALL: [SortStrategy; 6] = [
+        SortStrategy::Risk,
+        SortStrategy::Severity,
+        SortStrategy::Epss,
+        SortStrategy::Kev,
+        SortStrategy::Package,
+        SortStrategy::Vulnerability,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SortStrategy::Risk => "risk",
+            SortStrategy::Severity => "severity",
+            SortStrategy::Epss => "epss",
+            SortStrategy::Kev => "kev",
+            SortStrategy::Package => "package",
+            SortStrategy::Vulnerability => "vulnerability",
+        }
+    }
+
+    pub fn compare(self, a: &Finding, b: &Finding) -> Ordering {
+        type Key = fn(&Finding, &Finding) -> Ordering;
+        let keys: &[Key] = match self {
+            SortStrategy::Risk => &[by_risk, by_severity, by_epss_percentile, by_package, by_id],
+            SortStrategy::Severity => {
+                &[by_severity, by_risk, by_epss_percentile, by_package, by_id]
+            }
+            SortStrategy::Epss => &[by_epss_percentile, by_risk, by_severity, by_package, by_id],
+            SortStrategy::Kev => &[
+                by_kev,
+                by_risk,
+                by_severity,
+                by_epss_percentile,
+                by_package,
+                by_id,
+            ],
+            SortStrategy::Package => &[by_package, by_id, by_risk, by_severity, by_epss_percentile],
+            SortStrategy::Vulnerability => {
+                &[by_id, by_risk, by_severity, by_epss_percentile, by_package]
+            }
+        };
+        keys.iter()
+            .map(|key| key(a, b))
+            .find(|ordering| ordering.is_ne())
+            .unwrap_or(Ordering::Equal)
+    }
+}
+
+impl std::fmt::Display for SortStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for SortStrategy {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        SortStrategy::ALL
+            .into_iter()
+            .find(|strategy| strategy.name() == name)
+            .ok_or_else(|| {
+                let options: Vec<&str> = SortStrategy::ALL.iter().map(|s| s.name()).collect();
+                format!(
+                    "'{name}' is not a sort strategy (expected one of {})",
+                    options.join(", ")
+                )
+            })
+    }
+}
+
+fn by_risk(a: &Finding, b: &Finding) -> Ordering {
+    b.risk.cmp(&a.risk)
+}
+
+fn by_severity(a: &Finding, b: &Finding) -> Ordering {
+    b.severity.cmp(&a.severity)
+}
+
+fn by_epss_percentile(a: &Finding, b: &Finding) -> Ordering {
+    let percentile = |finding: &Finding| {
+        finding
+            .epss
+            .first()
+            .map(|score| score.percentile)
+            .unwrap_or(0.0)
+    };
+    percentile(b).total_cmp(&percentile(a))
+}
+
+fn by_kev(a: &Finding, b: &Finding) -> Ordering {
+    b.known_exploited.len().cmp(&a.known_exploited.len())
+}
+
+/// By spelling, not by [`PackageName`]'s ecosystem-first derive.
+fn by_package(a: &Finding, b: &Finding) -> Ordering {
+    a.package
+        .as_str()
+        .cmp(b.package.as_str())
+        .then_with(|| a.version.cmp(&b.version))
+        .then_with(|| a.ecosystem.cmp(&b.ecosystem))
+}
+
+fn by_id(a: &Finding, b: &Finding) -> Ordering {
+    a.id.cmp(&b.id)
 }
 
 #[cfg(test)]

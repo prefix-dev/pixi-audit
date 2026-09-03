@@ -60,12 +60,18 @@ fn message(finding: &Finding) -> String {
     let match_note = crate::render::match_note(finding)
         .map(|note| format!(", {note}"))
         .unwrap_or_default();
-    let mut text = format!(
-        "{} severity, {fix}{match_note} ({}; {})",
-        finding.severity,
+    let mut text = format!("{} severity", finding.severity);
+    if let Some(risk) = crate::render::risk_label(finding.risk) {
+        text.push_str(&format!(", risk {risk}"));
+    }
+    if !finding.known_exploited.is_empty() {
+        text.push_str(", known exploited");
+    }
+    text.push_str(&format!(
+        ", {fix}{match_note} ({}; {})",
         finding.ecosystem,
         finding.environments.join(", ")
-    );
+    ));
     if let Some(summary) = &finding.summary {
         text.push_str(": ");
         text.push_str(summary);
@@ -109,12 +115,16 @@ mod tests {
                 id: "CVE-2026-1".to_string(),
                 aliases: vec![],
                 severity: SeverityBand::High,
+                cvss_base_score: None,
                 fixed_versions: vec!["3.1.1".to_string()],
                 upstream_fixes: vec![],
                 applicability: MatchApplicability::Unspecified,
                 matched_identity: None,
                 summary: Some("100% broken\nreally".to_string()),
                 url: Some("https://osv.dev/CVE-2026-1".to_string()),
+                epss: vec![],
+                known_exploited: vec![],
+                risk: pixi_audit::RiskScore::NONE,
                 ignore_reason: None,
             }],
             summary: AuditSummary {
@@ -143,12 +153,16 @@ mod tests {
                 id: "CVE-2022-25852".to_string(),
                 aliases: vec![],
                 severity: SeverityBand::High,
+                cvss_base_score: None,
                 fixed_versions: vec![],
                 upstream_fixes: vec![],
                 applicability: MatchApplicability::VersionUnbounded,
                 matched_identity: None,
                 summary: None,
                 url: None,
+                epss: vec![],
+                known_exploited: vec![],
+                risk: pixi_audit::RiskScore::NONE,
                 ignore_reason: None,
             }],
             ..Default::default()
@@ -162,5 +176,52 @@ mod tests {
         assert!(github_annotations(&report, Level::Warning).contains(", match: unevaluated ("));
         report.vulnerabilities[0].applicability = MatchApplicability::Evaluated;
         assert!(!github_annotations(&report, Level::Warning).contains("match:"));
+    }
+
+    #[test]
+    fn risk_and_kev_are_mentioned_when_present() {
+        let mut report = AuditReport::default();
+        let mut finding = Finding {
+            package: PackageName::conda("openssl").unwrap(),
+            version: "3.1.0".to_string(),
+            ecosystem: PackageEcosystem::CondaForge,
+            environments: vec!["default".to_string()],
+            id: "CVE-2026-1".to_string(),
+            aliases: vec![],
+            severity: SeverityBand::High,
+            cvss_base_score: None,
+            fixed_versions: vec![],
+            upstream_fixes: vec![],
+            applicability: MatchApplicability::Unspecified,
+            matched_identity: None,
+            summary: None,
+            url: None,
+            epss: vec![],
+            known_exploited: vec![pixi_audit::KnownExploited {
+                cve: "CVE-2026-1".to_string(),
+                vendor_project: String::new(),
+                product: String::new(),
+                vulnerability_name: String::new(),
+                date_added: String::new(),
+                required_action: String::new(),
+                due_date: String::new(),
+                known_ransomware_campaign_use: pixi_audit::RansomwareCampaignUse::Unknown,
+                notes: String::new(),
+            }],
+            risk: pixi_audit::RiskScore::NONE,
+            ignore_reason: None,
+        };
+        finding.risk = pixi_audit::RiskScore::compute(
+            finding.severity,
+            None,
+            &finding.epss,
+            &finding.known_exploited,
+        );
+        report.vulnerabilities.push(finding);
+        assert_eq!(
+            github_annotations(&report, Level::Error),
+            "::error title=CVE-2026-1 in openssl 3.1.0::high severity, risk 78.8, known exploited, \
+             no known fixed version (conda-forge; default)\n"
+        );
     }
 }

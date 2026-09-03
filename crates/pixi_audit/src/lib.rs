@@ -10,10 +10,12 @@ pub mod lock;
 pub mod report;
 #[cfg(test)]
 mod test_support;
+pub mod threat;
 
 pub use client::{
-    AuditError, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,
-    PYPI_BASE_URL_ENV_VAR, PypiAuditClient,
+    AuditError, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL,
+    DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, KEV_URL_ENV_VAR,
+    KevCatalog, KevClient, PYPI_BASE_URL_ENV_VAR, PypiAuditClient,
 };
 #[cfg(feature = "lock")]
 pub use lock::{LockFileAuditError, audit_lock_file, collect_packages};
@@ -25,6 +27,10 @@ pub use rattler_lock;
 pub use report::{
     AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, IgnoreReason, IgnoreSpec,
     InvalidPackageName, MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem,
-    PackageName, ParseSeverityBandError, SeverityBand, UncheckedPackage, UpstreamFix,
+    PackageName, ParseSeverityBandError, SeverityBand, SortStrategy, UncheckedPackage, UpstreamFix,
     UpstreamOrigin, audit,
+};
+pub use threat::{
+    EpssScore, KnownExploited, RansomwareCampaignUse, RiskScore, ThreatDataStatus,
+    ThreatSourceStatus, ThreatSources,
 };

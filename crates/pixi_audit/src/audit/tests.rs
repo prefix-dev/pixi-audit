@@ -17,6 +17,7 @@ use crate::{
         basilisk_client as test_client, conda_name, pypi_client as test_pypi_client, pypi_name,
         spawn_router as spawn,
     },
+    threat::RansomwareCampaignUse,
 };
 
 fn vuln_doc() -> serde_json::Value {
@@ -63,6 +64,19 @@ async fn audit(
     packages: Vec<AuditPackage>,
     ignore: IgnoreSpec<'_>,
 ) -> Result<AuditReport, AuditError> {
+    let pypi_client = clean_pypi_client().await;
+    super::audit(
+        client,
+        &pypi_client,
+        packages,
+        ignore,
+        ThreatSources::default(),
+    )
+    .await
+}
+
+/// A PyPI backend that reports every package as clean.
+async fn clean_pypi_client() -> PypiAuditClient {
     let app = Router::new().route(
         "/v1/querybatch",
         post(|Json(body): Json<serde_json::Value>| async move {
@@ -75,8 +89,7 @@ async fn audit(
             Json(serde_json::json!({"results": results}))
         }),
     );
-    let pypi_client = test_pypi_client(spawn(app).await);
-    super::audit(client, &pypi_client, packages, ignore).await
+    test_pypi_client(spawn(app).await)
 }
 
 fn packages() -> Vec<AuditPackage> {
@@ -606,6 +619,10 @@ async fn spawn_pypi_mock() -> Url {
                     "modified": "2026-07-31T00:00:00Z",
                     "summary": "Python package\nvulnerability",
                     "aliases": ["CVE-2026-9999"],
+                    "severity": [{
+                        "type": "CVSS_V3",
+                        "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N"
+                    }],
                     "affected": [{
                         "package": {"ecosystem": "PyPI", "name": "requests-test"},
                         "ranges": [{
@@ -642,6 +659,7 @@ async fn short_pypi_batch_response_fails_the_audit() {
         &pypi_client,
         packages,
         IgnoreSpec::default(),
+        ThreatSources::default(),
     )
     .await
     .unwrap_err();
@@ -666,6 +684,7 @@ async fn pypi_package_is_audited_with_osv() {
         &pypi_client,
         packages,
         IgnoreSpec::default(),
+        ThreatSources::default(),
     )
     .await
     .unwrap();
@@ -683,7 +702,13 @@ async fn pypi_package_is_audited_with_osv() {
     );
     assert_eq!(finding.aliases, ["CVE-2026-9999"]);
     assert_eq!(finding.fixed_versions, ["2.32.1"]);
-    assert_eq!(finding.severity, SeverityBand::Unknown);
+    // PyPI advisories are scored from their OSV CVSS vectors like any other.
+    assert_eq!(finding.severity, SeverityBand::Medium);
+    let cvss_base_score = finding.cvss_base_score.unwrap();
+    assert!(
+        (cvss_base_score - 5.3).abs() < 1e-9,
+        "cvss base score: {cvss_base_score}"
+    );
     assert_eq!(
         finding.url.as_deref(),
         Some("https://example.com/pypi-advisory")
@@ -835,6 +860,7 @@ async fn findings_without_match_metadata_are_unspecified() {
         &pypi_client,
         packages,
         IgnoreSpec::default(),
+        ThreatSources::default(),
     )
     .await
     .unwrap();
@@ -843,4 +869,241 @@ async fn findings_without_match_metadata_are_unspecified() {
         MatchApplicability::Unspecified
     );
     assert_eq!(report.vulnerabilities[0].matched_identity, None);
+}
+
+/// EPSS and KEV feeds where CVE-2026-1234 (BSLK-1's alias) is scored and
+/// KEV-listed and nothing else is. The KEV catalog is served at `kev.json`.
+async fn spawn_threat_mock() -> Url {
+    let app = Router::new()
+        .route(
+            "/data/v1/epss",
+            get(
+                |axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    let data: Vec<serde_json::Value> = query
+                        .get("cve")
+                        .map(|cves| cves.split(','))
+                        .into_iter()
+                        .flatten()
+                        .filter(|cve| cve.eq_ignore_ascii_case("CVE-2026-1234"))
+                        .map(|cve| {
+                            serde_json::json!({
+                                "cve": cve,
+                                "epss": "0.500000000",
+                                "percentile": "0.900000000",
+                                "date": "2026-09-01"
+                            })
+                        })
+                        .collect();
+                    Json(serde_json::json!({"status": "OK", "data": data}))
+                },
+            ),
+        )
+        .route(
+            "/kev.json",
+            get(|| async {
+                Json(serde_json::json!({
+                    "dateReleased": "2026-09-01T19:22:46.2162Z",
+                    "vulnerabilities": [{
+                        "cveID": "CVE-2026-1234",
+                        "vendorProject": "OpenSSL",
+                        "product": "OpenSSL",
+                        "vulnerabilityName": "OpenSSL buffer overflow",
+                        "dateAdded": "2026-08-01",
+                        "requiredAction": "Apply updates per vendor instructions.",
+                        "dueDate": "2026-08-22",
+                        "knownRansomwareCampaignUse": "Unknown",
+                        "notes": ""
+                    }]
+                }))
+            }),
+        );
+    spawn(app).await
+}
+
+fn threat_clients(base: &Url) -> (EpssClient, KevClient) {
+    let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
+    (
+        EpssClient::new(http.clone(), base.clone()),
+        KevClient::new(http, base.join("kev.json").unwrap()),
+    )
+}
+
+#[tokio::test]
+async fn threat_data_is_attached_to_findings_and_ranks_them() {
+    let base = spawn_mock().await;
+    let (epss_client, kev_client) = threat_clients(&spawn_threat_mock().await);
+    let threat = ThreatSources {
+        epss: Some(&epss_client),
+        kev: Some(&kev_client),
+    };
+    let pypi_client = clean_pypi_client().await;
+    let report = super::audit(
+        &test_client(base),
+        &pypi_client,
+        packages(),
+        IgnoreSpec::default(),
+        threat,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        report.threat_data,
+        ThreatDataStatus {
+            epss: ThreatSourceStatus::Loaded {
+                date: Some("2026-09-01".to_string())
+            },
+            kev: ThreatSourceStatus::Loaded {
+                date: Some("2026-09-01".to_string())
+            },
+        }
+    );
+    let finding = &report.vulnerabilities[0];
+    assert_eq!(finding.epss.len(), 1);
+    assert_eq!(finding.epss[0].cve, "CVE-2026-1234");
+    assert_eq!(finding.epss[0].epss, 0.5);
+    assert_eq!(finding.epss[0].percentile, 0.9);
+    assert_eq!(finding.known_exploited.len(), 1);
+    assert_eq!(finding.known_exploited[0].vendor_project, "OpenSSL");
+    assert_eq!(
+        finding.known_exploited[0].known_ransomware_campaign_use,
+        RansomwareCampaignUse::Unknown
+    );
+    // Critical (9.0) averaged with CVSS 9.8 => 0.94; KEV-listed so threat
+    // is 1.0 and the boost 1.05 => 98.7.
+    assert_eq!(finding.cvss_base_score, Some(9.8));
+    assert!(
+        (finding.risk.value() - 98.7).abs() < 1e-9,
+        "risk: {}",
+        finding.risk.value()
+    );
+
+    // Ignored findings are enriched too.
+    let ignore = vec!["BSLK-1".to_string()];
+    let base = spawn_mock().await;
+    let report = super::audit(
+        &test_client(base),
+        &pypi_client,
+        packages(),
+        IgnoreSpec {
+            ignore: &ignore,
+            ignore_until_fixed: &[],
+        },
+        threat,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.ignored[0].epss.len(), 1);
+    assert_eq!(report.ignored[0].known_exploited.len(), 1);
+}
+
+#[tokio::test]
+async fn unreachable_threat_sources_degrade_to_a_status() {
+    let base = spawn_mock().await;
+    // A server without the feeds: every threat request is a 404.
+    let (epss_client, kev_client) = threat_clients(&spawn_mock().await);
+    let threat = ThreatSources {
+        epss: Some(&epss_client),
+        kev: Some(&kev_client),
+    };
+    let pypi_client = clean_pypi_client().await;
+    let report = super::audit(
+        &test_client(base),
+        &pypi_client,
+        packages(),
+        IgnoreSpec::default(),
+        threat,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.vulnerabilities.len(), 1);
+    let finding = &report.vulnerabilities[0];
+    assert!(finding.epss.is_empty());
+    assert!(finding.known_exploited.is_empty());
+    assert_eq!(finding.risk, RiskScore::NONE);
+    for status in [&report.threat_data.epss, &report.threat_data.kev] {
+        match status {
+            ThreatSourceStatus::Failed { error } => {
+                assert!(error.contains("404"), "error: {error}")
+            }
+            ThreatSourceStatus::Disabled | ThreatSourceStatus::Loaded { .. } => {
+                panic!("expected a failed status, got {status:?}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn findings_are_ordered_by_risk_then_severity() {
+    // Two advisories on openssl: BSLK-1 (critical, scored) and BSLK-NOFIX
+    // (critical, no CVE score because its alias is unscored).
+    let app = Router::new()
+        .route(
+            "/v1/querybatch",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let results: Vec<serde_json::Value> = body["queries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|q| {
+                        if q["package"]["name"] == "openssl" {
+                            serde_json::json!({"vulns": [{"id": "BSLK-NOFIX"}, {"id": "BSLK-1"}]})
+                        } else {
+                            serde_json::json!({})
+                        }
+                    })
+                    .collect();
+                Json(serde_json::json!({"results": results}))
+            }),
+        )
+        .route(
+            "/v1/vulns/{id}",
+            get(
+                |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    if id == "BSLK-1" {
+                        Json(vuln_doc())
+                    } else {
+                        Json(vuln_doc_nofix())
+                    }
+                },
+            ),
+        );
+    let base = spawn(app).await;
+    let (epss_client, kev_client) = threat_clients(&spawn_threat_mock().await);
+    let threat = ThreatSources {
+        epss: Some(&epss_client),
+        kev: Some(&kev_client),
+    };
+    let pypi_client = clean_pypi_client().await;
+    let mut report = super::audit(
+        &test_client(base),
+        &pypi_client,
+        packages(),
+        IgnoreSpec::default(),
+        threat,
+    )
+    .await
+    .unwrap();
+
+    let ids = |report: &AuditReport| -> Vec<String> {
+        report
+            .vulnerabilities
+            .iter()
+            .map(|finding| finding.id.clone())
+            .collect()
+    };
+    // Default: risk first, so the scored advisory leads.
+    assert_eq!(ids(&report), ["BSLK-1", "BSLK-NOFIX"]);
+    // Vulnerability id order is alphabetical.
+    report.sort(SortStrategy::Vulnerability);
+    assert_eq!(ids(&report), ["BSLK-1", "BSLK-NOFIX"]);
+    // Same severity everywhere, so severity order falls through to risk.
+    report.sort(SortStrategy::Severity);
+    assert_eq!(ids(&report), ["BSLK-1", "BSLK-NOFIX"]);
+    // KEV-listed first; the unlisted one follows regardless of risk.
+    report.sort(SortStrategy::Kev);
+    assert_eq!(ids(&report), ["BSLK-1", "BSLK-NOFIX"]);
 }

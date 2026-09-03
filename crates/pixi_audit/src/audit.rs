@@ -1,4 +1,5 @@
-//! Audit orchestration across the Basilisk and PyPI backends.
+//! Audit orchestration across the Basilisk and PyPI backends, plus the
+//! threat-data enrichment of the resulting findings.
 
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
@@ -10,11 +11,12 @@ use crate::{
         BasiliskMatch, FixedVersions, advisory_url, basilisk_match, fixed_versions,
         pypi_advisory_url,
     },
-    client::{AuditError, BasiliskClient, PypiAuditClient},
+    client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, MatchApplicability,
-        PackageEcosystem, SeverityBand, UncheckedPackage,
+        PackageEcosystem, SeverityBand, SortStrategy, UncheckedPackage, mean_cvss_base_score,
     },
+    threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
 };
 
@@ -53,15 +55,6 @@ impl Backend {
     /// the audit: a security audit must never silently drop findings.
     fn tolerates_missing_document(self) -> bool {
         matches!(self, Backend::Basilisk)
-    }
-
-    fn severity(self, doc: &OsvVulnerability) -> SeverityBand {
-        match self {
-            Backend::Basilisk => SeverityBand::from_severities(&doc.severity),
-            // OSV.dev severity entries are not interpreted yet, so PyPI
-            // findings always fail a severity threshold.
-            Backend::Pypi => SeverityBand::Unknown,
-        }
     }
 
     fn summary(self, doc: &OsvVulnerability) -> Option<String> {
@@ -229,16 +222,22 @@ async fn fetch_documents(
 }
 
 /// Audits `packages` against the vulnerability databases, applying `ignore`
-/// (vulnerability ids or aliases, case-insensitive).
+/// (vulnerability ids or aliases, case-insensitive), and attaches EPSS and
+/// KEV data from `threat` to every finding.
 ///
 /// There is deliberately no partial-report mode: any request failure aborts
 /// the audit as a whole. See [`Backend::tolerates_missing_document`] for the
 /// one exception.
+///
+/// Threat data only ranks findings, so it degrades instead: a source that
+/// cannot be fetched is recorded in the report's [`ThreatDataStatus`] and
+/// the findings are reported without it.
 pub async fn audit(
     client: &BasiliskClient,
     pypi_client: &PypiAuditClient,
     packages: Vec<AuditPackage>,
     ignore: IgnoreSpec<'_>,
+    threat: ThreatSources<'_>,
 ) -> Result<AuditReport, AuditError> {
     let backends = Backends {
         basilisk: client,
@@ -257,7 +256,14 @@ pub async fn audit(
             }),
         }
     }
-    let results = query_backends(&backends, &planned).await?;
+    // The KEV catalog does not depend on the findings, so it downloads
+    // while the vulnerability backends are queried.
+    let (results, (kev_status, kev_catalog)) = futures::future::join(
+        query_backends(&backends, &planned),
+        load_kev_catalog(threat.kev),
+    )
+    .await;
+    let results = results?;
 
     let references: BTreeSet<(Backend, String)> = planned
         .iter()
@@ -290,7 +296,8 @@ pub async fn audit(
                 environments: package.environments.clone(),
                 id: doc.id.clone(),
                 aliases: doc.aliases.clone(),
-                severity: query.backend.severity(doc),
+                severity: SeverityBand::from_severities(&doc.severity),
+                cvss_base_score: mean_cvss_base_score(&doc.severity),
                 fixed_versions: fixes.same_ecosystem,
                 upstream_fixes: fixes.upstream,
                 applicability: basilisk_match
@@ -299,6 +306,9 @@ pub async fn audit(
                 matched_identity: basilisk_match.and_then(|m| m.matched_identity),
                 summary: query.backend.summary(doc),
                 url: query.backend.url(doc),
+                epss: Vec::new(),
+                known_exploited: Vec::new(),
+                risk: RiskScore::NONE,
                 ignore_reason: None,
             };
             record_finding(&mut report, finding, &mut suppressions);
@@ -306,16 +316,109 @@ pub async fn audit(
     }
     report.unmatched_ignores = suppressions.unmatched(ignore);
 
-    let order =
-        |a: &Finding, b: &Finding| b.severity.cmp(&a.severity).then(a.package.cmp(&b.package));
-    report.vulnerabilities.sort_by(order);
-    report.ignored.sort_by(order);
+    let epss_status = attach_threat_data(&mut report, threat.epss, &kev_catalog).await;
+    report.threat_data = ThreatDataStatus {
+        epss: epss_status,
+        kev: kev_status,
+    };
+    report.sort(SortStrategy::default());
 
     report.summary.audited = planned.len();
     report.summary.vulnerable = report.vulnerabilities.len();
     report.summary.ignored = report.ignored.len();
     report.summary.unchecked = report.unchecked.len();
     Ok(report)
+}
+
+async fn load_kev_catalog(client: Option<&KevClient>) -> (ThreatSourceStatus, KevCatalog) {
+    let Some(client) = client else {
+        return (ThreatSourceStatus::Disabled, KevCatalog::default());
+    };
+    match client.catalog().await {
+        Ok(catalog) => {
+            let date = catalog.date_released().map(str::to_string);
+            (ThreatSourceStatus::Loaded { date }, catalog)
+        }
+        Err(err) => (
+            ThreatSourceStatus::Failed {
+                error: error_chain(&err),
+            },
+            KevCatalog::default(),
+        ),
+    }
+}
+
+/// Looks up EPSS scores for every CVE across the report's findings, attaches
+/// them together with the KEV entries from `kev`, and computes each
+/// finding's risk. Returns the EPSS source's status.
+async fn attach_threat_data(
+    report: &mut AuditReport,
+    epss_client: Option<&EpssClient>,
+    kev: &KevCatalog,
+) -> ThreatSourceStatus {
+    let cves: Vec<String> = report
+        .vulnerabilities
+        .iter()
+        .chain(&report.ignored)
+        .flat_map(Finding::cve_ids)
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let (epss_status, epss_scores): (ThreatSourceStatus, HashMap<String, EpssScore>) =
+        match epss_client {
+            None => (ThreatSourceStatus::Disabled, HashMap::new()),
+            Some(client) => match client.scores(&cves).await {
+                Ok(scores) => {
+                    let date = scores.first().map(|score| score.date.clone());
+                    let by_cve = scores
+                        .into_iter()
+                        .map(|score| (score.cve.to_ascii_uppercase(), score))
+                        .collect();
+                    (ThreatSourceStatus::Loaded { date }, by_cve)
+                }
+                Err(err) => (
+                    ThreatSourceStatus::Failed {
+                        error: error_chain(&err),
+                    },
+                    HashMap::new(),
+                ),
+            },
+        };
+
+    for finding in report
+        .vulnerabilities
+        .iter_mut()
+        .chain(report.ignored.iter_mut())
+    {
+        let cves = finding.cve_ids();
+        finding.epss = cves
+            .iter()
+            .filter_map(|cve| epss_scores.get(cve).cloned())
+            .collect();
+        finding.known_exploited = cves
+            .iter()
+            .filter_map(|cve| kev.get(cve).cloned())
+            .collect();
+        finding.risk = RiskScore::compute(
+            finding.severity,
+            finding.cvss_base_score,
+            &finding.epss,
+            &finding.known_exploited,
+        );
+    }
+    epss_status
+}
+
+/// The error and every cause below it, joined for a one-line status.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 /// Lowercased suppression lists, ready for case-insensitive matching, and

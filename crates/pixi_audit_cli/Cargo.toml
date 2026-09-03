@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 console = { workspace = true }
+dirs = { workspace = true }
+http-cache-reqwest = { workspace = true }
 iocraft = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 pixi_audit = { workspace = true }

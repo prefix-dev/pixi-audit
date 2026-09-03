@@ -1,6 +1,7 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, Finding, MatchApplicability, PackageEcosystem, PackageName,
-    SeverityBand, UncheckedPackage,
+    AuditReport, AuditSummary, EpssScore, Finding, KnownExploited, MatchApplicability,
+    PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore, SeverityBand,
+    ThreatDataStatus, ThreatSourceStatus, UncheckedPackage,
 };
 
 use pixi_audit::{CondaPublication, UpstreamFix, UpstreamOrigin};
@@ -53,14 +54,167 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
         id: id.to_string(),
         aliases: vec![],
         severity,
+        cvss_base_score: None,
         fixed_versions: vec!["3.1.4".to_string()],
         upstream_fixes: vec![],
         applicability: MatchApplicability::Unspecified,
         matched_identity: None,
         summary: None,
         url: Some(format!("https://osv.dev/{id}")),
+        epss: vec![],
+        known_exploited: vec![],
+        risk: RiskScore::NONE,
         ignore_reason: None,
     }
+}
+
+fn loaded_threat_data() -> ThreatDataStatus {
+    ThreatDataStatus {
+        epss: ThreatSourceStatus::Loaded {
+            date: Some("2026-09-01".to_string()),
+        },
+        kev: ThreatSourceStatus::Loaded {
+            date: Some("2026-09-01".to_string()),
+        },
+    }
+}
+
+fn kev_entry(cve: &str, ransomware: RansomwareCampaignUse) -> KnownExploited {
+    KnownExploited {
+        cve: cve.to_string(),
+        vendor_project: "OpenSSL".to_string(),
+        product: "OpenSSL".to_string(),
+        vulnerability_name: "OpenSSL overflow".to_string(),
+        date_added: "2026-08-01".to_string(),
+        required_action: "Apply updates".to_string(),
+        due_date: "2026-08-22".to_string(),
+        known_ransomware_campaign_use: ransomware,
+        notes: String::new(),
+    }
+}
+
+#[test]
+fn threat_cells_render_risk_epss_and_kev() {
+    let mut scored = finding("openssl", "CVE-2026-0001", SeverityBand::Critical);
+    scored.epss = vec![EpssScore {
+        cve: "CVE-2026-0001".to_string(),
+        epss: 0.9077,
+        percentile: 0.99796,
+        date: "2026-09-01".to_string(),
+    }];
+    scored.known_exploited = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Known)];
+    scored.risk = RiskScore::compute(scored.severity, None, &scored.epss, &scored.known_exploited);
+    let mut tiny = finding("openssl", "CVE-2026-0002", SeverityBand::Low);
+    tiny.epss = vec![EpssScore {
+        cve: "CVE-2026-0002".to_string(),
+        epss: 0.0004,
+        percentile: 0.112,
+        date: "2026-09-01".to_string(),
+    }];
+    tiny.risk = RiskScore::compute(tiny.severity, None, &tiny.epss, &[]);
+    let unscored = finding("openssl", "CVE-2026-0003", SeverityBand::Medium);
+    let report = AuditReport {
+        vulnerabilities: vec![scored, tiny, unscored],
+        summary: AuditSummary {
+            audited: 1,
+            vulnerable: 3,
+            ..Default::default()
+        },
+        threat_data: loaded_threat_data(),
+        ..Default::default()
+    };
+    let text = render_human(&report, RenderOptions::default());
+    assert!(
+        text.contains(
+            "  CVE-2026-0001  CRITICAL  risk  99.0 (kev, ransomware)  epss 90.8% (99th)  fixed in: 3.1.4\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  CVE-2026-0002  LOW       risk < 0.1  epss < 0.1% (11th)  fixed in: 3.1.4\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("  CVE-2026-0003  MEDIUM    risk   n/a  epss n/a  fixed in: 3.1.4\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn threat_cells_are_omitted_when_no_source_is_configured() {
+    let report = AuditReport {
+        vulnerabilities: vec![finding("openssl", "CVE-2026-0001", SeverityBand::High)],
+        summary: AuditSummary {
+            audited: 1,
+            vulnerable: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let text = render_human(&report, RenderOptions::default());
+    assert!(
+        text.contains("  CVE-2026-0001  HIGH      fixed in: 3.1.4\n"),
+        "{text}"
+    );
+    assert!(!text.contains("risk"));
+    assert!(!text.contains("epss"));
+}
+
+#[test]
+fn kev_is_marked_on_the_risk_cell() {
+    let mut listed = finding("openssl", "CVE-2026-0001", SeverityBand::High);
+    listed.known_exploited = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Unknown)];
+    listed.risk = RiskScore::compute(listed.severity, None, &[], &listed.known_exploited);
+    let report = AuditReport {
+        vulnerabilities: vec![listed],
+        summary: AuditSummary {
+            audited: 1,
+            vulnerable: 1,
+            ..Default::default()
+        },
+        threat_data: ThreatDataStatus {
+            epss: ThreatSourceStatus::Disabled,
+            kev: ThreatSourceStatus::Loaded { date: None },
+        },
+        ..Default::default()
+    };
+    let text = render_human(&report, RenderOptions::default());
+    // High (7.5 / 10) with threat 1.0 and the 1.05 boost; no EPSS cell
+    // since that source is off.
+    assert!(
+        text.contains("  CVE-2026-0001  HIGH      risk  78.8 (kev)  fixed in: 3.1.4\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn unknown_severity_keeps_threat_cells() {
+    let mut unknown = finding("requests", "PYSEC-2026-1", SeverityBand::Unknown);
+    unknown.ecosystem = PackageEcosystem::Pypi;
+    unknown.epss = vec![EpssScore {
+        cve: "CVE-2026-9999".to_string(),
+        epss: 0.25,
+        percentile: 0.953,
+        date: "2026-09-01".to_string(),
+    }];
+    unknown.risk = RiskScore::compute(unknown.severity, None, &unknown.epss, &[]);
+    let report = AuditReport {
+        vulnerabilities: vec![unknown],
+        summary: AuditSummary {
+            audited: 1,
+            vulnerable: 1,
+            ..Default::default()
+        },
+        threat_data: loaded_threat_data(),
+        ..Default::default()
+    };
+    let text = render_human(&report, RenderOptions::default());
+    assert!(
+        text.contains("  PYSEC-2026-1  risk  12.5  epss 25.0% (95th)  fixed in: 3.1.4\n"),
+        "{text}"
+    );
 }
 
 #[test]
