@@ -125,7 +125,7 @@ Available fields are `name`, `version`, `fixed-in`, `kind`, `source`, `vulnerabi
 
 A fix in another ecosystem is only reported when it belongs to the package Basilisk matched: the entry whose package URL Basilisk recorded as the matched identity. An advisory matched through a CPE name never contributes fixes from other ecosystems, so conda-forge `libpq` does not inherit a fix from the npm package of the same name. Documents without a matched identity fall back to matching by name, but only when Basilisk evaluated the affected versions.
 
-Not every match is equally certain. Basilisk records how far it got as the finding's *applicability*: `evaluated` means the affected versions were checked against the package, `unevaluated` means they were not, and `version-unbounded` means the advisory names the product without version bounds, so every version matches. The default table marks the last two with a dim `(unevaluated)` or `(unbounded)` after the advisory ID and counts them at the end of the `by status` line. The `match` field shows the applicability as a column of its own, and `--sort-by match` puts the most confident matches first. The grouped format and GitHub annotations add a `match: version unbounded` or `match: unevaluated` note. In JSON each finding carries `applicability` (`unspecified` for PyPI findings and documents without Basilisk metadata) and `matched_identity`, an object with `kind` (`purl` or `cpe`) and `value`, or `null` when Basilisk recorded none.
+Not every match is equally certain. Basilisk records how far it got as the finding's *applicability*: `evaluated` means the affected versions were checked against the package, `unevaluated` means they were not, and `version-unbounded` means the advisory names the product without version bounds, so every version matches. The default table marks the last two with a dim `(unevaluated)` or `(unbounded)` after the advisory ID and counts them at the end of the `by status` line. The `match` field shows the applicability as a column of its own, and `--sort-by match` puts the most confident matches first. The grouped format, GitHub annotations, and SARIF result messages add a `match: version unbounded` or `match: unevaluated` note, and each SARIF rule lists the applicability and matched identity in its help text. In JSON each finding carries `applicability` (`unspecified` for PyPI findings and documents without Basilisk metadata) and `matched_identity`, an object with `kind` (`purl` or `cpe`) and `value`, or `null` when Basilisk recorded none.
 
 On a terminal the table is colored and advisory IDs link to their advisory pages. When stdout is piped or `NO_COLOR` is set, the same table is written as plain text at full width, so nothing is clipped in logs. Set `CLICOLOR_FORCE=1` to keep colors in CI logs that render them.
 
@@ -136,6 +136,16 @@ pixi audit --json > audit-report.json
 ```
 
 Progress and diagnostics go to stderr. The report goes to stdout, so redirecting or piping JSON is safe.
+
+`--format sarif` writes a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log with one rule per vulnerability and package and one result per finding, located at the package's line in `pixi.lock` with the path relative to the repository root. Ignored findings are included as suppressed results. GitHub code scanning derives its severity label from the CVSS score in each rule:
+
+```yaml
+- run: pixi audit --format sarif > pixi-audit.sarif
+  continue-on-error: true
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: pixi-audit.sarif
+```
 
 ### Continuous integration
 
