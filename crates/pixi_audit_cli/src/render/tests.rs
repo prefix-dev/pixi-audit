@@ -1,6 +1,6 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, Finding, PackageEcosystem, PackageName, SeverityBand,
-    UncheckedPackage,
+    AuditReport, AuditSummary, Finding, MatchApplicability, PackageEcosystem, PackageName,
+    SeverityBand, UncheckedPackage,
 };
 
 use pixi_audit::{CondaPublication, UpstreamFix, UpstreamOrigin};
@@ -55,6 +55,8 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
         severity,
         fixed_versions: vec!["3.1.4".to_string()],
         upstream_fixes: vec![],
+        applicability: MatchApplicability::Unspecified,
+        matched_identity: None,
         summary: None,
         url: Some(format!("https://osv.dev/{id}")),
         ignore_reason: None,
@@ -236,5 +238,40 @@ fn unchecked_package_without_version_renders_question_mark() {
     };
     assert!(
         render_human(&report, RenderOptions::default()).contains("  mypkg ? (unknown) — default")
+    );
+}
+
+#[test]
+fn weak_matches_carry_a_note() {
+    let mut unbounded = finding("libpq", "CVE-2022-25852", SeverityBand::High);
+    unbounded.fixed_versions = vec![];
+    unbounded.applicability = MatchApplicability::VersionUnbounded;
+    let mut unevaluated = finding("libpq", "CVE-2026-0009", SeverityBand::Medium);
+    unevaluated.applicability = MatchApplicability::Unevaluated;
+    let mut evaluated = finding("libpq", "CVE-2026-0010", SeverityBand::Low);
+    evaluated.applicability = MatchApplicability::Evaluated;
+    let report = AuditReport {
+        vulnerabilities: vec![unbounded, unevaluated, evaluated],
+        summary: AuditSummary {
+            audited: 1,
+            vulnerable: 3,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let text = render_human(&report, RenderOptions::default());
+    assert!(
+        text.contains(
+            "CVE-2022-25852  HIGH      no known fixed version  match: version unbounded\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("CVE-2026-0009  MEDIUM    fixed in: 3.1.4  match: unevaluated\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("CVE-2026-0010  LOW       fixed in: 3.1.4\n"),
+        "{text}"
     );
 }

@@ -57,8 +57,11 @@ fn message(finding: &Finding) -> String {
     } else {
         "no known fixed version".to_string()
     };
+    let match_note = crate::render::match_note(finding)
+        .map(|note| format!(", {note}"))
+        .unwrap_or_default();
     let mut text = format!(
-        "{} severity, {fix} ({}; {})",
+        "{} severity, {fix}{match_note} ({}; {})",
         finding.severity,
         finding.ecosystem,
         finding.environments.join(", ")
@@ -89,7 +92,9 @@ fn escape_property(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use pixi_audit::{AuditSummary, PackageEcosystem, PackageName, SeverityBand};
+    use pixi_audit::{
+        AuditSummary, MatchApplicability, PackageEcosystem, PackageName, SeverityBand,
+    };
 
     use super::*;
 
@@ -106,6 +111,8 @@ mod tests {
                 severity: SeverityBand::High,
                 fixed_versions: vec!["3.1.1".to_string()],
                 upstream_fixes: vec![],
+                applicability: MatchApplicability::Unspecified,
+                matched_identity: None,
                 summary: Some("100% broken\nreally".to_string()),
                 url: Some("https://osv.dev/CVE-2026-1".to_string()),
                 ignore_reason: None,
@@ -123,5 +130,37 @@ mod tests {
              (conda-forge; default): 100%25 broken%0Areally https://osv.dev/CVE-2026-1\n"
         );
         assert!(github_annotations(&report, Level::Warning).starts_with("::warning "));
+    }
+
+    #[test]
+    fn weak_matches_are_noted_in_the_message() {
+        let mut report = AuditReport {
+            vulnerabilities: vec![Finding {
+                package: PackageName::conda("libpq").unwrap(),
+                version: "16.0".to_string(),
+                ecosystem: PackageEcosystem::CondaForge,
+                environments: vec!["default".to_string()],
+                id: "CVE-2022-25852".to_string(),
+                aliases: vec![],
+                severity: SeverityBand::High,
+                fixed_versions: vec![],
+                upstream_fixes: vec![],
+                applicability: MatchApplicability::VersionUnbounded,
+                matched_identity: None,
+                summary: None,
+                url: None,
+                ignore_reason: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            github_annotations(&report, Level::Warning),
+            "::warning title=CVE-2022-25852 in libpq 16.0::high severity, no known fixed \
+             version, match: version unbounded (conda-forge; default)\n"
+        );
+        report.vulnerabilities[0].applicability = MatchApplicability::Unevaluated;
+        assert!(github_annotations(&report, Level::Warning).contains(", match: unevaluated ("));
+        report.vulnerabilities[0].applicability = MatchApplicability::Evaluated;
+        assert!(!github_annotations(&report, Level::Warning).contains("match:"));
     }
 }

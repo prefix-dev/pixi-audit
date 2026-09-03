@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 
 use iocraft::prelude::*;
-use pixi_audit::{AuditReport, Finding, SeverityBand, UncheckedPackage};
+use pixi_audit::{AuditReport, Finding, MatchApplicability, SeverityBand, UncheckedPackage};
 use supports_hyperlinks::Stream;
 
 pub mod field;
@@ -107,7 +107,11 @@ fn build(
 //  ✔ Audited pixi.lock                 [312 packages audited]
 //  ✔ Scanned for vulnerabilities       [4 vulnerability matches]
 //    ├── by severity: 1 critical, 2 high, 1 medium, 0 low, 0 unknown
-//    └── by status:   3 fixed, 1 not-fixed, 1 ignored
+//    └── by status:   3 fixed, 1 not-fixed, 1 ignored, 1 unbounded
+//
+// The status line ends with the weak matches, each count only when it is
+// not zero: `unbounded` advisories name the product without version
+// bounds, `unevaluated` ones were never checked against the versions.
 // ---------------------------------------------------------------------------
 
 const LABEL_WIDTH: usize = 35;
@@ -136,6 +140,7 @@ fn status_block(report: &AuditReport, lockfile: &str) -> Element<'static, View> 
         .filter(|f| !f.fixed_versions.is_empty())
         .count();
     let not_fixed = report.vulnerabilities.len() - fixed;
+    let weak_matches = weak_match_counts(&report.vulnerabilities);
 
     element! {
         View(flex_direction: FlexDirection::Column) {
@@ -150,6 +155,7 @@ fn status_block(report: &AuditReport, lockfile: &str) -> Element<'static, View> 
                 Text(content: format!("{fixed} fixed, "))
                 Text(content: format!("{not_fixed} not-fixed, "))
                 Text(content: format!("{} ignored", summary.ignored))
+                Text(content: weak_matches, color: Color::DarkGrey)
             }
         }
     }
@@ -168,6 +174,29 @@ fn status_line(label: impl Into<String>, detail: String) -> Option<Element<'stat
             Text(content: detail, color: Color::DarkGrey, wrap: TextWrap::NoWrap)
         }
     })
+}
+
+/// `, 1 unbounded, 2 unevaluated`: the matches basilisk could not pin to
+/// versions, listed only when there are any.
+fn weak_match_counts(findings: &[Finding]) -> String {
+    [
+        MatchApplicability::VersionUnbounded,
+        MatchApplicability::Unevaluated,
+    ]
+    .into_iter()
+    .filter_map(|applicability| {
+        let count = findings
+            .iter()
+            .filter(|f| f.applicability == applicability)
+            .count();
+        (count > 0).then(|| {
+            format!(
+                ", {count} {}",
+                field::match_label(applicability).unwrap_or_default()
+            )
+        })
+    })
+    .collect()
 }
 
 /// `1 critical, 2 high, ...` with each non-zero count in its band's color.
@@ -210,6 +239,7 @@ fn findings_grid(
             repeated_package: previous.is_some_and(|p| same_package(p, finding)),
             hyperlinks: style.hyperlinks,
             color: style.color,
+            match_column: fields.contains(&Field::Match),
         };
         rows.push(
             fields

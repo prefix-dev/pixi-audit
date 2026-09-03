@@ -7,7 +7,10 @@ use axum::{
 use url::Url;
 
 use super::*;
-use crate::{CondaPublication, UpstreamFix, UpstreamOrigin};
+use crate::{
+    CondaPublication, MatchApplicability, MatchedIdentity, MatchedIdentityKind, UpstreamFix,
+    UpstreamOrigin,
+};
 use crate::{
     client::BasiliskClient,
     test_support::{
@@ -685,4 +688,159 @@ async fn pypi_package_is_audited_with_osv() {
         finding.url.as_deref(),
         Some("https://example.com/pypi-advisory")
     );
+}
+
+/// Like conda-forge `pnpm`, which is npm's pnpm: matched through the npm
+/// purl, so the npm fixes are upstream fixes.
+fn vuln_doc_purl_matched() -> serde_json::Value {
+    serde_json::json!({
+        "id": "CVE-2026-50014",
+        "summary": "Fixed on npm",
+        "affected": [
+            {
+                "package": {"ecosystem": "npm", "name": "openssl", "purl": "pkg:npm/openssl"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "10.34.0"}]}]
+            },
+            {
+                "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                "versions": ["3.1.0"],
+                "database_specific": {"basilisk": {
+                    "applicability": "evaluated",
+                    "comparator": "semver",
+                    "matcher_version": "v8",
+                    "matched_identity": {"kind": "purl", "value": "pkg:npm/openssl"}
+                }}
+            }
+        ]
+    })
+}
+
+/// Like conda-forge `libpq` and CVE-2022-25852: a CPE match without
+/// version bounds, while the same-name npm entry is another package.
+fn vuln_doc_cpe_unbounded() -> serde_json::Value {
+    serde_json::json!({
+        "id": "CVE-2022-25852",
+        "summary": "About the npm bindings",
+        "affected": [
+            {
+                "package": {"ecosystem": "npm", "name": "openssl", "purl": "pkg:npm/openssl"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.8.10"}]}]
+            },
+            {
+                "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                "versions": ["3.1.0"],
+                "database_specific": {"basilisk": {
+                    "applicability": "version_unbounded",
+                    "comparator": "conda",
+                    "matcher_version": "v8",
+                    "matched_identity": {"kind": "cpe", "value": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*"}
+                }}
+            }
+        ]
+    })
+}
+
+#[tokio::test]
+async fn purl_matched_finding_keeps_upstream_fixes_and_reports_its_match() {
+    let base = spawn_mock_serving(vuln_doc_purl_matched()).await;
+    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+        .await
+        .unwrap();
+
+    assert_eq!(report.vulnerabilities.len(), 1);
+    let finding = &report.vulnerabilities[0];
+    assert!(finding.fixed_versions.is_empty());
+    assert_eq!(
+        finding.upstream_fixes,
+        vec![UpstreamFix {
+            version: "10.34.0".to_string(),
+            origin: UpstreamOrigin::Ecosystem {
+                ecosystem: "npm".to_string(),
+            },
+        }]
+    );
+    assert_eq!(finding.applicability, MatchApplicability::Evaluated);
+    assert_eq!(
+        finding.matched_identity,
+        Some(MatchedIdentity {
+            kind: MatchedIdentityKind::Purl,
+            value: "pkg:npm/openssl".to_string(),
+        })
+    );
+    let json = serde_json::to_value(finding).unwrap();
+    assert_eq!(json["applicability"], "evaluated");
+    assert_eq!(
+        json["matched_identity"],
+        serde_json::json!({"kind": "purl", "value": "pkg:npm/openssl"})
+    );
+}
+
+#[tokio::test]
+async fn cpe_matched_finding_has_no_upstream_fixes() {
+    let base = spawn_mock_serving(vuln_doc_cpe_unbounded()).await;
+    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+        .await
+        .unwrap();
+
+    assert_eq!(report.vulnerabilities.len(), 1);
+    let finding = &report.vulnerabilities[0];
+    assert!(finding.fixed_versions.is_empty());
+    assert!(
+        finding.upstream_fixes.is_empty(),
+        "npm openssl is not conda-forge openssl: {:?}",
+        finding.upstream_fixes
+    );
+    assert_eq!(finding.applicability, MatchApplicability::VersionUnbounded);
+    assert_eq!(
+        finding.matched_identity.as_ref().map(|i| i.kind),
+        Some(MatchedIdentityKind::Cpe)
+    );
+    let json = serde_json::to_value(finding).unwrap();
+    assert_eq!(json["applicability"], "version-unbounded");
+    assert_eq!(json["matched_identity"]["kind"], "cpe");
+
+    // With no fix known anywhere, until-fixed suppression applies.
+    let base = spawn_mock_serving(vuln_doc_cpe_unbounded()).await;
+    let ids = vec!["CVE-2022-25852".to_string()];
+    let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
+        .await
+        .unwrap();
+    assert!(report.vulnerabilities.is_empty());
+    assert_eq!(report.ignored.len(), 1);
+}
+
+#[tokio::test]
+async fn findings_without_match_metadata_are_unspecified() {
+    // A plain OSV document from basilisk, and a PyPI finding from OSV.dev.
+    let base = spawn_mock().await;
+    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+        .await
+        .unwrap();
+    let finding = &report.vulnerabilities[0];
+    assert_eq!(finding.applicability, MatchApplicability::Unspecified);
+    assert_eq!(finding.matched_identity, None);
+    let json = serde_json::to_value(finding).unwrap();
+    assert_eq!(json["applicability"], "unspecified");
+    assert_eq!(json["matched_identity"], serde_json::Value::Null);
+
+    let pypi_client = test_pypi_client(spawn_pypi_mock().await);
+    let packages = vec![AuditPackage {
+        name: pypi_name("requests_test"),
+        version: Some("2.32.0".to_string()),
+        ecosystem: PackageEcosystem::Pypi,
+        environments: vec!["default".to_string()],
+    }];
+    let report = super::audit(
+        &test_client(spawn_mock().await),
+        &pypi_client,
+        packages,
+        IgnoreSpec::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        report.vulnerabilities[0].applicability,
+        MatchApplicability::Unspecified
+    );
+    assert_eq!(report.vulnerabilities[0].matched_identity, None);
 }

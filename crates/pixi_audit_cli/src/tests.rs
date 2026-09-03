@@ -69,6 +69,8 @@ fn gate_applies_threshold_with_unknown_failsafe() {
         severity,
         fixed_versions: vec![],
         upstream_fixes: vec![],
+        applicability: pixi_audit::MatchApplicability::Unspecified,
+        matched_identity: None,
         summary: None,
         url: None,
         ignore_reason: None,

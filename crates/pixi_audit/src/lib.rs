@@ -24,6 +24,7 @@ pub use osv_protocol::*;
 pub use rattler_lock;
 pub use report::{
     AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, IgnoreReason, IgnoreSpec,
-    InvalidPackageName, PackageEcosystem, PackageName, ParseSeverityBandError, SeverityBand,
-    UncheckedPackage, UpstreamFix, UpstreamOrigin, audit,
+    InvalidPackageName, MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem,
+    PackageName, ParseSeverityBandError, SeverityBand, UncheckedPackage, UpstreamFix,
+    UpstreamOrigin, audit,
 };

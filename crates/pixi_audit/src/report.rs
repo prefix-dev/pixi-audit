@@ -295,6 +295,45 @@ pub enum CondaPublication {
     Unknown,
 }
 
+/// How far basilisk got in establishing that an advisory applies to the
+/// audited conda-forge package. Orders least to most confident, so the
+/// maximum of several matches is the strongest one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all(serialize = "kebab-case", deserialize = "snake_case"))]
+pub enum MatchApplicability {
+    /// Basilisk recorded no applicability: PyPI findings, and documents
+    /// whose conda-forge entry carries no basilisk metadata.
+    #[serde(skip_deserializing)]
+    Unspecified,
+    /// The advisory names the vendor and product (a CPE match) but gives
+    /// no version bounds basilisk could apply, so every version matches.
+    VersionUnbounded,
+    /// The package matched but the affected versions were not evaluated.
+    Unevaluated,
+    /// Basilisk evaluated the affected versions against the package.
+    Evaluated,
+}
+
+/// The kind of identifier an advisory was matched to the package through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchedIdentityKind {
+    /// A package URL, such as `pkg:npm/pnpm`: the advisory is about that
+    /// exact package in that ecosystem.
+    Purl,
+    /// A CPE name from NVD: a vendor and product, with no ecosystem.
+    Cpe,
+}
+
+/// The identifier basilisk matched an advisory to the conda-forge package
+/// through. Fixes in other ecosystems are only trusted when they belong to
+/// this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchedIdentity {
+    pub kind: MatchedIdentityKind,
+    pub value: String,
+}
+
 /// Where a fix exists when it is not a release in the audited ecosystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "origin", rename_all = "kebab-case")]
@@ -333,6 +372,11 @@ pub struct Finding {
     /// Fixes known outside the package's own ecosystem, each with where it
     /// exists. Informative only; `--fix` cannot install these.
     pub upstream_fixes: Vec<UpstreamFix>,
+    /// How confidently basilisk matched the advisory to the package.
+    /// `Unspecified` for PyPI findings and documents without metadata.
+    pub applicability: MatchApplicability,
+    /// The identifier basilisk matched the advisory through, when known.
+    pub matched_identity: Option<MatchedIdentity>,
     pub summary: Option<String>,
     pub url: Option<String>,
     /// Set only on findings in the ignored bucket.

@@ -6,11 +6,14 @@ use std::str::FromStr;
 use futures::{StreamExt, TryStreamExt};
 
 use crate::{
-    advisory::{FixedVersions, advisory_url, fixed_versions, pypi_advisory_url},
+    advisory::{
+        BasiliskMatch, FixedVersions, advisory_url, basilisk_match, fixed_versions,
+        pypi_advisory_url,
+    },
     client::{AuditError, BasiliskClient, PypiAuditClient},
     report::{
-        AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, PackageEcosystem,
-        SeverityBand, UncheckedPackage,
+        AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, MatchApplicability,
+        PackageEcosystem, SeverityBand, UncheckedPackage,
     },
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
 };
@@ -90,6 +93,21 @@ impl Backend {
             fixes.upstream.clear();
         }
         fixes
+    }
+
+    /// How the database matched the advisory to the package. Only
+    /// basilisk records this.
+    fn basilisk_match(
+        self,
+        doc: &OsvVulnerability,
+        package: &AuditPackage,
+    ) -> Option<BasiliskMatch> {
+        match self {
+            Backend::Basilisk => {
+                basilisk_match(doc, &package.name, package.ecosystem.osv_ecosystem())
+            }
+            Backend::Pypi => None,
+        }
     }
 }
 
@@ -264,6 +282,7 @@ pub async fn audit(
                 continue;
             }
             let fixes = query.backend.fixed_versions(doc, package);
+            let basilisk_match = query.backend.basilisk_match(doc, package);
             let finding = Finding {
                 package: package.name.clone(),
                 version: query.version.clone(),
@@ -274,6 +293,10 @@ pub async fn audit(
                 severity: query.backend.severity(doc),
                 fixed_versions: fixes.same_ecosystem,
                 upstream_fixes: fixes.upstream,
+                applicability: basilisk_match
+                    .as_ref()
+                    .map_or(MatchApplicability::Unspecified, |m| m.applicability),
+                matched_identity: basilisk_match.and_then(|m| m.matched_identity),
                 summary: query.backend.summary(doc),
                 url: query.backend.url(doc),
                 ignore_reason: None,

@@ -1,6 +1,6 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, Finding, IgnoreReason, PackageEcosystem, PackageName, SeverityBand,
-    UncheckedPackage, UpstreamFix, UpstreamOrigin,
+    AuditReport, AuditSummary, Finding, IgnoreReason, MatchApplicability, PackageEcosystem,
+    PackageName, SeverityBand, UncheckedPackage, UpstreamFix, UpstreamOrigin,
 };
 
 use super::{Field, TableLayout, render_table};
@@ -16,6 +16,8 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
         severity,
         fixed_versions: vec!["3.1.4".to_string()],
         upstream_fixes: vec![],
+        applicability: MatchApplicability::Unspecified,
+        matched_identity: None,
         summary: None,
         url: Some(format!("https://osv.dev/{id}")),
         ignore_reason: None,
@@ -33,6 +35,8 @@ fn pypi_finding(id: &str) -> Finding {
         severity: SeverityBand::Unknown,
         fixed_versions: vec![],
         upstream_fixes: vec![],
+        applicability: MatchApplicability::Unspecified,
+        matched_identity: None,
         summary: Some("Leaks credentials".to_string()),
         url: None,
         ignore_reason: None,
@@ -212,4 +216,69 @@ fn sort_by_fixed_in_puts_unfixed_last() {
         .map(|line| line.split_whitespace().next().unwrap())
         .collect();
     assert_eq!(ids, ["CVE-2026-0001", "GHSA-1", "CVE-2026-0002"]);
+}
+
+/// A report with one match of each weak applicability.
+fn weak_match_report() -> AuditReport {
+    let mut unbounded = finding("libpq", "CVE-2022-25852", SeverityBand::High);
+    unbounded.fixed_versions = vec![];
+    unbounded.applicability = MatchApplicability::VersionUnbounded;
+    let mut unevaluated = finding("libpq", "CVE-2026-0009", SeverityBand::Medium);
+    unevaluated.applicability = MatchApplicability::Unevaluated;
+    let mut evaluated = finding("pnpm", "CVE-2026-50014", SeverityBand::Low);
+    evaluated.applicability = MatchApplicability::Evaluated;
+    AuditReport {
+        vulnerabilities: vec![unbounded, unevaluated, evaluated, pypi_finding("GHSA-1")],
+        summary: AuditSummary {
+            audited: 4,
+            vulnerable: 4,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn weak_matches_are_flagged_and_counted() {
+    let text = render_table(&weak_match_report(), "pixi.lock", &TableLayout::default());
+    assert_eq!(
+        text,
+        " ✔ Audited pixi.lock                 [4 packages audited]
+ ✔ Scanned for vulnerabilities       [4 vulnerability matches]
+   ├── by severity: 0 critical, 1 high, 1 medium, 1 low, 1 unknown
+   └── by status:   2 fixed, 2 not-fixed, 0 ignored, 1 unbounded, 1 unevaluated
+
+ Name             Version  Fixed in  Vulnerability                Severity  Environments
+ (conda) libpq    3.1.0              CVE-2022-25852 (unbounded)   High      default, prod
+ (conda) libpq    3.1.0    3.1.4     CVE-2026-0009 (unevaluated)  Medium    default, prod
+ (conda) pnpm     3.1.0    3.1.4     CVE-2026-50014               Low       default, prod
+ (pypi) requests  2.32.0             GHSA-1                       Unknown   default
+
+ ✖ 4 vulnerabilities in 3 package(s) (4 audited, 0 ignored, 0 unchecked)
+"
+    );
+}
+
+#[test]
+fn match_column_replaces_the_marker_and_sorts_by_confidence() {
+    let layout = TableLayout {
+        fields: vec![Field::Vulnerability, Field::Match],
+        sort_by: Field::Match,
+    };
+    let text = render_table(&weak_match_report(), "pixi.lock", &layout);
+    let table: Vec<&str> = text
+        .lines()
+        .skip_while(|line| !line.contains("Vulnerability"))
+        .take(5)
+        .collect();
+    assert_eq!(
+        table,
+        [
+            " Vulnerability   Match",
+            " CVE-2026-50014  evaluated",
+            " CVE-2026-0009   unevaluated",
+            " CVE-2022-25852  unbounded",
+            " GHSA-1",
+        ]
+    );
 }
