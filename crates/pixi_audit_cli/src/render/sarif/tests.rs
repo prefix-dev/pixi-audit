@@ -1,7 +1,7 @@
 use pixi_audit::{
     AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
-    MatchApplicability, PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore,
-    SeverityBand,
+    MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageName,
+    RansomwareCampaignUse, RiskScore, SeverityBand,
 };
 
 use super::{LockfileSource, SarifLog};
@@ -127,6 +127,64 @@ fn one_rule_per_vulnerability_and_package_with_github_properties() {
     let text = rule["help"]["text"].as_str().unwrap();
     assert!(text.contains("Fix: fixed in 3.1.1"), "{text}");
     assert!(text.contains(&format!("Lock file: {uri}")), "{text}");
+    // No basilisk match metadata: the rows are there but empty.
+    assert!(text.contains("\nMatch: \nMatched identity: \n"), "{text}");
+}
+
+#[test]
+fn weak_matches_and_identities_are_reported() {
+    let mut unbounded = finding("CVE-2022-25852", SeverityBand::High);
+    unbounded.fixed_versions = vec![];
+    unbounded.applicability = MatchApplicability::VersionUnbounded;
+    unbounded.matched_identity = Some(MatchedIdentity {
+        kind: MatchedIdentityKind::Cpe,
+        value: "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*".to_string(),
+    });
+    let mut evaluated = finding("CVE-2026-0001", SeverityBand::Critical);
+    evaluated.applicability = MatchApplicability::Evaluated;
+    evaluated.matched_identity = Some(MatchedIdentity {
+        kind: MatchedIdentityKind::Purl,
+        value: "pkg:npm/openssl".to_string(),
+    });
+    let report = AuditReport {
+        vulnerabilities: vec![unbounded, evaluated],
+        summary: AuditSummary {
+            audited: 1,
+            vulnerable: 2,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (log, _) = log(&report);
+    let run = &log["runs"][0];
+
+    let unbounded = &run["tool"]["driver"]["rules"][0]["help"]["text"];
+    let unbounded = unbounded.as_str().unwrap();
+    assert!(unbounded.contains("\nMatch: unbounded\n"), "{unbounded}");
+    assert!(
+        unbounded.contains("\nMatched identity: cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*\n"),
+        "{unbounded}"
+    );
+    assert_eq!(
+        run["results"][0]["message"]["text"],
+        "CVE-2022-25852: high vulnerability in conda-forge package openssl 3.1.0; \
+         no known fixed version; match: version unbounded"
+    );
+
+    let evaluated = run["tool"]["driver"]["rules"][1]["help"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(evaluated.contains("\nMatch: evaluated\n"), "{evaluated}");
+    assert!(
+        evaluated.contains("\nMatched identity: pkg:npm/openssl\n"),
+        "{evaluated}"
+    );
+    assert!(
+        !run["results"][1]["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("match:")
+    );
 }
 
 #[test]

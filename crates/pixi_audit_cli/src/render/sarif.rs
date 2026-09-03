@@ -10,7 +10,8 @@ use std::path::Path;
 use pixi_audit::{AuditReport, Finding, IgnoreReason, PackageEcosystem, SeverityBand};
 use serde::Serialize;
 
-use super::{epss_label, fix_summary, kev_label, risk_label};
+use super::table::field::match_label;
+use super::{epss_label, fix_summary, kev_label, match_note, risk_label};
 
 /// The lock file a report was produced from: the path written into the
 /// log, and the contents used to find each package's line.
@@ -203,6 +204,20 @@ fn rule(finding: &Finding, lockfile: &LockfileSource<'_>) -> Rule {
         ("Version", finding.version.clone()),
         ("Ecosystem", finding.ecosystem.to_string()),
         ("Fix", fix_summary(finding)),
+        (
+            "Match",
+            match_label(finding.applicability)
+                .map(str::to_string)
+                .unwrap_or_default(),
+        ),
+        (
+            "Matched identity",
+            finding
+                .matched_identity
+                .as_ref()
+                .map(|identity| identity.value.clone())
+                .unwrap_or_default(),
+        ),
         ("Environments", finding.environments.join(", ")),
         ("Lock file", artifact_uri(lockfile.path)),
         ("Link", link),
@@ -311,13 +326,16 @@ fn result(finding: &Finding, uri: &str, lockfile_contents: &str) -> SarifResult 
         level: level(finding.severity),
         message: Message {
             text: format!(
-                "{}: {} vulnerability in {} package {} {}; {}",
+                "{}: {} vulnerability in {} package {} {}; {}{}",
                 finding.id,
                 finding.severity.name(),
                 finding.ecosystem,
                 finding.package,
                 finding.version,
-                fix_summary(finding)
+                fix_summary(finding),
+                match_note(finding)
+                    .map(|note| format!("; {note}"))
+                    .unwrap_or_default()
             ),
         },
         locations: vec![Location {
