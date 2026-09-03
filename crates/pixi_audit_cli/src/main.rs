@@ -128,6 +128,7 @@ async fn main() -> ExitCode {
         };
     }
     let format = if cli.json { Format::Json } else { cli.format };
+    let fix_attempted = cli.fix;
     let layout = TableLayout {
         fields: cli.fields.clone(),
         sort_by: cli.sort_by,
@@ -136,6 +137,7 @@ async fn main() -> ExitCode {
         report,
         threshold,
         lockfile,
+        manifest_available,
     } = match run(cli).await {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -167,13 +169,22 @@ async fn main() -> ExitCode {
         }
         Format::Grouped => print!(
             "{}",
-            render::render_human(&report, render::RenderOptions::detect_stdout())
+            render::render_human(
+                &report,
+                render::RenderOptions {
+                    fix_attempted,
+                    manifest_available,
+                    ..render::RenderOptions::detect_stdout()
+                },
+            )
         ),
         Format::Table => render::table::write_table(
             &report,
             &lockfile.display().to_string(),
             OutputStyle::detect_stdout(),
             &layout,
+            fix_attempted,
+            manifest_available,
             std::io::stdout().lock(),
         )
         .expect("write report to stdout"),
@@ -242,6 +253,7 @@ struct RunOutcome {
     report: AuditReport,
     threshold: Option<SeverityBand>,
     lockfile: PathBuf,
+    manifest_available: bool,
 }
 
 /// Everything needed to audit the lock file, kept together so a `--fix`
@@ -344,6 +356,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     Ok(RunOutcome {
         report,
         threshold,
+        manifest_available: targets.manifest.is_some(),
         lockfile: targets.lockfile,
     })
 }

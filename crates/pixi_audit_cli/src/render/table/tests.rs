@@ -4,7 +4,7 @@ use pixi_audit::{
     SeverityBand, UncheckedPackage, UpstreamFix, UpstreamOrigin,
 };
 
-use super::{Field, TableLayout, render_table};
+use super::{Field, TableLayout, render_table, render_table_after_fix};
 
 fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
     Finding {
@@ -125,8 +125,16 @@ fn threat_columns_show_scores_and_flag_kev_rows() {
     assert_eq!(
         rows(&text, &["CVE-2026-000", "GHSA-1"]),
         [
-            vec!["CVE-2026-0001", "50.0%", "(90th)", "94.5", "(kev)", "kev"],
-            vec!["GHSA-1", "<", "0.1%", "(11th)", "<", "0.1"],
+            vec![
+                "CVE-2026-0001",
+                "90th",
+                "·",
+                "50.0%",
+                "94.5",
+                "(kev)",
+                "kev"
+            ],
+            vec!["GHSA-1", "11th", "·", "<", "0.1%", "<", "0.1"],
             vec!["CVE-2026-0002"],
         ]
     );
@@ -242,6 +250,9 @@ fn clean_report() {
    └── by status:   0 fixed, 0 not-fixed, 0 ignored
 
  ✔ No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)
+
+ Next steps
+   • None. No vulnerabilities were found in checked packages.
 "
     );
 }
@@ -272,6 +283,20 @@ fn default_layout_sorts_by_severity_and_marks_kind_like_pixi_lock() {
  (conda)  libxml2  3.1.0    3.1.4     CVE-2026-0003  Low                   default, prod  until a fix is released
 
  ✖ 3 vulnerabilities in 2 package(s) (10 audited, 1 ignored, 1 unchecked)
+
+ Assessment
+   • Highest finding risk score:         n/a
+   • CISA KEV matches:                   n/a — CISA KEV catalog not checked
+   • Critical/high findings:             1
+   • Fix available in audited ecosystem: 1 of 3 vulnerabilities across 1 audited package
+   • Fix only upstream:                  1 vulnerability
+   • No known fix:                       1 vulnerability
+
+ Next steps
+   • Re-run this audit with `--fix` to ask pixi to update 1 package name. Fixed releases in the audited ecosystem are available for 1 vulnerability.
+   • 1 vulnerability has a fix only upstream; `--fix` cannot install it. Wait for an ecosystem build or change dependency source.
+   • 1 vulnerability has no known fix. Remove, replace, or mitigate the affected dependencies; use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.
+   • Review 1 unchecked package; its source is not covered by the configured vulnerability databases.
 "
     );
 }
@@ -333,10 +358,17 @@ fn colored_output_uses_single_letter_kind_markers() {
         hyperlinks: false,
     };
     let mut out = Vec::new();
-    build(&full_report(), "pixi.lock", style, &TableLayout::default())
-        .render(None)
-        .write_ansi(&mut out)
-        .unwrap();
+    build(
+        &full_report(),
+        "pixi.lock",
+        style,
+        &TableLayout::default(),
+        false,
+        true,
+    )
+    .render(None)
+    .write_ansi(&mut out)
+    .unwrap();
     let text = String::from_utf8(out).unwrap();
     // The marker fills its own padded column before the name.
     assert!(
@@ -425,8 +457,29 @@ fn weak_matches_are_flagged_and_counted() {
  (pypi)   requests  2.32.0             GHSA-1                       Unknown               default
 
  ✖ 4 vulnerabilities in 3 package(s) (4 audited, 0 ignored, 0 unchecked)
+
+ Assessment
+   • Highest finding risk score:         n/a
+   • CISA KEV matches:                   n/a — CISA KEV catalog not checked
+   • Critical/high findings:             1
+   • Fix available in audited ecosystem: 2 of 4 vulnerabilities across 2 audited packages
+   • Fix only upstream:                  0 vulnerabilities
+   • No known fix:                       2 vulnerabilities
+
+ Next steps
+   • Re-run this audit with `--fix` to ask pixi to update 2 package names. Fixed releases in the audited ecosystem are available for 2 vulnerabilities.
+   • 2 vulnerabilities have no known fix. Remove, replace, or mitigate the affected dependencies; use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.
 "
     );
+}
+
+#[test]
+fn completed_fix_does_not_recommend_another_blind_attempt() {
+    let text = render_table_after_fix(&full_report(), "pixi.lock", &TableLayout::default());
+    assert!(text.contains(
+        "`--fix` completed, but 1 vulnerability with a fix in the audited ecosystem remains. Review dependency constraints and pixi's solver output."
+    ));
+    assert!(!text.contains("Re-run this audit with `--fix`"));
 }
 
 #[test]

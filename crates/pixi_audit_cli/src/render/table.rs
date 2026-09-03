@@ -7,6 +7,8 @@ use iocraft::prelude::*;
 use pixi_audit::{AuditReport, Finding, MatchApplicability, SeverityBand, UncheckedPackage};
 use supports_hyperlinks::Stream;
 
+use super::Guidance;
+
 pub mod field;
 mod grid;
 
@@ -61,9 +63,19 @@ pub fn write_table(
     lockfile: &str,
     style: OutputStyle,
     layout: &TableLayout,
+    fix_attempted: bool,
+    manifest_available: bool,
     out: impl Write,
 ) -> io::Result<()> {
-    let canvas = build(report, lockfile, style, layout).render(None);
+    let canvas = build(
+        report,
+        lockfile,
+        style,
+        layout,
+        fix_attempted,
+        manifest_available,
+    )
+    .render(None);
     if style.color {
         canvas.write_ansi(out)
     } else {
@@ -74,7 +86,24 @@ pub fn write_table(
 /// Renders the report as unstyled text at natural width, for tests.
 #[cfg(test)]
 pub fn render_table(report: &AuditReport, lockfile: &str, layout: &TableLayout) -> String {
-    build(report, lockfile, OutputStyle::default(), layout).to_string()
+    build(
+        report,
+        lockfile,
+        OutputStyle::default(),
+        layout,
+        false,
+        true,
+    )
+    .to_string()
+}
+
+#[cfg(test)]
+pub fn render_table_after_fix(
+    report: &AuditReport,
+    lockfile: &str,
+    layout: &TableLayout,
+) -> String {
+    build(report, lockfile, OutputStyle::default(), layout, true, true).to_string()
 }
 
 fn build(
@@ -82,13 +111,20 @@ fn build(
     lockfile: &str,
     style: OutputStyle,
     layout: &TableLayout,
+    fix_attempted: bool,
+    manifest_available: bool,
 ) -> Element<'static, View> {
+    let guidance = Guidance::for_report(report);
+    let assessment = guidance.assessment_lines();
+    let next_steps = guidance.next_step_lines(fix_attempted, manifest_available);
     let sections: Vec<AnyElement<'static>> = [
         unchecked_table(&report.unchecked, style).map(|e| e.into_any()),
         Some(status_block(report, lockfile).into_any()),
         findings_table(&report.vulnerabilities, style, layout).map(|e| e.into_any()),
         ignored_table(&report.ignored, style, layout).map(|e| e.into_any()),
         Some(summary_line(report).into_any()),
+        guidance_section("Assessment", assessment).map(|e| e.into_any()),
+        guidance_section("Next steps", next_steps).map(|e| e.into_any()),
     ]
     .into_iter()
     .flatten()
@@ -324,6 +360,22 @@ fn section(title: String, body: Element<'static, View>) -> Element<'static, View
             #(Some(body))
         }
     }
+}
+
+fn guidance_section(title: &'static str, lines: Vec<String>) -> Option<Element<'static, View>> {
+    if lines.is_empty() {
+        return None;
+    }
+    let lines: Vec<Element<'static, Text>> = lines
+        .into_iter()
+        .map(|line| element! { Text(content: format!("  • {line}")) })
+        .collect();
+    Some(element! {
+        View(flex_direction: FlexDirection::Column) {
+            Text(content: title, weight: Weight::Bold)
+            #(lines)
+        }
+    })
 }
 
 fn summary_line(report: &AuditReport) -> Element<'static, View> {

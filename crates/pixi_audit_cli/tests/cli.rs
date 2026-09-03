@@ -158,7 +158,7 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     assert_eq!(
         cells,
         [
-            "(conda)", "openssl", "3.1.0", "3.1.1", "BSLK-1", "Critical", "50.0%", "(90th)",
+            "(conda)", "openssl", "3.1.0", "3.1.1", "BSLK-1", "Critical", "90th", "·", "50.0%",
             "98.7", "(kev)", "default,", "prod"
         ],
         "stdout: {stdout}"
@@ -168,6 +168,19 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     // Piped output carries no escape codes.
     assert!(!stdout.contains('\x1b'), "stdout: {stdout}");
     assert!(stdout.contains("Unchecked (1)"));
+    assert!(stdout.contains("Assessment\n"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(
+            "Fix available in audited ecosystem: 1 of 1 vulnerability across 1 audited package"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Fixed releases in the audited ecosystem are available for 1 vulnerability across 1 audited package, but `--fix` requires a `pixi.toml` or `pyproject.toml` next to the audited lock file."
+        ),
+        "stdout: {stdout}"
+    );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("error: audit found vulnerabilities"),
