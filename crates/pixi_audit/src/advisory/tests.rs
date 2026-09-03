@@ -335,7 +335,7 @@ fn fix_present_in_own_ecosystem_is_not_repeated_as_upstream() {
 }
 
 #[test]
-fn advisory_reference_wins_over_patch_and_issue_links() {
+fn basilisk_advisory_url_uses_the_explorer_instead_of_source_references() {
     let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
         "id": "CVE-2026-50219",
         "references": [
@@ -347,8 +347,8 @@ fn advisory_reference_wins_over_patch_and_issue_links() {
     .unwrap();
 
     assert_eq!(
-        advisory_url(&doc).as_deref(),
-        Some("https://example.com/advisory")
+        basilisk_advisory_url(&doc),
+        "https://basilisk.prefix.dev/advisories/CVE-2026-50219"
     );
 }
 

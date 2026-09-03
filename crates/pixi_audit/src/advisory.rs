@@ -308,16 +308,9 @@ fn reference_url<'a>(doc: &'a OsvVulnerability, kind: &str) -> Option<&'a str> {
         .map(|reference| reference.url.as_str())
 }
 
-/// The advisory link for a Basilisk document: the `ADVISORY` reference,
-/// else the first reference of any kind.
-pub(crate) fn advisory_url(doc: &OsvVulnerability) -> Option<String> {
-    reference_url(doc, "ADVISORY")
-        .or_else(|| {
-            doc.references
-                .first()
-                .map(|reference| reference.url.as_str())
-        })
-        .map(str::to_string)
+/// The Basilisk explorer page for this advisory.
+pub(crate) fn basilisk_advisory_url(doc: &OsvVulnerability) -> String {
+    format!("https://basilisk.prefix.dev/advisories/{}", doc.id)
 }
 
 /// The advisory link for an OSV.dev document: the `ADVISORY` reference,
