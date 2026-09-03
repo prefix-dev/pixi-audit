@@ -146,7 +146,7 @@ impl Field {
                 let cell = Cell::new(finding.id.clone()).hyperlink(url);
                 match weak_match_label(finding.applicability) {
                     Some(label) if !context.match_column => {
-                        cell.then(Span::new(format!(" ({label})")).color(Color::DarkGrey))
+                        cell.then(Span::new(format!(" ({label})")).weight(Weight::Light))
                     }
                     _ => cell,
                 }
@@ -169,8 +169,14 @@ impl Field {
                 None => Cell::empty(),
             },
             Field::Match => match match_label(finding.applicability) {
-                Some(label) => Cell::new(label)
-                    .color(weak_match_label(finding.applicability).map(|_| Color::DarkGrey)),
+                Some(label) => {
+                    let cell = Cell::new(label);
+                    if weak_match_label(finding.applicability).is_some() {
+                        cell.weight(Weight::Light)
+                    } else {
+                        cell
+                    }
+                }
                 None => Cell::empty(),
             },
         }
