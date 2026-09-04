@@ -60,7 +60,7 @@ pub async fn apply(
 /// Distinct names of packages that have a fixed release in their own
 /// ecosystem among the report's non-ignored findings, in first-appearance
 /// order. Upstream-only fixes cannot be installed, so they do not count.
-fn fixable_package_names(report: &AuditReport) -> Vec<String> {
+pub(crate) fn fixable_package_names(report: &AuditReport) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for finding in &report.vulnerabilities {
         if finding.fixed_versions.is_empty() {

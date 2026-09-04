@@ -11,7 +11,7 @@ use pixi_audit::{AuditReport, Finding, IgnoreReason, PackageEcosystem, SeverityB
 use serde::Serialize;
 
 use super::table::field::match_label;
-use super::{epss_label, fix_summary, kev_label, match_note, risk_label};
+use super::{epss_probability_first_label, fix_summary, kev_label, match_note, risk_label};
 
 /// The lock file a report was produced from: the path written into the
 /// log, and the contents used to find each package's line.
@@ -192,7 +192,10 @@ fn rule(finding: &Finding, lockfile: &LockfileSource<'_>) -> Rule {
                 .map(|score| format!("{score:.1}"))
                 .unwrap_or_default(),
         ),
-        ("EPSS", epss_label(&finding.epss).unwrap_or_default()),
+        (
+            "EPSS",
+            epss_probability_first_label(&finding.epss).unwrap_or_default(),
+        ),
         ("Risk", risk_label(finding.risk).unwrap_or_default()),
         (
             "KEV",

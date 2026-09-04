@@ -7,6 +7,10 @@ use iocraft::prelude::*;
 use pixi_audit::{AuditReport, Finding, MatchApplicability, SeverityBand, UncheckedPackage};
 use supports_hyperlinks::Stream;
 
+use super::{
+    EXPLAIN_HINT, EXPLANATION_TERM_PALETTE_INDEX, ExplanationSection, Guidance, GuidanceOptions,
+};
+
 pub mod field;
 mod grid;
 
@@ -61,9 +65,10 @@ pub fn write_table(
     lockfile: &str,
     style: OutputStyle,
     layout: &TableLayout,
+    options: GuidanceOptions,
     out: impl Write,
 ) -> io::Result<()> {
-    let canvas = build(report, lockfile, style, layout).render(None);
+    let canvas = build(report, lockfile, style, layout, options).render(None);
     if style.color {
         canvas.write_ansi(out)
     } else {
@@ -74,7 +79,52 @@ pub fn write_table(
 /// Renders the report as unstyled text at natural width, for tests.
 #[cfg(test)]
 pub fn render_table(report: &AuditReport, lockfile: &str, layout: &TableLayout) -> String {
-    build(report, lockfile, OutputStyle::default(), layout).to_string()
+    build(
+        report,
+        lockfile,
+        OutputStyle::default(),
+        layout,
+        GuidanceOptions::default(),
+    )
+    .to_string()
+}
+
+#[cfg(test)]
+pub fn render_table_explained(
+    report: &AuditReport,
+    lockfile: &str,
+    layout: &TableLayout,
+) -> String {
+    build(
+        report,
+        lockfile,
+        OutputStyle::default(),
+        layout,
+        GuidanceOptions {
+            explain: true,
+            ..Default::default()
+        },
+    )
+    .to_string()
+}
+
+#[cfg(test)]
+pub fn render_table_after_fix(
+    report: &AuditReport,
+    lockfile: &str,
+    layout: &TableLayout,
+) -> String {
+    build(
+        report,
+        lockfile,
+        OutputStyle::default(),
+        layout,
+        GuidanceOptions {
+            fix_attempted: true,
+            ..Default::default()
+        },
+    )
+    .to_string()
 }
 
 fn build(
@@ -82,13 +132,27 @@ fn build(
     lockfile: &str,
     style: OutputStyle,
     layout: &TableLayout,
+    options: GuidanceOptions,
 ) -> Element<'static, View> {
+    let guidance = Guidance::for_report(report);
+    let assessment = guidance.assessment_lines();
+    let next_steps = guidance.next_step_lines(options.fix_attempted, options.manifest_available);
+    let explanation = options
+        .explain
+        .then(|| guidance.explanation_sections(report));
     let sections: Vec<AnyElement<'static>> = [
         unchecked_table(&report.unchecked, style).map(|e| e.into_any()),
         Some(status_block(report, lockfile).into_any()),
         findings_table(&report.vulnerabilities, style, layout).map(|e| e.into_any()),
         ignored_table(&report.ignored, style, layout).map(|e| e.into_any()),
         Some(summary_line(report).into_any()),
+        guidance_section("Assessment", assessment).map(|e| e.into_any()),
+        guidance_section("Next steps", next_steps).map(|e| e.into_any()),
+        (!options.explain)
+            .then(|| element! { Text(content: EXPLAIN_HINT, weight: Weight::Light) }.into_any()),
+        explanation
+            .and_then(explanation_section)
+            .map(|e| e.into_any()),
     ]
     .into_iter()
     .flatten()
@@ -324,6 +388,64 @@ fn section(title: String, body: Element<'static, View>) -> Element<'static, View
             #(Some(body))
         }
     }
+}
+
+fn guidance_section(title: &'static str, lines: Vec<String>) -> Option<Element<'static, View>> {
+    if lines.is_empty() {
+        return None;
+    }
+    let lines: Vec<Element<'static, Text>> = lines
+        .into_iter()
+        .map(|line| element! { Text(content: format!("  • {line}")) })
+        .collect();
+    Some(element! {
+        View(flex_direction: FlexDirection::Column) {
+            Text(content: title, weight: Weight::Bold)
+            #(lines)
+        }
+    })
+}
+
+fn explanation_section(sections: Vec<ExplanationSection>) -> Option<Element<'static, View>> {
+    if sections.is_empty() {
+        return None;
+    }
+    let sections: Vec<Element<'static, View>> = sections
+        .into_iter()
+        .map(|section| {
+            let width = section.label_width();
+            let lines: Vec<Element<'static, View>> = section
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    let label = format!(
+                        "    {:indent$}{:<width$}",
+                        "",
+                        entry.label,
+                        indent = entry.indent
+                    );
+                    element! {
+                        View {
+                            Text(content: label, color: Color::AnsiValue(EXPLANATION_TERM_PALETTE_INDEX), weight: Weight::Bold)
+                            Text(content: entry.text)
+                        }
+                    }
+                })
+                .collect();
+            element! {
+                View(flex_direction: FlexDirection::Column) {
+                    Text(content: format!("  {}", section.title), weight: Weight::Bold)
+                    #(lines)
+                }
+            }
+        })
+        .collect();
+    Some(element! {
+        View(flex_direction: FlexDirection::Column, gap: 1) {
+            Text(content: "How this report works", weight: Weight::Bold)
+            #(sections)
+        }
+    })
 }
 
 fn summary_line(report: &AuditReport) -> Element<'static, View> {

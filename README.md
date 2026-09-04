@@ -108,13 +108,15 @@ Accepted values are `low`, `medium`, `high`, and `critical`. Severity comes from
 
 Each finding carries the same threat data [grype](https://github.com/anchore/grype) reports:
 
-- **EPSS**: the probability that the CVE is exploited within 30 days, with its percentile rank among all scored CVEs.
+- **EPSS**: the percentile rank among scored CVEs followed by the probability that the CVE is exploited within 30 days.
 - **KEV**: whether the CVE is listed in CISA's Known Exploited Vulnerabilities catalog, and whether it is known to be used in ransomware campaigns.
-- **Risk**: a 0-100 score computed as `min(threat × severity × boost, 1) × 100`. Threat is 1.0 for a KEV-listed CVE and the EPSS probability otherwise. Severity averages the band's midpoint with the mean CVSS base score. The boost is 1.05 for KEV entries and 1.1 for known ransomware use.
+- **Risk**: a 0-100 finding prioritization score computed as `min(threat × severity × boost, 1) × 100`. Threat is 1.0 for a KEV-listed finding and otherwise uses the highest EPSS probability among its CVEs. Severity uses an internal band weight, averaged with the mean CVSS base score when available. The boost is 1.05 for KEV entries and 1.1 for known ransomware use.
 
-Findings are ordered by risk, and the table shows EPSS and risk columns by default. A finding in the KEV catalog reads `81.4 (kev)` in the risk column, or `(kev, ransomware)`. Sort by another column with `--sort-by`; `risk`, `severity`, `epss`, and `kev` sort highest first and break ties the way grype does. Threat data never changes the exit code; use `--severity` for that.
+Risk orders individual findings from highest to lowest priority. The table shows EPSS with percentile first and risk columns by default. A finding in the KEV catalog reads `81.4 (kev)` in the risk column, or `(kev, ransomware)`. Sort by another column with `--sort-by`. The `risk`, `severity`, `epss`, and `kev` fields sort highest first and break ties the way grype does. Threat data never changes the exit code. Use `--severity` for that.
 
 If a feed cannot be reached, the audit still completes. Findings are reported without that data and a warning goes to stderr.
+
+The assessment's **CISA KEV matches** count is the number of distinct CVEs among active findings with confirmed exploitation in the wild. Repeated occurrences of the same CVE count once. A zero is shown only after the catalog loaded successfully. Otherwise the count is `n/a`.
 
 ### Update vulnerable dependencies
 
@@ -125,6 +127,8 @@ pixi audit --fix
 ```
 
 Existing upper bounds are preserved. Transitive dependencies and Git, path, or URL dependencies without a version are left alone. `pixi update` only runs when at least one finding has a fixed release in its own ecosystem. Fixes that exist only upstream are reported but cannot be installed.
+
+When vulnerabilities are found, human-readable reports include an assessment of the highest finding prioritization score, CISA KEV matches, critical or high findings, and fix availability. Every human-readable report ends with a next-steps section tailored to its results. It prioritizes KEV matches, identifies candidate updates, distinguishes upstream-only fixes from findings with no known fix, and calls out unchecked packages. After `--fix`, it reports remaining work without recommending another blind attempt.
 
 ### Choose an output format
 
@@ -142,12 +146,29 @@ The default report puts packages from unsupported sources first, then shows a sh
    └── by status:   2 fixed, 1 not-fixed, 0 ignored
 
     Name      Version  Fixed in  Vulnerability        Severity  EPSS         Risk  Environments
- C  openssl   3.1.0    3.1.1     CVE-2023-0464        Critical  3.7% (88th)  3.5   default, prod
- C  openssl   3.1.0              CVE-2023-2975        Medium    0.6% (47th)  0.3   default, prod
- P  requests  2.32.0   2.32.4    GHSA-9hjg-9r4m-mvj7  Medium    0.9% (57th)  0.5   default
+ C  openssl   3.1.0    3.1.1     CVE-2023-0464        Critical  88th · 3.7%  3.5   default, prod
+ C  openssl   3.1.0              CVE-2023-2975        Medium    47th · 0.6%  0.3   default, prod
+ P  requests  2.32.0   2.32.4    GHSA-9hjg-9r4m-mvj7  Medium    57th · 0.9%  0.5   default
+
+ ✖ 3 vulnerabilities in 2 package(s) (312 audited, 0 ignored, 1 unchecked)
+
+ Assessment
+   • Highest finding prioritization score:  3.5 / 100
+   • CISA KEV matches:                      0 CVEs
+   • Critical/high findings:                1
+   • Fix available in audited ecosystem:    2 of 3 vulnerabilities across 2 audited packages
+   • Fix only upstream:                     0 vulnerabilities
+   • No known fix:                          1 vulnerability
+
+ Next steps
+   • Re-run this audit with `--fix` to ask pixi to update 2 package names. Fixed releases in the audited ecosystem are available for 2 vulnerabilities.
+   • 1 vulnerability has no known fix. Remove, replace, or mitigate the affected dependencies. Use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.
+   • Review 1 unchecked package. Its source is not covered by the configured vulnerability databases.
+
+ Add `--explain` for scoring and report definitions.
 ```
 
-As in `pixi lock`, a green `C` marks a conda package and a blue `P` a PyPI package; without colors the marker reads `(conda)` or `(pypi)`. The marker has its own column, so names stay aligned, and rows that repeat the package above are dimmed. Rows are sorted by risk. `--sort-by` picks another column, and `--fields` picks which columns to show and in what order, as in `pixi list`:
+As in `pixi lock`, a green `C` marks a conda package and a blue `P` a PyPI package. Without colors the marker reads `(conda)` or `(pypi)`. The marker has its own column, so names stay aligned, and rows that repeat the package above are dimmed. Rows are sorted by risk. `--sort-by` picks another column, and `--fields` picks which columns to show and in what order, as in `pixi list`:
 
 ```console
 pixi audit --sort-by name --fields name,version,vulnerability,fixed-in,url
@@ -160,6 +181,15 @@ A fix in another ecosystem is only reported when it belongs to the package Basil
 Not every match is equally certain. Basilisk records how far it got as the finding's *applicability*: `evaluated` means the affected versions were checked against the package, `unevaluated` means they were not, and `version-unbounded` means the advisory names the product without version bounds, so every version matches. The default table marks the last two with a dim `(unevaluated)` or `(unbounded)` after the advisory ID and counts them at the end of the `by status` line. The `match` field shows the applicability as a column of its own, and `--sort-by match` puts the most confident matches first. The grouped format, GitHub annotations, and SARIF result messages add a `match: version unbounded` or `match: unevaluated` note, and each SARIF rule lists the applicability and matched identity in its help text. In JSON each finding carries `applicability` (`unspecified` for PyPI findings and documents without Basilisk metadata) and `matched_identity`, an object with `kind` (`purl` or `cpe`) and `value`, or `null` when Basilisk recorded none.
 
 On a terminal the table is colored and advisory IDs link to their advisory pages. When stdout is piped or `NO_COLOR` is set, the same table is written as plain text at full width, so nothing is clipped in logs. Set `CLICOLOR_FORCE=1` to keep colors in CI logs that render them.
+
+Add `--explain` to the table or grouped format for a context-aware explanation of the terms present in that report:
+
+```console
+pixi audit --explain
+pixi audit --format grouped --explain
+```
+
+Compact human-readable reports include a short `--explain` hint. With the option enabled, a context-aware **How this report works** section follows **Next steps**. It presents short, aligned definitions under Counts, Threat signals, Prioritization, Fixes, and Coverage. Terms use a separate color from their definitions, and Formula is nested under Risk. `--explain` is rejected with JSON and SARIF so machine-readable output stays unchanged.
 
 `--format grouped` prints findings grouped per package instead, and `--format json` (or `--json`) writes the report as pretty-printed JSON:
 

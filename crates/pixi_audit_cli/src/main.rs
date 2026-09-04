@@ -110,6 +110,10 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Table)]
     format: Format,
 
+    /// Explain the terms and scoring used in human-readable reports
+    #[arg(long)]
+    explain: bool,
+
     /// Column to sort table rows by. Risk, severity, EPSS, and KEV sort
     /// highest first; other columns ascend. Only affects `--format table`.
     #[arg(long, value_enum, default_value = "risk", value_name = "FIELD")]
@@ -154,6 +158,14 @@ async fn main() -> ExitCode {
         };
     }
     let format = if cli.json { Format::Json } else { cli.format };
+    if cli.explain && matches!(format, Format::Json | Format::Sarif) {
+        eprintln!(
+            "error: `--explain` is available only with `--format table` or `--format grouped`"
+        );
+        return ExitCode::from(EXIT_ERROR);
+    }
+    let explain = cli.explain;
+    let fix_attempted = cli.fix;
     let layout = TableLayout {
         fields: cli.fields.clone(),
         sort_by: cli.sort_by,
@@ -162,6 +174,7 @@ async fn main() -> ExitCode {
         report,
         threshold,
         lockfile,
+        manifest_available,
     } = match run(cli).await {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -193,13 +206,26 @@ async fn main() -> ExitCode {
         }
         Format::Grouped => print!(
             "{}",
-            render::render_human(&report, render::RenderOptions::detect_stdout())
+            render::render_human(
+                &report,
+                render::RenderOptions {
+                    fix_attempted,
+                    explain,
+                    manifest_available,
+                    ..render::RenderOptions::detect_stdout()
+                },
+            )
         ),
         Format::Table => render::table::write_table(
             &report,
             &lockfile.display().to_string(),
             OutputStyle::detect_stdout(),
             &layout,
+            render::GuidanceOptions {
+                fix_attempted,
+                manifest_available,
+                explain,
+            },
             std::io::stdout().lock(),
         )
         .expect("write report to stdout"),
@@ -268,6 +294,7 @@ struct RunOutcome {
     report: AuditReport,
     threshold: Option<SeverityBand>,
     lockfile: PathBuf,
+    manifest_available: bool,
 }
 
 /// Everything needed to audit the lock file, kept together so a `--fix`
@@ -395,6 +422,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     Ok(RunOutcome {
         report,
         threshold,
+        manifest_available: targets.manifest.is_some(),
         lockfile: targets.lockfile,
     })
 }

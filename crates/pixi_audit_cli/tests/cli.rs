@@ -158,7 +158,7 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     assert_eq!(
         cells,
         [
-            "(conda)", "openssl", "3.1.0", "3.1.1", "BSLK-1", "Critical", "50.0%", "(90th)",
+            "(conda)", "openssl", "3.1.0", "3.1.1", "BSLK-1", "Critical", "90th", "·", "50.0%",
             "98.7", "(kev)", "default,", "prod"
         ],
         "stdout: {stdout}"
@@ -168,6 +168,22 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
     // Piped output carries no escape codes.
     assert!(!stdout.contains('\x1b'), "stdout: {stdout}");
     assert!(stdout.contains("Unchecked (1)"));
+    assert!(stdout.contains("Assessment\n"), "stdout: {stdout}");
+    assert!(
+        stdout.lines().any(|line| {
+            line.contains("Fix available in audited ecosystem:")
+                && line.ends_with("1 of 1 vulnerability across 1 audited package")
+        }),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Fixed releases in the audited ecosystem are available for 1 vulnerability across 1 audited package, but `--fix` requires a `pixi.toml` or `pyproject.toml` next to the audited lock file."
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("Add `--explain` for scoring and report definitions."));
+    assert!(!stdout.contains("How this report works"));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("Auditing "), "stderr: {stderr}");
     assert!(!stderr.contains('\x1b'), "stderr: {stderr}");
@@ -175,6 +191,69 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
         stderr.contains("error: audit found vulnerabilities"),
         "stderr: {stderr}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_describes_the_human_report_after_next_steps() {
+    let base = spawn_mock(true).await;
+    let output = run_cli(base, vec![lockfile(), "--explain".to_string()]).await;
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let actions = stdout.find("Next steps").unwrap();
+    let explanation = stdout.find("How this report works").unwrap();
+    assert!(actions < explanation, "stdout: {stdout}");
+    assert!(!stdout.contains("Add `--explain` for scoring and report definitions."));
+    for heading in [
+        "Counts",
+        "Threat signals",
+        "Prioritization",
+        "Fixes",
+        "Coverage",
+    ] {
+        assert!(
+            stdout.contains(heading),
+            "missing {heading:?} in stdout:\n{stdout}"
+        );
+    }
+    for expected in [
+        "A 0–100 score for ordering individual findings.",
+        "highest EPSS probability",
+        "`kev` alone means CISA does not mark that use as Known.",
+        "CISA confirms exploitation in the wild.",
+        "Estimated chance of exploitation within 30 days.",
+        "The package source lacks vulnerability database coverage.",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in stdout:\n{stdout}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_rejects_machine_readable_formats() {
+    let base = spawn_mock(true).await;
+    for args in [
+        vec![lockfile(), "--json".to_string(), "--explain".to_string()],
+        vec![
+            lockfile(),
+            "--format".to_string(),
+            "sarif".to_string(),
+            "--explain".to_string(),
+        ],
+    ] {
+        let output = run_cli(base.clone(), args).await;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "`--explain` is available only with `--format table` or `--format grouped`"
+            ),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

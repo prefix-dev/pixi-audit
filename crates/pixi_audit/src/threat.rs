@@ -64,10 +64,11 @@ pub struct KnownExploited {
 /// to be exploited with how severe it is, computed the way grype does so
 /// the two tools rank findings identically.
 ///
-/// Threat is 1.0 for a KEV-listed vulnerability and the EPSS probability
-/// otherwise. Severity averages the band's midpoint with the mean CVSS base
-/// score when one is known. KEV entries boost the result by 5%, known
-/// ransomware use by 10%, and the product is capped at 1.0 before scaling.
+/// Threat is 1.0 for a KEV-listed vulnerability and the highest EPSS
+/// probability among its CVEs otherwise. Severity averages the band's midpoint
+/// with the mean CVSS base score when one is known. KEV entries boost the
+/// result by 5%, known ransomware use by 10%, and the product is capped at
+/// 1.0 before scaling.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct RiskScore(f64);
@@ -85,7 +86,10 @@ impl RiskScore {
         let threat = if !known_exploited.is_empty() {
             1.0
         } else {
-            epss.first().map(|score| score.epss).unwrap_or(0.0)
+            epss.iter()
+                .map(|score| score.epss)
+                .max_by(f64::total_cmp)
+                .unwrap_or(0.0)
         };
         let band_score = severity_midpoint(severity) / 10.0;
         let severity_term = match cvss_base_score {

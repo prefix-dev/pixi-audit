@@ -615,7 +615,8 @@ fn by_epss_percentile(a: &Finding, b: &Finding) -> Ordering {
     let percentile = |finding: &Finding| {
         finding
             .epss
-            .first()
+            .iter()
+            .max_by(|left, right| left.epss.total_cmp(&right.epss))
             .map(|score| score.percentile)
             .unwrap_or(0.0)
     };

@@ -4,7 +4,7 @@ use pixi_audit::{
     SeverityBand, UncheckedPackage, UpstreamFix, UpstreamOrigin,
 };
 
-use super::{Field, TableLayout, render_table};
+use super::{Field, TableLayout, render_table, render_table_after_fix, render_table_explained};
 
 fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
     Finding {
@@ -125,8 +125,16 @@ fn threat_columns_show_scores_and_flag_kev_rows() {
     assert_eq!(
         rows(&text, &["CVE-2026-000", "GHSA-1"]),
         [
-            vec!["CVE-2026-0001", "50.0%", "(90th)", "94.5", "(kev)", "kev"],
-            vec!["GHSA-1", "<", "0.1%", "(11th)", "<", "0.1"],
+            vec![
+                "CVE-2026-0001",
+                "90th",
+                "·",
+                "50.0%",
+                "94.5",
+                "(kev)",
+                "kev"
+            ],
+            vec!["GHSA-1", "11th", "·", "<", "0.1%", "<", "0.1"],
             vec!["CVE-2026-0002"],
         ]
     );
@@ -134,11 +142,20 @@ fn threat_columns_show_scores_and_flag_kev_rows() {
 
 #[test]
 fn sort_by_epss_and_kev_put_the_scored_rows_first() {
-    let scored = with_threat_data(
+    let mut scored = with_threat_data(
         finding("openssl", "CVE-2026-0001", SeverityBand::Low),
         0.3,
         0.95,
         false,
+    );
+    scored.epss.insert(
+        0,
+        EpssScore {
+            cve: "CVE-2026-0000".to_string(),
+            epss: 0.001,
+            percentile: 0.1,
+            date: "2026-09-01".to_string(),
+        },
     );
     let listed = with_threat_data(
         finding("openssl", "CVE-2026-0002", SeverityBand::Low),
@@ -242,8 +259,46 @@ fn clean_report() {
    └── by status:   0 fixed, 0 not-fixed, 0 ignored
 
  ✔ No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)
+
+ Next steps
+   • None. No vulnerabilities were found in checked packages.
+
+ Add `--explain` for scoring and report definitions.
 "
     );
+}
+
+#[test]
+fn explained_table_keeps_actions_before_contextual_definitions() {
+    let text = render_table_explained(&full_report(), "pixi.lock", &TableLayout::default());
+    let actions = text.find("Next steps").unwrap();
+    let explanation = text.find("How this report works").unwrap();
+    assert!(actions < explanation, "{text}");
+    assert!(
+        text.contains(
+            "How this report works\n\n   Counts\n     Package  One locked name, version, and source.\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\n     Risk      A 0–100 score for ordering individual findings.\n       Formula   min(threat × severity × boost, 1) × 100.\n     Threat"
+        ),
+        "{text}"
+    );
+    for expected in [
+        "A 0–100 score for ordering individual findings.",
+        "A fixed release exists for the audited package source.",
+        "Fix only upstream",
+        "Audit sources list no fixed release.",
+        "Excluded from active totals and the failure decision.",
+        "The package source lacks vulnerability database coverage.",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+    let compact = render_table(&full_report(), "pixi.lock", &TableLayout::default());
+    assert!(!compact.contains("How this report works"));
+    assert!(compact.contains("Add `--explain` for scoring and report definitions."));
 }
 
 #[test]
@@ -272,6 +327,22 @@ fn default_layout_sorts_by_severity_and_marks_kind_like_pixi_lock() {
  (conda)  libxml2  3.1.0    3.1.4     CVE-2026-0003  Low                   default, prod  until a fix is released
 
  ✖ 3 vulnerabilities in 2 package(s) (10 audited, 1 ignored, 1 unchecked)
+
+ Assessment
+   • Highest finding prioritization score:  n/a
+   • CISA KEV matches:                      n/a — CISA KEV catalog not checked
+   • Critical/high findings:                1
+   • Fix available in audited ecosystem:    1 of 3 vulnerabilities across 1 audited package
+   • Fix only upstream:                     1 vulnerability
+   • No known fix:                          1 vulnerability
+
+ Next steps
+   • Re-run this audit with `--fix` to ask pixi to update 1 package name. Fixed releases in the audited ecosystem are available for 1 vulnerability.
+   • 1 vulnerability has a fix only upstream. `--fix` cannot install it. Wait for an ecosystem build or change dependency source.
+   • 1 vulnerability has no known fix. Remove, replace, or mitigate the affected dependencies. Use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.
+   • Review 1 unchecked package. Its source is not covered by the configured vulnerability databases.
+
+ Add `--explain` for scoring and report definitions.
 "
     );
 }
@@ -325,18 +396,40 @@ fn sort_by_name_keeps_severity_order_within_a_package() {
 
 #[test]
 fn colored_output_uses_single_letter_kind_markers() {
-    use iocraft::prelude::ElementExt;
+    use iocraft::prelude::{Color, ElementExt};
 
-    use super::{OutputStyle, build};
+    use super::{GuidanceOptions, OutputStyle, build};
     let style = OutputStyle {
         color: true,
         hyperlinks: false,
     };
-    let mut out = Vec::new();
-    build(&full_report(), "pixi.lock", style, &TableLayout::default())
-        .render(None)
-        .write_ansi(&mut out)
+    let canvas = build(
+        &full_report(),
+        "pixi.lock",
+        style,
+        &TableLayout::default(),
+        GuidanceOptions {
+            explain: true,
+            ..Default::default()
+        },
+    )
+    .render(None);
+    let plain = canvas.to_string();
+    let row = plain
+        .lines()
+        .position(|line| line.contains("Package") && line.contains("One locked"))
         .unwrap();
+    let column = plain.lines().nth(row).unwrap().find("Package").unwrap();
+    assert_eq!(
+        canvas
+            .cell(column, row)
+            .and_then(|cell| cell.text_style())
+            .and_then(|style| style.color),
+        Some(Color::AnsiValue(super::EXPLANATION_TERM_PALETTE_INDEX))
+    );
+
+    let mut out = Vec::new();
+    canvas.write_ansi(&mut out).unwrap();
     let text = String::from_utf8(out).unwrap();
     // The marker fills its own padded column before the name.
     assert!(
@@ -344,6 +437,14 @@ fn colored_output_uses_single_letter_kind_markers() {
         "{text}"
     );
     assert!(!text.contains("(conda)"), "{text}");
+    let package_definition = text
+        .lines()
+        .find(|line| line.contains("Package") && line.contains("One locked"))
+        .unwrap();
+    assert!(
+        package_definition.contains("\x1b[1m"),
+        "{package_definition:?}"
+    );
     // The second openssl row repeats the package, so its marker, name and
     // version are dimmed rather than recolored.
     let dim = "\x1b[2m";
@@ -425,8 +526,31 @@ fn weak_matches_are_flagged_and_counted() {
  (pypi)   requests  2.32.0             GHSA-1                       Unknown               default
 
  ✖ 4 vulnerabilities in 3 package(s) (4 audited, 0 ignored, 0 unchecked)
+
+ Assessment
+   • Highest finding prioritization score:  n/a
+   • CISA KEV matches:                      n/a — CISA KEV catalog not checked
+   • Critical/high findings:                1
+   • Fix available in audited ecosystem:    2 of 4 vulnerabilities across 2 audited packages
+   • Fix only upstream:                     0 vulnerabilities
+   • No known fix:                          2 vulnerabilities
+
+ Next steps
+   • Re-run this audit with `--fix` to ask pixi to update 2 package names. Fixed releases in the audited ecosystem are available for 2 vulnerabilities.
+   • 2 vulnerabilities have no known fix. Remove, replace, or mitigate the affected dependencies. Use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.
+
+ Add `--explain` for scoring and report definitions.
 "
     );
+}
+
+#[test]
+fn completed_fix_does_not_recommend_another_blind_attempt() {
+    let text = render_table_after_fix(&full_report(), "pixi.lock", &TableLayout::default());
+    assert!(text.contains(
+        "`--fix` completed, but 1 vulnerability with a fix in the audited ecosystem remains. Review dependency constraints and pixi's solver output."
+    ));
+    assert!(!text.contains("Re-run this audit with `--fix`"));
 }
 
 #[test]
