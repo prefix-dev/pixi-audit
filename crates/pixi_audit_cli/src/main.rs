@@ -9,9 +9,10 @@ use iocraft::prelude::*;
 use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
     AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL,
-    DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, IgnoreSpec,
-    KEV_URL_ENV_VAR, KevClient, PYPI_BASE_URL_ENV_VAR, PypiAuditClient, SeverityBand,
-    ThreatDataStatus, ThreatSourceStatus, ThreatSources, audit_lock_file, rattler_lock::LockFile,
+    DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, Finding, IgnoreSpec,
+    KEV_URL_ENV_VAR, KevClient, PYPI_BASE_URL_ENV_VAR, PackageEcosystem, PypiAuditClient,
+    SeverityBand, ThreatDataStatus, ThreatSourceStatus, ThreatSources, audit_lock_file,
+    rattler_lock::LockFile,
 };
 use render::table::{DEFAULT_FIELDS, Field, OutputStyle, TableLayout};
 use reqwest_middleware::ClientWithMiddleware;
@@ -90,11 +91,15 @@ struct Cli {
     #[arg(long)]
     ignore_unfixed: bool,
 
-    /// Fail (exit 1) only for conda findings at or above this severity band.
-    /// Severity filtering does not apply to PyPI findings. Overrides the
-    /// config file's `severity`.
+    /// Fail (exit 1) only for findings at or above this severity band.
+    /// Unknown severity still fails. Overrides the manifest setting.
     #[arg(long, value_name = "BAND", value_parser = config::parse_band)]
     severity: Option<SeverityBand>,
+
+    /// Only findings from these ecosystems can fail the audit (repeatable).
+    /// All ecosystems are eligible when omitted.
+    #[arg(long, value_enum, value_name = "ECOSYSTEM")]
+    gate_ecosystem: Vec<GateEcosystem>,
 
     /// Raise direct dependency constraints to known fixed versions, run
     /// `pixi update`, then re-audit
@@ -145,6 +150,21 @@ enum Format {
     Sarif,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GateEcosystem {
+    CondaForge,
+    Pypi,
+}
+
+impl GateEcosystem {
+    fn matches(self, ecosystem: &PackageEcosystem) -> bool {
+        matches!(
+            (self, ecosystem),
+            (Self::CondaForge, PackageEcosystem::CondaForge) | (Self::Pypi, PackageEcosystem::Pypi)
+        )
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let mut cli = Cli::parse();
@@ -173,6 +193,7 @@ async fn main() -> ExitCode {
     let RunOutcome {
         report,
         threshold,
+        gate_ecosystems,
         lockfile,
         manifest_available,
     } = match run(cli).await {
@@ -235,13 +256,22 @@ async fn main() -> ExitCode {
         eprintln!("warning: ignore rule '{id}' matched no finding");
     }
 
-    let gate = gate(&report, threshold);
+    let gate = gate(&report, threshold, &gate_ecosystems);
     if annotations::on_github_actions() {
-        let level = match gate {
-            Gate::Fail => annotations::Level::Error,
-            Gate::BelowThreshold { .. } | Gate::Clean => annotations::Level::Warning,
-        };
-        eprint!("{}", annotations::github_annotations(&report, level));
+        eprint!(
+            "{}",
+            annotations::github_annotations(&report, |finding| {
+                if eligible(finding, &gate_ecosystems)
+                    && threshold.is_none_or(|band| {
+                        finding.severity == SeverityBand::Unknown || finding.severity >= band
+                    })
+                {
+                    annotations::Level::Error
+                } else {
+                    annotations::Level::Warning
+                }
+            })
+        );
     }
 
     match gate {
@@ -269,30 +299,43 @@ enum Gate {
     Clean,
 }
 
-fn gate(report: &AuditReport, threshold: Option<SeverityBand>) -> Gate {
-    let findings = &report.vulnerabilities;
-    if findings.is_empty() {
-        return Gate::Clean;
-    }
-    let Some(band) = threshold else {
-        return Gate::Fail;
-    };
-    let fails = findings
+fn eligible(finding: &Finding, ecosystems: &[GateEcosystem]) -> bool {
+    ecosystems.is_empty()
+        || ecosystems
+            .iter()
+            .any(|ecosystem| ecosystem.matches(&finding.ecosystem))
+}
+
+fn gate(
+    report: &AuditReport,
+    threshold: Option<SeverityBand>,
+    ecosystems: &[GateEcosystem],
+) -> Gate {
+    let mut count = 0;
+    let mut fails = false;
+    for finding in report
+        .vulnerabilities
         .iter()
-        .any(|finding| finding.severity == SeverityBand::Unknown || finding.severity >= band);
+        .filter(|finding| eligible(finding, ecosystems))
+    {
+        count += 1;
+        fails |= threshold.is_none_or(|band| {
+            finding.severity == SeverityBand::Unknown || finding.severity >= band
+        });
+    }
     if fails {
         Gate::Fail
+    } else if let Some(band) = threshold.filter(|_| count > 0) {
+        Gate::BelowThreshold { band, count }
     } else {
-        Gate::BelowThreshold {
-            band,
-            count: findings.len(),
-        }
+        Gate::Clean
     }
 }
 
 struct RunOutcome {
     report: AuditReport,
     threshold: Option<SeverityBand>,
+    gate_ecosystems: Vec<GateEcosystem>,
     lockfile: PathBuf,
     manifest_available: bool,
 }
@@ -422,6 +465,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     Ok(RunOutcome {
         report,
         threshold,
+        gate_ecosystems: cli.gate_ecosystem,
         manifest_available: targets.manifest.is_some(),
         lockfile: targets.lockfile,
     })

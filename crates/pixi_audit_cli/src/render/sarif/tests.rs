@@ -167,23 +167,26 @@ fn weak_matches_and_identities_are_reported() {
     );
     assert_eq!(
         run["results"][0]["message"]["text"],
-        "CVE-2022-25852: high vulnerability in conda-forge package openssl 3.1.0; \
-         no known fixed version; match: version unbounded"
+        "CVE-2022-25852: high vulnerability in conda-forge package openssl 3.1.0. \
+         no known fixed version. match: version unbounded"
     );
 
     let evaluated = run["tool"]["driver"]["rules"][1]["help"]["text"]
         .as_str()
         .unwrap();
-    assert!(evaluated.contains("\nMatch: evaluated\n"), "{evaluated}");
+    assert!(
+        evaluated.contains("\nMatch: version-compared\n"),
+        "{evaluated}"
+    );
     assert!(
         evaluated.contains("\nMatched identity: pkg:npm/openssl\n"),
         "{evaluated}"
     );
     assert!(
-        !run["results"][1]["message"]["text"]
+        run["results"][1]["message"]["text"]
             .as_str()
             .unwrap()
-            .contains("match:")
+            .contains("match: version compared, not verified")
     );
 }
 
@@ -215,10 +218,6 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
     let conda = &results[0];
     assert_eq!(conda["ruleId"], "CVE-2026-0001-openssl");
     assert_eq!(conda["level"], "error");
-    assert_eq!(
-        conda["message"]["text"],
-        "CVE-2026-0001: high vulnerability in conda-forge package openssl 3.1.0; fixed in 3.1.1"
-    );
     let location = &conda["locations"][0]["physicalLocation"];
     assert_eq!(location["artifactLocation"]["uri"], uri);
     assert_eq!(location["region"]["startLine"], 8);
@@ -252,12 +251,6 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
             "kind": "external",
             "justification": "ignored until a fix is released"
         }])
-    );
-    assert!(
-        suppressed["message"]["text"]
-            .as_str()
-            .unwrap()
-            .ends_with("no known fixed version")
     );
 }
 

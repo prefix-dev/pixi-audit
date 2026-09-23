@@ -194,6 +194,29 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pypi_only_gate_reports_conda_without_failing() {
+    let base = spawn_mock(true).await;
+    let output = run_cli_env(
+        base,
+        vec![
+            lockfile(),
+            "--gate-ecosystem".to_string(),
+            "pypi".to_string(),
+            "--json".to_string(),
+        ],
+        vec![("GITHUB_ACTIONS", "true")],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["summary"]["vulnerable"], 1);
+    assert_eq!(report["vulnerabilities"][0]["ecosystem"], "conda-forge");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("::warning title=BSLK-1"), "{stderr}");
+    assert!(!stderr.contains("::error"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn explain_describes_the_human_report_after_next_steps() {
     let base = spawn_mock(true).await;
     let output = run_cli(base, vec![lockfile(), "--explain".to_string()]).await;
@@ -1170,7 +1193,7 @@ async fn purl_match_keeps_the_other_ecosystem_fixes() {
     let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let finding = &report["vulnerabilities"][0];
-    assert_eq!(finding["applicability"], "evaluated");
+    assert_eq!(finding["applicability"], "version-compared");
     assert_eq!(
         finding["matched_identity"],
         serde_json::json!({"kind": "purl", "value": "pkg:npm/openssl"})

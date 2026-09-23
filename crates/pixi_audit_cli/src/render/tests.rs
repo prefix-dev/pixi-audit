@@ -133,19 +133,15 @@ fn threat_cells_render_risk_epss_and_kev() {
     };
     let text = render_human(&report, RenderOptions::default());
     assert!(
-        text.contains(
-            "  CVE-2026-0001  CRITICAL  risk  99.0 (kev, ransomware)  epss 99th · 90.8%  fixed in: 3.1.4\n"
-        ),
+        text.contains("  CVE-2026-0001  CRITICAL  risk  99.0 (kev, ransomware)  epss 99th · 90.8%"),
         "{text}"
     );
     assert!(
-        text.contains(
-            "  CVE-2026-0002  LOW       risk < 0.1  epss 11th · < 0.1%  fixed in: 3.1.4\n"
-        ),
+        text.contains("  CVE-2026-0002  LOW       risk < 0.1  epss 11th · < 0.1%"),
         "{text}"
     );
     assert!(
-        text.contains("  CVE-2026-0003  MEDIUM    risk   n/a  epss n/a  fixed in: 3.1.4\n"),
+        text.contains("  CVE-2026-0003  MEDIUM    risk   n/a  epss n/a"),
         "{text}"
     );
     assert!(
@@ -185,10 +181,6 @@ fn threat_cells_are_omitted_when_no_source_is_configured() {
         ..Default::default()
     };
     let text = render_human(&report, RenderOptions::default());
-    assert!(
-        text.contains("  CVE-2026-0001  HIGH      fixed in: 3.1.4\n"),
-        "{text}"
-    );
     assert!(!text.contains("  risk "));
     assert!(!text.contains("  epss "));
 }
@@ -240,7 +232,7 @@ fn kev_is_marked_on_the_risk_cell() {
     // High (7.5 / 10) with threat 1.0 and the 1.05 boost; no EPSS cell
     // since that source is off.
     assert!(
-        text.contains("  CVE-2026-0001  HIGH      risk  78.8 (kev)  fixed in: 3.1.4\n"),
+        text.contains("  CVE-2026-0001  HIGH      risk  78.8 (kev)"),
         "{text}"
     );
 }
@@ -443,11 +435,11 @@ fn hyperlinks_wrap_the_id_and_replace_the_url_line() {
             ..Default::default()
         },
     );
-    assert!(text.contains(
-        "  \x1b]8;;https://osv.dev/CVE-2026-0001\x1b\\CVE-2026-0001\x1b]8;;\x1b\\  HIGH      fixed in: 3.1.4\n"
-    ));
+    assert!(
+        text.contains("  \x1b]8;;https://osv.dev/CVE-2026-0001\x1b\\CVE-2026-0001\x1b]8;;\x1b\\")
+    );
     assert!(!text.contains("\n  https://osv.dev/CVE-2026-0001"));
-    assert!(text.contains("\n  CVE-2026-0002  MEDIUM    fixed in: 3.1.4\n"));
+    assert!(text.contains("\n  CVE-2026-0002  MEDIUM"));
 }
 
 #[test]
@@ -651,7 +643,9 @@ fn weak_matches_carry_a_note() {
         "{text}"
     );
     assert!(
-        text.contains("CVE-2026-0010  LOW       fixed in: 3.1.4\n"),
+        text.contains(
+            "CVE-2026-0010  LOW       fixed in: 3.1.4  match: version compared, not verified\n"
+        ),
         "{text}"
     );
 }

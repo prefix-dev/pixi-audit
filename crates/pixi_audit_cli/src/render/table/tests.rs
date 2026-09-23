@@ -569,7 +569,7 @@ fn match_column_replaces_the_marker_and_sorts_by_confidence() {
         table,
         [
             " Vulnerability   Match",
-            " CVE-2026-50014  evaluated",
+            " CVE-2026-50014  version-compared",
             " CVE-2026-0009   unevaluated",
             " CVE-2022-25852  unbounded",
             " GHSA-1",

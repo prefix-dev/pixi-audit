@@ -408,7 +408,9 @@ pub enum MatchApplicability {
     VersionUnbounded,
     /// The package matched but the affected versions were not evaluated.
     Unevaluated,
-    /// Basilisk evaluated the affected versions against the package.
+    /// Basilisk compared available advisory version data to the installed
+    /// package, not independent verification that its build is affected.
+    #[serde(rename(serialize = "version-compared", deserialize = "evaluated"))]
     Evaluated,
 }
 

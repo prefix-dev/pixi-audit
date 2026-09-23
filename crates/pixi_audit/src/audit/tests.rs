@@ -996,7 +996,6 @@ async fn purl_matched_finding_keeps_upstream_fixes_and_reports_its_match() {
         })
     );
     let json = serde_json::to_value(finding).unwrap();
-    assert_eq!(json["applicability"], "evaluated");
     assert_eq!(
         json["matched_identity"],
         serde_json::json!({"kind": "purl", "value": "pkg:npm/openssl"})

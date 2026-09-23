@@ -321,11 +321,11 @@ pub fn severity_palette_index(band: SeverityBand) -> u8 {
     }
 }
 
-/// The applicability as the Match column shows it; `None` when basilisk
-/// recorded none.
+/// The applicability as the Match column shows it; `None` when no
+/// applicability metadata was recorded.
 pub fn match_label(applicability: MatchApplicability) -> Option<&'static str> {
     match applicability {
-        MatchApplicability::Evaluated => Some("evaluated"),
+        MatchApplicability::Evaluated => Some("version-compared"),
         MatchApplicability::Unevaluated => Some("unevaluated"),
         MatchApplicability::VersionUnbounded => Some("unbounded"),
         MatchApplicability::Unspecified => None,

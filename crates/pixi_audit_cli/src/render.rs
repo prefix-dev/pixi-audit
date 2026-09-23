@@ -809,13 +809,17 @@ fn fix_note(finding: &Finding) -> String {
     }
 }
 
-/// A note on how the advisory was matched, for matches that deserve a
-/// second look; `None` when basilisk evaluated it or recorded nothing.
+/// Describe what the matcher established, without implying independent
+/// verification of conda matches.
 pub fn match_note(finding: &Finding) -> Option<&'static str> {
     match finding.applicability {
         MatchApplicability::VersionUnbounded => Some("match: version unbounded"),
         MatchApplicability::Unevaluated => Some("match: unevaluated"),
-        MatchApplicability::Evaluated | MatchApplicability::Unspecified => None,
+        MatchApplicability::Evaluated => Some("match: version compared, not verified"),
+        MatchApplicability::Unspecified if finding.ecosystem == PackageEcosystem::CondaForge => {
+            Some("match: no applicability metadata")
+        }
+        MatchApplicability::Unspecified => None,
     }
 }
 

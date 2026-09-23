@@ -48,33 +48,24 @@ impl BasiliskMatch {
         }
     }
 
-    /// The block's match, or the merge of its `matches` when basilisk
-    /// combined several: the strongest applicability, and a purl identity
-    /// over a CPE one because only a purl can vouch for another ecosystem.
+    /// Keep applicability and identity from the same match. A purl on a
+    /// weaker match cannot establish the provenance of a stronger CPE match.
     fn from_block(block: &serde_json::Value) -> Self {
         let Some(matches) = block.get("matches").and_then(|m| m.as_array()) else {
             return Self::from_value(block);
         };
-        let matches: Vec<Self> = matches.iter().map(Self::from_value).collect();
-        if matches.is_empty() {
-            return Self::from_value(block);
-        }
-        let identity = |kind: MatchedIdentityKind| {
-            matches
-                .iter()
-                .filter_map(|m| m.matched_identity.as_ref())
-                .find(|identity| identity.kind == kind)
-                .cloned()
-        };
-        Self {
-            applicability: matches
-                .iter()
-                .map(|m| m.applicability)
-                .max()
-                .unwrap_or(MatchApplicability::Unspecified),
-            matched_identity: identity(MatchedIdentityKind::Purl)
-                .or_else(|| identity(MatchedIdentityKind::Cpe)),
-        }
+        matches
+            .iter()
+            .map(Self::from_value)
+            .max_by_key(|m| {
+                (
+                    m.applicability,
+                    m.matched_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.kind == MatchedIdentityKind::Purl),
+                )
+            })
+            .unwrap_or_else(|| Self::from_value(block))
     }
 }
 

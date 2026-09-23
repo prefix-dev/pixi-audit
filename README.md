@@ -114,6 +114,14 @@ pixi audit --severity high
 
 Accepted values are `low`, `medium`, `high`, and `critical`. Severity comes from the advisory's CVSS vectors, for conda-forge and PyPI packages alike. Findings without a parsable vector have unknown severity and still fail the audit.
 
+Severity does not tell you whether a conda advisory matched the right product or version. To keep conda findings in the report while only PyPI findings can fail CI, use:
+
+```console
+pixi audit --gate-ecosystem pypi
+```
+
+Without `--gate-ecosystem`, both ecosystems can fail the audit. Repeat the option to select both.
+
 ### Rank findings by risk
 
 Each finding carries the same threat data [grype](https://github.com/anchore/grype) reports:
@@ -188,7 +196,7 @@ Available fields are `name`, `version`, `fixed-in`, `kind`, `source`, `vulnerabi
 
 A fix in another ecosystem is only reported when it belongs to the package Basilisk matched: the entry whose package URL Basilisk recorded as the matched identity. An advisory matched through a CPE name never contributes fixes from other ecosystems, so conda-forge `libpq` does not inherit a fix from the npm package of the same name. Documents without a matched identity fall back to matching by name, but only when Basilisk evaluated the affected versions.
 
-Not every match is equally certain. Basilisk records how far it got as the finding's *applicability*: `evaluated` means the affected versions were checked against the package, `unevaluated` means they were not, and `version-unbounded` means the advisory names the product without version bounds, so every version matches. The default table marks the last two with a dim `(unevaluated)` or `(unbounded)` after the advisory ID and counts them at the end of the `by status` line. The `match` field shows the applicability as a column of its own, and `--sort-by match` puts the most confident matches first. The grouped format, GitHub annotations, and SARIF result messages add a `match: version unbounded` or `match: unevaluated` note, and each SARIF rule lists the applicability and matched identity in its help text. In JSON each finding carries `applicability` (`unspecified` for PyPI findings and documents without Basilisk metadata) and `matched_identity`, an object with `kind` (`purl` or `cpe`) and `value`, or `null` when Basilisk recorded none.
+Basilisk's *applicability* describes what its matcher did, not independent confirmation that the installed package is affected. `version-compared` means Basilisk compared the installed version against the version data available in the advisory. It does not mean anyone inspected the package's source code or confirmed that its build is vulnerable. `unevaluated` means Basilisk could not make that comparison, while `version-unbounded` means the advisory gave no usable version bounds. The default table flags unbounded and unevaluated matches by the advisory ID. The `match` column, grouped output, JSON `applicability` field, GitHub annotations, and SARIF expose these distinctions. A version-compared match still needs review before it is used to block CI.
 
 On a terminal the table is colored and advisory IDs link to their advisory pages. When stdout is piped or `NO_COLOR` is set, the same table is written as plain text at full width, so nothing is clipped in logs. Set `CLICOLOR_FORCE=1` to keep colors in CI logs that render them.
 
@@ -221,7 +229,7 @@ Progress and diagnostics go to stderr. The report goes to stdout, so redirecting
 
 ### Continuous integration
 
-Inside GitHub Actions, every finding is also emitted as a [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) on stderr, so vulnerabilities show up as annotations on the job and on the pull request. They are errors when the audit fails and warnings when every finding sits below the `--severity` threshold.
+Inside GitHub Actions, every active finding is also emitted as a [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) on stderr. Findings that meet the severity threshold in a selected gate ecosystem are errors. Other findings are warnings and stay in the report.
 
 ## Configuration
 

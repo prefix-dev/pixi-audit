@@ -657,7 +657,7 @@ fn match_metadata_is_only_read_for_conda_forge_queries() {
 }
 
 #[test]
-fn merged_matches_take_the_purl_identity_and_the_strongest_applicability() {
+fn combined_matches_keep_identity_and_applicability_together() {
     let doc = libpq_shaped_doc(serde_json::json!({
         "matches": [
             {
@@ -695,8 +695,26 @@ fn merged_matches_take_the_purl_identity_and_the_strongest_applicability() {
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
             applicability: MatchApplicability::Evaluated,
-            matched_identity: Some(cpe_identity("cpe:a")),
+            matched_identity: Some(cpe_identity("cpe:b")),
         })
+    );
+    let doc = libpq_shaped_doc(serde_json::json!({
+        "matches": [
+            {"applicability": "evaluated", "matched_identity": {"kind": "cpe", "value": "cpe:b"}},
+            {"applicability": "version_unbounded", "matched_identity": {"kind": "purl", "value": "pkg:npm/libpq"}}
+        ]
+    }));
+    assert_eq!(
+        basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
+        Some(BasiliskMatch {
+            applicability: MatchApplicability::Evaluated,
+            matched_identity: Some(cpe_identity("cpe:b")),
+        })
+    );
+    assert!(
+        fixed_versions(&doc, &conda_name("libpq"), "conda-forge")
+            .upstream
+            .is_empty()
     );
     let doc = libpq_shaped_doc(serde_json::json!({"applicability": "evaluated", "matches": []}));
     assert_eq!(
@@ -740,7 +758,7 @@ fn applicability_serializes_kebab_case_and_orders_by_confidence() {
             "unspecified",
             "version-unbounded",
             "unevaluated",
-            "evaluated"
+            "version-compared"
         ])
     );
     assert!(MatchApplicability::Evaluated > MatchApplicability::Unevaluated);
