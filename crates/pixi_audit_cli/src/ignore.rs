@@ -265,6 +265,5 @@ fn rule_value(
     Value::InlineTable(rule)
 }
 
-
 #[cfg(test)]
 mod tests;
