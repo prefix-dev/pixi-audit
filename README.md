@@ -89,10 +89,12 @@ Package names are matched under their ecosystem's rules, so `Ruamel.YAML` finds 
 [tool.pixi-audit]
 ignore = [
   "CVE-2023-0464",
-  { id = "CVE-2026-1234", reason = "only reachable through the TLS backend", until = 2026-12-01 },
+  { id = "CVE-2026-1234", reason = "only reachable through the TLS backend", until = "2026-12-01" },
   { package = "vendored-thing", reason = "never runs, only shipped for its data files" },
 ]
 ```
+
+Keep `until` quoted in both `pixi.toml` and `pyproject.toml` so pixi can parse the manifest.
 
 ### Set a severity threshold
 
