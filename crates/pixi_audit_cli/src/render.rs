@@ -800,10 +800,7 @@ fn fix_note(finding: &Finding) -> String {
     if !finding.fixed_versions.is_empty() {
         format!("  fixed in: {}", finding.fixed_versions.join(", "))
     } else if !finding.upstream_fixes.is_empty() {
-        format!(
-            "  fix released elsewhere: {}",
-            describe_upstream_fixes(finding)
-        )
+        format!("  {}", fix_summary(finding))
     } else {
         "  no known fixed version".to_string()
     }
@@ -830,7 +827,7 @@ pub fn describe_upstream_fixes(finding: &Finding) -> String {
         .iter()
         .map(describe_upstream_fix)
         .collect::<Vec<_>>()
-        .join("; ")
+        .join(", ")
 }
 
 /// One upstream fix in a sentence: where it exists and what that means for
@@ -848,6 +845,23 @@ pub fn describe_upstream_fix(fix: &UpstreamFix) -> String {
             ),
             CondaPublication::Published => format!("{} released upstream", fix.version),
         },
+        UpstreamOrigin::OtherReleaseLine { conda_publication } => match conda_publication {
+            CondaPublication::Published => {
+                format!("{} on another Python release line", fix.version)
+            }
+            CondaPublication::NotPublished => {
+                format!(
+                    "{} on another Python release line, no conda-forge build",
+                    fix.version
+                )
+            }
+            CondaPublication::Unknown => {
+                format!(
+                    "{} on another Python release line, build unconfirmed",
+                    fix.version
+                )
+            }
+        },
     }
 }
 
@@ -863,19 +877,43 @@ pub fn upstream_fix_label(fix: &UpstreamFix) -> String {
                 format!("upstream: {}", fix.version)
             }
         },
+        UpstreamOrigin::OtherReleaseLine { conda_publication } => match conda_publication {
+            CondaPublication::Published => format!("other release line: {}", fix.version),
+            CondaPublication::NotPublished => {
+                format!("other release line: {} (not published)", fix.version)
+            }
+            CondaPublication::Unknown => {
+                format!("other release line: {} (build unconfirmed)", fix.version)
+            }
+        },
     }
 }
 
-/// Where a finding's fix stands, as a sentence fragment: `fixed in 3.1.1`,
-/// `fix released elsewhere: ...`, or `no known fixed version`.
+/// Where a finding's fix stands, as a sentence fragment.
 pub fn fix_summary(finding: &Finding) -> String {
     if !finding.fixed_versions.is_empty() {
         format!("fixed in {}", finding.fixed_versions.join(", "))
     } else if !finding.upstream_fixes.is_empty() {
-        format!(
-            "fix released elsewhere: {}",
-            describe_upstream_fixes(finding)
-        )
+        if finding
+            .upstream_fixes
+            .iter()
+            .all(|fix| matches!(fix.origin, UpstreamOrigin::OtherReleaseLine { .. }))
+        {
+            format!(
+                "fix only on another Python release line: {}",
+                finding
+                    .upstream_fixes
+                    .iter()
+                    .map(|fix| fix.version.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            format!(
+                "fix released elsewhere: {}",
+                describe_upstream_fixes(finding)
+            )
+        }
     } else {
         "no known fixed version".to_string()
     }

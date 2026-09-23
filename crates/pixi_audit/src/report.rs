@@ -434,7 +434,7 @@ pub struct MatchedIdentity {
     pub value: String,
 }
 
-/// Where a fix exists when it is not a release in the audited ecosystem.
+/// Where an alternative fix exists when it is not a patch on the audited line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "origin", rename_all = "kebab-case")]
 pub enum UpstreamOrigin {
@@ -446,10 +446,13 @@ pub enum UpstreamOrigin {
     /// says whether basilisk could find a conda-forge build of it, and is
     /// never `Published` here since that counts as a fixed version.
     Project { conda_publication: CondaPublication },
+    /// A reported fix on a different CPython minor release line. The
+    /// publication status records whether conda-forge has a build.
+    OtherReleaseLine { conda_publication: CondaPublication },
 }
 
-/// A fix that exists somewhere other than the audited ecosystem.
-/// Informative only: it may not be installable for the audited package.
+/// A fix outside the audited ecosystem or Python release line. Informative
+/// only: `--fix` cannot apply it to the audited package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpstreamFix {
     pub version: String,
@@ -472,8 +475,8 @@ pub struct Finding {
     pub cvss_base_score: Option<f64>,
     /// Fixed versions in the package's own ecosystem.
     pub fixed_versions: Vec<String>,
-    /// Fixes known outside the package's own ecosystem, each with where it
-    /// exists. Informative only; `--fix` cannot install these.
+    /// Fixes elsewhere or on another Python release line. Informative only,
+    /// since `--fix` cannot apply these to the installed package.
     pub upstream_fixes: Vec<UpstreamFix>,
     /// How confidently basilisk matched the advisory to the package.
     /// `Unspecified` for PyPI findings and documents without metadata.

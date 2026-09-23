@@ -13,9 +13,9 @@ use crate::{
     },
     client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
     report::{
-        AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, MatchApplicability,
-        PackageEcosystem, PackageIgnore, SeverityBand, SortStrategy, UncheckedPackage,
-        mean_cvss_base_score,
+        AuditPackage, AuditReport, CondaPublication, Finding, IgnoreReason, IgnoreSpec,
+        MatchApplicability, PackageEcosystem, PackageIgnore, SeverityBand, SortStrategy,
+        UncheckedPackage, UpstreamFix, UpstreamOrigin, mean_cvss_base_score,
     },
     threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
@@ -85,6 +85,31 @@ impl Backend {
                 .same_ecosystem
                 .retain(|version| uv_pep440::Version::from_str(version).is_ok());
             fixes.upstream.clear();
+        } else if matches!(package.name.as_str(), "python" | "libpython")
+            && let Some(locked) = package.version.as_deref().and_then(python_release_line)
+        {
+            // CPython minor versions are maintained as separate release
+            // lines. A published 3.15 fix is not a patch for Python 3.13.
+            let other_lines = fixes.same_ecosystem.extract_if(.., |version| {
+                python_release_line(version).is_some_and(|line| line != locked)
+            });
+            fixes
+                .upstream
+                .extend(other_lines.map(|version| UpstreamFix {
+                    version,
+                    origin: UpstreamOrigin::OtherReleaseLine {
+                        conda_publication: CondaPublication::Published,
+                    },
+                }));
+            for fix in &mut fixes.upstream {
+                if python_release_line(&fix.version).is_some_and(|line| line != locked)
+                    && let UpstreamOrigin::Project { conda_publication } = &fix.origin
+                {
+                    fix.origin = UpstreamOrigin::OtherReleaseLine {
+                        conda_publication: *conda_publication,
+                    };
+                }
+            }
         }
         fixes
     }
@@ -103,6 +128,14 @@ impl Backend {
             Backend::Pypi => None,
         }
     }
+}
+
+fn python_release_line(version: &str) -> Option<(&str, &str)> {
+    let (major, rest) = version.split_once('.')?;
+    let minor = rest.split('.').next()?;
+    major.parse::<u8>().ok()?;
+    minor.parse::<u8>().ok()?;
+    Some((major, minor))
 }
 
 /// The clients behind each [`Backend`].

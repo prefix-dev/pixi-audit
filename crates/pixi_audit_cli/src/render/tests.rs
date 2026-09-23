@@ -38,11 +38,54 @@ fn upstream_fixes_say_where_they_exist() {
             "upstream: 2.8.2 (unconfirmed)",
             "2.8.2 released upstream, conda-forge build unconfirmed",
         ),
+        (
+            UpstreamFix {
+                version: "3.15.0rc2".to_string(),
+                origin: UpstreamOrigin::OtherReleaseLine {
+                    conda_publication: CondaPublication::Published,
+                },
+            },
+            "other release line: 3.15.0rc2",
+            "3.15.0rc2 on another Python release line",
+        ),
+        (
+            UpstreamFix {
+                version: "3.15.0a6".to_string(),
+                origin: UpstreamOrigin::OtherReleaseLine {
+                    conda_publication: CondaPublication::NotPublished,
+                },
+            },
+            "other release line: 3.15.0a6 (not published)",
+            "3.15.0a6 on another Python release line, no conda-forge build",
+        ),
     ];
     for (fix, label, sentence) in cases {
         assert_eq!(upstream_fix_label(&fix), label);
         assert_eq!(describe_upstream_fix(&fix), sentence);
     }
+}
+
+#[test]
+fn alternative_python_line_is_not_presented_as_a_patch() {
+    let mut python = finding("python", "CVE-2026-15310", SeverityBand::High);
+    python.version = "3.13.15".to_string();
+    python.fixed_versions.clear();
+    python.upstream_fixes = vec![UpstreamFix {
+        version: "3.15.0rc2".to_string(),
+        origin: UpstreamOrigin::OtherReleaseLine {
+            conda_publication: CondaPublication::Published,
+        },
+    }];
+    assert_eq!(
+        fix_summary(&python),
+        "fix only on another Python release line: 3.15.0rc2"
+    );
+    assert!(
+        serde_json::to_value(&python).unwrap()["fixed_versions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {

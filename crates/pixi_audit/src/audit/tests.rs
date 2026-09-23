@@ -115,6 +115,127 @@ fn packages() -> Vec<AuditPackage> {
     ]
 }
 
+#[test]
+fn python_fixes_on_other_minor_lines_are_not_actionable() {
+    for name in ["python", "libpython"] {
+        let package = AuditPackage {
+            name: conda_name(name),
+            version: Some("3.13.15".to_string()),
+            ecosystem: PackageEcosystem::CondaForge,
+            environments: vec!["default".to_string()],
+        };
+        let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+            "id": "CVE-2026-15310",
+            "affected": [{
+                "package": {"ecosystem": "conda-forge", "name": name},
+                "versions": ["3.13.15"],
+                "database_specific": {"basilisk": {
+                    "fix_version": "3.15.0rc2",
+                    "conda_publication": "published"
+                }}
+            }]
+        }))
+        .unwrap();
+        let fixes = Backend::Basilisk.fixed_versions(&doc, &package);
+        assert!(fixes.same_ecosystem.is_empty(), "{name}");
+        assert_eq!(
+            fixes.upstream,
+            [UpstreamFix {
+                version: "3.15.0rc2".to_string(),
+                origin: UpstreamOrigin::OtherReleaseLine {
+                    conda_publication: CondaPublication::Published,
+                },
+            }],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn unpublished_python_fixes_keep_their_publication_status() {
+    let package = AuditPackage {
+        name: conda_name("python"),
+        version: Some("3.13.15".to_string()),
+        ecosystem: PackageEcosystem::CondaForge,
+        environments: vec![],
+    };
+    let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+        "id": "CVE-2025-15367",
+        "affected": [{
+            "package": {"ecosystem": "conda-forge", "name": "python"},
+            "versions": ["3.13.15"],
+            "database_specific": {"basilisk": {
+                "fix_version": "3.15.0a6",
+                "conda_publication": "not_published"
+            }}
+        }]
+    }))
+    .unwrap();
+    let fixes = Backend::Basilisk.fixed_versions(&doc, &package);
+    assert!(fixes.same_ecosystem.is_empty());
+    assert_eq!(
+        fixes.upstream,
+        [UpstreamFix {
+            version: "3.15.0a6".to_string(),
+            origin: UpstreamOrigin::OtherReleaseLine {
+                conda_publication: CondaPublication::NotPublished,
+            },
+        }]
+    );
+}
+
+#[test]
+fn same_python_line_remains_fixable_without_limiting_other_packages() {
+    let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+        "id": "CVE-2026-15310",
+        "affected": [{
+            "package": {"ecosystem": "conda-forge", "name": "python"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [
+                {"introduced": "3.13.0"}, {"fixed": "3.13.16"}
+            ]}],
+            "database_specific": {"basilisk": {
+                "fix_version": "3.15.0rc2",
+                "conda_publication": "published"
+            }}
+        }]
+    }))
+    .unwrap();
+    let package = AuditPackage {
+        name: conda_name("python"),
+        version: Some("3.13.15".to_string()),
+        ecosystem: PackageEcosystem::CondaForge,
+        environments: vec![],
+    };
+    let fixes = Backend::Basilisk.fixed_versions(&doc, &package);
+    assert_eq!(fixes.same_ecosystem, ["3.13.16"]);
+    assert_eq!(
+        fixes.upstream[0].origin,
+        UpstreamOrigin::OtherReleaseLine {
+            conda_publication: CondaPublication::Published,
+        }
+    );
+
+    let mut arrow = package;
+    arrow.name = conda_name("libarrow");
+    arrow.version = Some("21.0.0".to_string());
+    let arrow_doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
+        "id": "CVE-2026-9000",
+        "affected": [{
+            "package": {"ecosystem": "conda-forge", "name": "libarrow"},
+            "ranges": [{"type": "ECOSYSTEM", "events": [
+                {"introduced": "21.0.0"}, {"fixed": "23.0.1"}
+            ]}]
+        }]
+    }))
+    .unwrap();
+    assert_eq!(
+        Backend::Basilisk
+            .fixed_versions(&arrow_doc, &arrow)
+            .same_ecosystem,
+        ["23.0.1"]
+    );
+}
+
 /// Like `vuln_doc`, but with no fixed events anywhere (id BSLK-NOFIX).
 fn vuln_doc_nofix() -> serde_json::Value {
     serde_json::json!({
