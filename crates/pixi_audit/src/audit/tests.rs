@@ -1251,3 +1251,63 @@ async fn findings_are_ordered_by_risk_then_severity() {
     report.sort(SortStrategy::Kev);
     assert_eq!(ids(&report), ["BSLK-1", "BSLK-NOFIX"]);
 }
+
+#[tokio::test]
+async fn advisory_aliases_count_once_before_suppression() {
+    let app = Router::new()
+        .route(
+            "/v1/querybatch",
+            post(|Json(body): Json<serde_json::Value>| async move {
+                let results: Vec<_> = body["queries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|q| {
+                        if q["package"]["name"] == "openssl" {
+                            serde_json::json!({"vulns": [
+                                {"id": "PYSEC-1"}, {"id": "CVE-1"}, {"id": "GHSA-1"}
+                            ]})
+                        } else {
+                            serde_json::json!({})
+                        }
+                    })
+                    .collect();
+                Json(serde_json::json!({"results": results}))
+            }),
+        )
+        .route(
+            "/v1/vulns/{id}",
+            get(|axum::extract::Path(id): axum::extract::Path<String>| async move {
+                let (aliases, fixes) = match id.as_str() {
+                    "PYSEC-1" => (vec!["GHSA-1"], vec![]),
+                    "GHSA-1" => (vec!["CVE-1"], vec!["3.1.1"]),
+                    _ => (vec![], vec!["3.1.2"]),
+                };
+                Json(serde_json::json!({
+                    "id": id,
+                    "aliases": aliases,
+                    "affected": [{
+                        "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                        "ranges": fixes.iter().map(|fix| serde_json::json!({
+                            "type": "ECOSYSTEM",
+                            "events": [{"introduced": "0"}, {"fixed": fix}]
+                        })).collect::<Vec<_>>()
+                    }]
+                }))
+            }),
+        );
+    let base = spawn(app).await;
+    let ids = vec!["CVE-1".to_string()];
+    let spec = IgnoreSpec {
+        ignore: &ids,
+        ..IgnoreSpec::default()
+    };
+    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    assert!(report.vulnerabilities.is_empty());
+    assert_eq!(report.summary.ignored, 1);
+    assert!(report.unmatched_ignores.is_empty());
+    let finding = &report.ignored[0];
+    assert_eq!(finding.id, "PYSEC-1");
+    assert_eq!(finding.aliases, ["CVE-1", "GHSA-1"]);
+    assert_eq!(finding.fixed_versions, ["3.1.1", "3.1.2"]);
+}
