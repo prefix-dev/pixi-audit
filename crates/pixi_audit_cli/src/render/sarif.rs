@@ -329,7 +329,7 @@ fn result(finding: &Finding, uri: &str, lockfile_contents: &str) -> SarifResult 
         level: level(finding.severity),
         message: Message {
             text: format!(
-                "{}: {} vulnerability in {} package {} {}; {}{}",
+                "{}: {} vulnerability in {} package {} {}. {}{}",
                 finding.id,
                 finding.severity.name(),
                 finding.ecosystem,
@@ -337,7 +337,7 @@ fn result(finding: &Finding, uri: &str, lockfile_contents: &str) -> SarifResult 
                 finding.version,
                 fix_summary(finding),
                 match_note(finding)
-                    .map(|note| format!("; {note}"))
+                    .map(|note| format!(". {note}"))
                     .unwrap_or_default()
             ),
         },

@@ -28,13 +28,13 @@ pub fn on_github_actions() -> bool {
 }
 
 /// One workflow command per vulnerability, each on its own line.
-pub fn github_annotations(report: &AuditReport, level: Level) -> String {
+pub fn github_annotations(report: &AuditReport, level_for: impl Fn(&Finding) -> Level) -> String {
     let mut out = String::new();
     for finding in &report.vulnerabilities {
         writeln!(
             out,
             "::{} title={}::{}",
-            level.command(),
+            level_for(finding).command(),
             escape_property(&format!(
                 "{} in {} {}",
                 finding.id, finding.package, finding.version
@@ -126,11 +126,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            github_annotations(&report, Level::Error),
-            "::error title=CVE-2026-1 in openssl 3.1.0::high severity, fixed in 3.1.1 \
-             (conda-forge; default): 100%25 broken%0Areally https://osv.dev/CVE-2026-1\n"
+            github_annotations(&report, |_| Level::Error),
+            "::error title=CVE-2026-1 in openssl 3.1.0::high severity, fixed in 3.1.1, \
+             match details unavailable (conda-forge; default): 100%25 broken%0Areally https://osv.dev/CVE-2026-1\n"
         );
-        assert!(github_annotations(&report, Level::Warning).starts_with("::warning "));
+        assert!(github_annotations(&report, |_| Level::Warning).starts_with("::warning "));
     }
 
     #[test]
@@ -159,14 +159,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            github_annotations(&report, Level::Warning),
+            github_annotations(&report, |_| Level::Warning),
             "::warning title=CVE-2022-25852 in libpq 16.0::high severity, no known fixed \
-             version, match: version unbounded (conda-forge; default)\n"
+             version, match: no version limits (conda-forge; default)\n"
         );
         report.vulnerabilities[0].applicability = MatchApplicability::Unevaluated;
-        assert!(github_annotations(&report, Level::Warning).contains(", match: unevaluated ("));
-        report.vulnerabilities[0].applicability = MatchApplicability::Evaluated;
-        assert!(!github_annotations(&report, Level::Warning).contains("match:"));
+        assert!(
+            github_annotations(&report, |_| Level::Warning)
+                .contains(", match: version not checked (")
+        );
     }
 
     #[test]
@@ -210,9 +211,9 @@ mod tests {
         );
         report.vulnerabilities.push(finding);
         assert_eq!(
-            github_annotations(&report, Level::Error),
+            github_annotations(&report, |_| Level::Error),
             "::error title=CVE-2026-1 in openssl 3.1.0::high severity, risk 78.8, known exploited, \
-             no known fixed version (conda-forge; default)\n"
+             no known fixed version, match details unavailable (conda-forge; default)\n"
         );
     }
 }

@@ -37,7 +37,7 @@ pub enum Field {
     Url,
     /// Why a finding sits in the ignored section; empty elsewhere.
     Ignored,
-    /// How confidently basilisk matched the advisory to the package.
+    /// How the advisory's version data matched the package.
     Match,
 }
 
@@ -321,13 +321,13 @@ pub fn severity_palette_index(band: SeverityBand) -> u8 {
     }
 }
 
-/// The applicability as the Match column shows it; `None` when basilisk
-/// recorded none.
+/// The applicability as the Match column shows it; `None` when no
+/// applicability metadata was recorded.
 pub fn match_label(applicability: MatchApplicability) -> Option<&'static str> {
     match applicability {
-        MatchApplicability::Evaluated => Some("evaluated"),
-        MatchApplicability::Unevaluated => Some("unevaluated"),
-        MatchApplicability::VersionUnbounded => Some("unbounded"),
+        MatchApplicability::Evaluated => Some("affects version"),
+        MatchApplicability::Unevaluated => Some("version not checked"),
+        MatchApplicability::VersionUnbounded => Some("no version limits"),
         MatchApplicability::Unspecified => None,
     }
 }

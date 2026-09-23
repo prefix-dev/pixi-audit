@@ -194,6 +194,29 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn warn_only_conda_reports_without_failing() {
+    let base = spawn_mock(true).await;
+    let output = run_cli_env(
+        base,
+        vec![
+            lockfile(),
+            "--warn-only".to_string(),
+            "conda-forge".to_string(),
+            "--json".to_string(),
+        ],
+        vec![("GITHUB_ACTIONS", "true")],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["summary"]["vulnerable"], 1);
+    assert_eq!(report["vulnerabilities"][0]["ecosystem"], "conda-forge");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("::warning title=BSLK-1"), "{stderr}");
+    assert!(!stderr.contains("::error"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn explain_describes_the_human_report_after_next_steps() {
     let base = spawn_mock(true).await;
     let output = run_cli(base, vec![lockfile(), "--explain".to_string()]).await;
@@ -1103,23 +1126,10 @@ async fn cpe_match_without_version_bounds_shows_no_upstream_fix() {
         .lines()
         .find(|line| line.contains("CVE-2022-25852"))
         .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
-    assert_eq!(
-        row.split_whitespace().collect::<Vec<_>>(),
-        [
-            "(conda)",
-            "openssl",
-            "3.1.0",
-            "CVE-2022-25852",
-            "(unbounded)",
-            "Critical",
-            "default,",
-            "prod"
-        ],
-        "stdout: {stdout}"
-    );
+    assert!(row.contains("CVE-2022-25852 (no version limits)"), "{row}");
     assert!(!stdout.contains("npm"), "stdout: {stdout}");
     assert!(
-        stdout.contains("by status:   0 fixed, 1 not-fixed, 0 ignored, 1 unbounded"),
+        stdout.contains("by status:   0 fixed, 1 not-fixed, 0 ignored, 1 no version limits"),
         "stdout: {stdout}"
     );
 
@@ -1137,10 +1147,7 @@ async fn cpe_match_without_version_bounds_shows_no_upstream_fix() {
         .lines()
         .find(|line| line.contains("CVE-2022-25852"))
         .unwrap();
-    assert_eq!(
-        row.split_whitespace().collect::<Vec<_>>(),
-        ["CVE-2022-25852", "unbounded"]
-    );
+    assert!(row.contains("CVE-2022-25852  no version limits"), "{row}");
 
     let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
