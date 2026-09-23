@@ -21,6 +21,17 @@ pub struct IgnoreArgs {
     /// Limit the rule to this package, or ignore every finding in it
     #[arg(long, value_name = "NAME")]
     pub package: Option<String>,
+    /// Match findings from this ecosystem (conda-forge or PyPI)
+    #[arg(long, value_name = "ECOSYSTEM")]
+    pub ecosystem: Option<String>,
+
+    /// Match only this installed version
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+
+    /// Match installed versions no newer than this one
+    #[arg(long, value_name = "VERSION")]
+    pub max_affected_version: Option<String>,
 
     /// Ignore only while no fixed release is known
     #[arg(long)]
@@ -82,6 +93,11 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
         list,
         &args.ids,
         args.package.as_deref(),
+        IgnoreScope {
+            ecosystem: args.ecosystem.as_deref(),
+            version: args.version.as_deref(),
+            max_affected_version: args.max_affected_version.as_deref(),
+        },
         args.reason.as_deref(),
         args.until,
     )?;
@@ -135,18 +151,31 @@ pub struct Outcome {
     pub existing: Vec<String>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IgnoreScope<'a> {
+    pub ecosystem: Option<&'a str>,
+    pub version: Option<&'a str>,
+    pub max_affected_version: Option<&'a str>,
+}
+
 /// What one rule suppresses, lowercased for comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuleKey {
     id: Option<String>,
     package: Option<String>,
+    ecosystem: Option<String>,
+    version: Option<String>,
+    max_affected_version: Option<String>,
 }
 
 impl RuleKey {
-    fn new(id: Option<&str>, package: Option<&str>) -> Self {
+    fn new(id: Option<&str>, package: Option<&str>, scope: IgnoreScope<'_>) -> Self {
         Self {
             id: id.map(str::to_lowercase),
             package: package.map(str::to_lowercase),
+            ecosystem: scope.ecosystem.map(str::to_lowercase),
+            version: scope.version.map(str::to_string),
+            max_affected_version: scope.max_affected_version.map(str::to_string),
         }
     }
 }
@@ -161,9 +190,18 @@ pub fn add_rules(
     list: IgnoreList,
     ids: &[String],
     package: Option<&str>,
+    scope: IgnoreScope<'_>,
     reason: Option<&str>,
     until: Option<Date>,
 ) -> miette::Result<Outcome> {
+    config::validate_scope(&config::ResolvedIgnore {
+        id: ids.first().cloned(),
+        package: package.map(str::to_string),
+        ecosystem: scope.ecosystem.map(str::to_string),
+        version: scope.version.map(str::to_string),
+        max_affected_version: scope.max_affected_version.map(str::to_string),
+    })
+    .map_err(|error| miette!("{error}"))?;
     let table = audit_table(document)?;
     let item = table
         .entry(list.key())
@@ -180,7 +218,7 @@ pub fn add_rules(
     let mut outcome = Outcome::default();
     let mut added_keys: Vec<RuleKey> = Vec::new();
     for id in targets {
-        let key = RuleKey::new(id, package);
+        let key = RuleKey::new(id, package, scope);
         let label = match (id, package) {
             (Some(id), Some(package)) => format!("{id} in package '{package}'"),
             (Some(id), None) => id.to_string(),
@@ -195,7 +233,7 @@ pub fn add_rules(
             outcome.existing.push(label);
             continue;
         }
-        array.push(rule_value(id, package, reason, until));
+        array.push(rule_value(id, package, scope, reason, until));
         added_keys.push(key);
         outcome.added.push(label);
     }
@@ -225,10 +263,15 @@ fn audit_table(document: &mut DocumentMut) -> miette::Result<&mut Table> {
 /// reports them.
 fn entry_key(entry: &Value) -> Option<RuleKey> {
     match entry {
-        Value::String(id) => Some(RuleKey::new(Some(id.value()), None)),
+        Value::String(id) => Some(RuleKey::new(Some(id.value()), None, IgnoreScope::default())),
         Value::InlineTable(rule) => Some(RuleKey::new(
             rule.get("id").and_then(Value::as_str),
             rule.get("package").and_then(Value::as_str),
+            IgnoreScope {
+                ecosystem: rule.get("ecosystem").and_then(Value::as_str),
+                version: rule.get("version").and_then(Value::as_str),
+                max_affected_version: rule.get("max-affected-version").and_then(Value::as_str),
+            },
         )),
         Value::Integer(_)
         | Value::Float(_)
@@ -243,10 +286,19 @@ fn entry_key(entry: &Value) -> Option<RuleKey> {
 fn rule_value(
     id: Option<&str>,
     package: Option<&str>,
+    scope: IgnoreScope<'_>,
     reason: Option<&str>,
     until: Option<Date>,
 ) -> Value {
-    if let (Some(id), None, None, None) = (id, package, reason, until) {
+    if let (Some(id), None, None, None, None, None, None) = (
+        id,
+        package,
+        scope.ecosystem,
+        scope.version,
+        scope.max_affected_version,
+        reason,
+        until,
+    ) {
         return Value::from(id);
     }
     let mut rule = InlineTable::new();
@@ -255,6 +307,15 @@ fn rule_value(
     }
     if let Some(package) = package {
         rule.insert("package", Value::from(package));
+    }
+    if let Some(ecosystem) = scope.ecosystem {
+        rule.insert("ecosystem", Value::from(ecosystem));
+    }
+    if let Some(version) = scope.version {
+        rule.insert("version", Value::from(version));
+    }
+    if let Some(version) = scope.max_affected_version {
+        rule.insert("max-affected-version", Value::from(version));
     }
     if let Some(reason) = reason {
         rule.insert("reason", Value::from(reason));

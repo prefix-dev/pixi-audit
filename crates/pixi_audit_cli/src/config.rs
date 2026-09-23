@@ -57,6 +57,12 @@ pub struct IgnoreRule {
     #[serde(default)]
     pub package: Option<String>,
     #[serde(default)]
+    pub ecosystem: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default, rename = "max-affected-version")]
+    pub max_affected_version: Option<String>,
+    #[serde(default)]
     pub reason: Option<String>,
     /// The last day the rule applies, as a TOML date or a `YYYY-MM-DD`
     /// string. Validated when the config is resolved.
@@ -65,10 +71,13 @@ pub struct IgnoreRule {
 }
 
 /// What an ignore-list entry suppresses, with its expiry resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ResolvedIgnore {
     pub id: Option<String>,
     pub package: Option<String>,
+    pub ecosystem: Option<String>,
+    pub version: Option<String>,
+    pub max_affected_version: Option<String>,
 }
 
 impl std::fmt::Display for ResolvedIgnore {
@@ -82,6 +91,37 @@ impl std::fmt::Display for ResolvedIgnore {
     }
 }
 
+pub(crate) fn validate_scope(rule: &ResolvedIgnore) -> Result<(), String> {
+    let ecosystem = rule.ecosystem.as_deref().map(str::to_ascii_lowercase);
+    if !matches!(ecosystem.as_deref(), None | Some("conda-forge" | "pypi")) {
+        return Err(format!(
+            "unsupported ecosystem '{}' (expected conda-forge or PyPI)",
+            ecosystem.unwrap_or_default()
+        ));
+    }
+    for version in [
+        rule.version.as_deref(),
+        rule.max_affected_version.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let conda = version.parse::<rattler_conda_types::Version>().is_ok();
+        let pypi = version.parse::<uv_pep440::Version>().is_ok();
+        let valid = match ecosystem.as_deref() {
+            Some("conda-forge") => conda,
+            Some("pypi") => pypi,
+            _ => conda || pypi,
+        };
+        if !valid {
+            return Err(format!(
+                "invalid version '{version}' for the selected ecosystem"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl IgnoreEntry {
     /// What the entry suppresses. An entry naming neither an id nor a
     /// package would suppress everything, so it is rejected.
@@ -90,6 +130,9 @@ impl IgnoreEntry {
             IgnoreEntry::Id(id) => Ok(ResolvedIgnore {
                 id: Some(id.clone()),
                 package: None,
+                ecosystem: None,
+                version: None,
+                max_affected_version: None,
             }),
             IgnoreEntry::Rule(IgnoreRule {
                 id: None,
@@ -99,6 +142,9 @@ impl IgnoreEntry {
             IgnoreEntry::Rule(rule) => Ok(ResolvedIgnore {
                 id: rule.id.clone(),
                 package: rule.package.clone(),
+                ecosystem: rule.ecosystem.clone(),
+                version: rule.version.clone(),
+                max_affected_version: rule.max_affected_version.clone(),
             }),
         }
     }
@@ -140,6 +186,7 @@ pub fn effective_ignores(
     let mut expired = Vec::new();
     for entry in entries {
         let rule = entry.resolved()?;
+        validate_scope(&rule)?;
         match entry.until()? {
             Some(until) if until < today => expired.push(ExpiredIgnore { rule, until }),
             Some(_) | None => active.push(rule),
@@ -268,6 +315,9 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
                 ResolvedIgnore {
                     id: Some(id),
                     package: None,
+                    ecosystem: None,
+                    version: None,
+                    max_affected_version: None,
                 } => {
                     if until_fixed {
                         config.ignore_until_fixed.push(id);
@@ -277,16 +327,18 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
                 }
                 ResolvedIgnore {
                     id,
-                    package: Some(package),
+                    package,
+                    ecosystem,
+                    version,
+                    max_affected_version,
                 } => config.package_rules.push(PackageIgnore {
                     package,
                     id,
+                    ecosystem,
+                    version,
+                    max_affected_version,
                     until_fixed,
                 }),
-                ResolvedIgnore {
-                    id: None,
-                    package: None,
-                } => {}
             }
         }
     }
