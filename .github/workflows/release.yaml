@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       channel:
@@ -16,7 +16,7 @@ permissions:
 jobs:
   metadata:
     name: Release metadata
-    if: github.repository == 'prefix-dev/pixi_audit' && github.ref == 'refs/heads/main'
+    if: github.repository == 'prefix-dev/pixi_audit' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     outputs:
       build-number: ${{ steps.release.outputs.build-number }}
@@ -33,6 +33,7 @@ jobs:
         env:
           DEFAULT_CHANNEL: ${{ vars.PREFIX_CHANNEL }}
           REQUESTED_CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -47,6 +48,14 @@ jobs:
             jq -r '.packages[] | select(.name == "pixi_audit_cli") | .version')
           if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
             echo "Could not determine the pixi_audit_cli version." >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" != "v$VERSION" ]]; then
+            echo "Release tag $RELEASE_TAG does not match pixi_audit_cli version $VERSION." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Release tag must point to a commit on main." >&2
             exit 1
           fi
 
@@ -104,7 +113,11 @@ jobs:
             echo "Package version does not match pixi_audit_cli $EXPECTED_VERSION." >&2
             exit 1
           fi
-          pixi exec --spec "${packages[0]}" pixi-audit --help
+          ACTUAL_VERSION=$(pixi exec --spec "${packages[0]}" pixi-audit --version)
+          if [[ "$ACTUAL_VERSION" != "pixi-audit $EXPECTED_VERSION" ]]; then
+            echo "Binary version $ACTUAL_VERSION does not match package version $EXPECTED_VERSION." >&2
+            exit 1
+          fi
           echo "Built and tested ${packages[0]}"
 
       - name: Save package
