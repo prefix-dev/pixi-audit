@@ -239,7 +239,7 @@ fn entry_key(entry: &Value) -> Option<RuleKey> {
 }
 
 /// A bare id when there is nothing else to record, otherwise an inline
-/// table with the package, the reason, and the expiry as a TOML date.
+/// table with the package, the reason, and a pixi-compatible quoted expiry.
 fn rule_value(
     id: Option<&str>,
     package: Option<&str>,
@@ -260,21 +260,9 @@ fn rule_value(
         rule.insert("reason", Value::from(reason));
     }
     if let Some(until) = until {
-        rule.insert("until", Value::from(toml_date(until)));
+        rule.insert("until", Value::from(until.to_string()));
     }
     Value::InlineTable(rule)
-}
-
-fn toml_date(date: Date) -> toml_edit::Datetime {
-    toml_edit::Datetime {
-        date: Some(toml_edit::Date {
-            year: date.year().unsigned_abs(),
-            month: date.month().unsigned_abs(),
-            day: date.day().unsigned_abs(),
-        }),
-        time: None,
-        offset: None,
-    }
 }
 
 #[cfg(test)]

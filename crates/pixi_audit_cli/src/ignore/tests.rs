@@ -113,7 +113,7 @@ fn reason_and_until_become_an_inline_table() {
     );
     assert_eq!(
         text,
-        "[tool.pixi-audit]\nignore-until-fixed = [{ id = \"CVE-3\", reason = \"only in tests\", until = 2026-12-01 }]\n"
+        "[tool.pixi-audit]\nignore-until-fixed = [{ id = \"CVE-3\", reason = \"only in tests\", until = \"2026-12-01\" }]\n"
     );
 }
 
