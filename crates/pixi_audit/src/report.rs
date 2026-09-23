@@ -320,32 +320,67 @@ pub struct IgnoreSpec<'a> {
     pub ignore: &'a [String],
     /// Suppress these only while no fixed release is known.
     pub ignore_until_fixed: &'a [String],
-    /// Suppressions scoped to one package.
+    /// Rules scoped by package, ecosystem or installed version.
     pub package_rules: &'a [PackageIgnore],
     /// Suppress every finding for which no fixed release is known, as if
     /// each were listed in `ignore_until_fixed`.
     pub ignore_unfixed: bool,
 }
 
-/// A suppression scoped to one package: every finding in it, or only the
-/// vulnerability `id`. The package name is matched under its ecosystem's
-/// normalization rules, so `Ruamel.YAML` finds `ruamel-yaml` on PyPI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A suppression optionally scoped to package, ecosystem and locked version.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PackageIgnore {
-    pub package: String,
+    pub package: Option<String>,
     pub id: Option<String>,
+    pub ecosystem: Option<String>,
+    pub version: Option<String>,
+    pub max_affected_version: Option<String>,
     /// Suppress only while no fixed release is known.
     pub until_fixed: bool,
 }
 
 impl PackageIgnore {
     pub fn applies_to(&self, finding: &Finding) -> bool {
-        finding.package.matches(&self.package)
+        (self.id.is_some() || self.package.is_some())
+            && self
+                .package
+                .as_ref()
+                .is_none_or(|package| finding.package.matches(package))
+            && self.ecosystem.as_ref().is_none_or(|ecosystem| {
+                finding
+                    .ecosystem
+                    .osv_ecosystem()
+                    .eq_ignore_ascii_case(ecosystem)
+            })
             && self.id.as_ref().is_none_or(|id| {
                 std::iter::once(&finding.id)
                     .chain(&finding.aliases)
                     .any(|candidate| candidate.eq_ignore_ascii_case(id))
             })
+            && self.version.as_ref().is_none_or(|version| {
+                compare_versions(&finding.ecosystem, &finding.version, version)
+                    == Some(Ordering::Equal)
+            })
+            && self.max_affected_version.as_ref().is_none_or(|version| {
+                compare_versions(&finding.ecosystem, &finding.version, version)
+                    .is_some_and(|order| order != Ordering::Greater)
+            })
+    }
+}
+
+fn compare_versions(ecosystem: &PackageEcosystem, locked: &str, bound: &str) -> Option<Ordering> {
+    match ecosystem {
+        PackageEcosystem::CondaForge => Some(
+            rattler_conda_types::Version::from_str(locked)
+                .ok()?
+                .cmp(&rattler_conda_types::Version::from_str(bound).ok()?),
+        ),
+        PackageEcosystem::Pypi => Some(
+            uv_pep440::Version::from_str(locked)
+                .ok()?
+                .cmp(&uv_pep440::Version::from_str(bound).ok()?),
+        ),
+        PackageEcosystem::Other(_) => None,
     }
 }
 
@@ -496,9 +531,8 @@ pub struct AuditReport {
     pub ignored: Vec<Finding>,
     pub unchecked: Vec<UncheckedPackage>,
     pub summary: AuditSummary,
-    /// Ids from the ignore lists that matched no finding's id or alias, as
-    /// written and without duplicates. Usually a suppression left behind
-    /// after the package was upgraded.
+    /// Ignore ids and scoped rules that matched no finding. An expired
+    /// package or version exception remains visible after an upgrade.
     pub unmatched_ignores: Vec<String>,
     pub threat_data: ThreatDataStatus,
 }

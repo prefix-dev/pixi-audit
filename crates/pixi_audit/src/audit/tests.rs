@@ -261,9 +261,10 @@ async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
 
 fn package_rule(package: &str, id: Option<&str>, until_fixed: bool) -> PackageIgnore {
     PackageIgnore {
-        package: package.to_string(),
+        package: Some(package.to_string()),
         id: id.map(str::to_string),
         until_fixed,
+        ..PackageIgnore::default()
     }
 }
 
@@ -309,6 +310,63 @@ async fn package_rules_scope_suppression_to_one_package() {
             "rule: {rule:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
+    let base = spawn_mock().await;
+    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+        .await
+        .unwrap();
+    let mut conda = report.vulnerabilities[0].clone();
+    conda.package = conda_name("openssl");
+    let mut pypi = conda.clone();
+    pypi.package = pypi_name("openssl");
+    pypi.ecosystem = PackageEcosystem::Pypi;
+
+    let rule = PackageIgnore {
+        id: Some("CVE-2026-1234".to_string()),
+        ecosystem: Some("conda-forge".to_string()),
+        version: Some("3.1.0".to_string()),
+        ..PackageIgnore::default()
+    };
+    assert!(rule.applies_to(&conda));
+    assert!(!rule.applies_to(&pypi));
+    conda.version = "3.1.1".to_string();
+    assert!(!rule.applies_to(&conda));
+
+    let rule = PackageIgnore {
+        package: Some("openssl".to_string()),
+        max_affected_version: Some("3.1.0".to_string()),
+        ..PackageIgnore::default()
+    };
+    assert!(!rule.applies_to(&conda));
+    conda.version = "3.1.0".to_string();
+    assert!(rule.applies_to(&conda));
+    conda.version = "3.0.9".to_string();
+    assert!(rule.applies_to(&conda));
+    let base = spawn_mock().await;
+    let stale = [PackageIgnore {
+        id: Some("CVE-2026-1234".to_string()),
+        ecosystem: Some("conda-forge".to_string()),
+        version: Some("3.1.1".to_string()),
+        ..PackageIgnore::default()
+    }];
+    let report = audit(
+        &test_client(base),
+        packages(),
+        IgnoreSpec {
+            package_rules: &stale,
+            ..IgnoreSpec::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.summary.vulnerable, 1);
+    assert_eq!(
+        report.unmatched_ignores,
+        ["CVE-2026-1234 in ecosystem 'conda-forge' in version '3.1.1'"]
+    );
 }
 
 #[tokio::test]
@@ -791,9 +849,10 @@ async fn package_rules_match_pypi_names_under_pep_503() {
         environments: vec!["default".to_string()],
     }];
     let rules = [PackageIgnore {
-        package: "Requests.Test".to_string(),
+        package: Some("Requests.Test".to_string()),
         id: None,
         until_fixed: false,
+        ..PackageIgnore::default()
     }];
     let report = super::audit(
         &test_client(conda_base),
@@ -1277,24 +1336,26 @@ async fn advisory_aliases_count_once_before_suppression() {
         )
         .route(
             "/v1/vulns/{id}",
-            get(|axum::extract::Path(id): axum::extract::Path<String>| async move {
-                let (aliases, fixes) = match id.as_str() {
-                    "PYSEC-1" => (vec!["GHSA-1"], vec![]),
-                    "GHSA-1" => (vec!["CVE-1"], vec!["3.1.1"]),
-                    _ => (vec![], vec!["3.1.2"]),
-                };
-                Json(serde_json::json!({
-                    "id": id,
-                    "aliases": aliases,
-                    "affected": [{
-                        "package": {"ecosystem": "conda-forge", "name": "openssl"},
-                        "ranges": fixes.iter().map(|fix| serde_json::json!({
-                            "type": "ECOSYSTEM",
-                            "events": [{"introduced": "0"}, {"fixed": fix}]
-                        })).collect::<Vec<_>>()
-                    }]
-                }))
-            }),
+            get(
+                |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    let (aliases, fixes) = match id.as_str() {
+                        "PYSEC-1" => (vec!["GHSA-1"], vec![]),
+                        "GHSA-1" => (vec!["CVE-1"], vec!["3.1.1"]),
+                        _ => (vec![], vec!["3.1.2"]),
+                    };
+                    Json(serde_json::json!({
+                        "id": id,
+                        "aliases": aliases,
+                        "affected": [{
+                            "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                            "ranges": fixes.iter().map(|fix| serde_json::json!({
+                                "type": "ECOSYSTEM",
+                                "events": [{"introduced": "0"}, {"fixed": fix}]
+                            })).collect::<Vec<_>>()
+                        }]
+                    }))
+                },
+            ),
         );
     let base = spawn(app).await;
     let ids = vec!["CVE-1".to_string()];

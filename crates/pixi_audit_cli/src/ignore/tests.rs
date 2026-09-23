@@ -23,7 +23,16 @@ fn apply_to_package(
 ) -> (String, Outcome) {
     let mut document = content.parse::<DocumentMut>().unwrap();
     let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
-    let outcome = add_rules(&mut document, list, &ids, package, reason, until).unwrap();
+    let outcome = add_rules(
+        &mut document,
+        list,
+        &ids,
+        package,
+        IgnoreScope::default(),
+        reason,
+        until,
+    )
+    .unwrap();
     (document.to_string(), outcome)
 }
 
@@ -143,6 +152,31 @@ fn pyproject_uses_the_same_table() {
 }
 
 #[test]
+fn version_scoped_rules_are_written_separately() {
+    let mut document = "".parse::<DocumentMut>().unwrap();
+    for version in ["1.13.1", "1.13.2"] {
+        let outcome = add_rules(
+            &mut document,
+            IgnoreList::Always,
+            &["CVE-1".to_string()],
+            None,
+            IgnoreScope {
+                ecosystem: Some("conda-forge"),
+                version: Some(version),
+                max_affected_version: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.added, ["CVE-1"]);
+    }
+    let text = document.to_string();
+    assert!(text.contains("version = \"1.13.1\""), "{text}");
+    assert!(text.contains("version = \"1.13.2\""), "{text}");
+}
+
+#[test]
 fn a_list_that_is_not_an_array_is_an_error() {
     let mut document = "[tool.pixi-audit]\nignore = \"CVE-1\"\n"
         .parse::<DocumentMut>()
@@ -153,6 +187,7 @@ fn a_list_that_is_not_an_array_is_an_error() {
             IgnoreList::Always,
             &["CVE-2".to_string()],
             None,
+            IgnoreScope::default(),
             None,
             None
         )
