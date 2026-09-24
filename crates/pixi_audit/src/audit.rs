@@ -1,10 +1,14 @@
 //! Audit orchestration across the Basilisk and PyPI backends, plus the
 //! threat-data enrichment of the resulting findings.
 
+mod findings;
+
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 
 use futures::{StreamExt, TryStreamExt};
+
+use findings::FindingGroups;
 
 use crate::{
     advisory::{
@@ -280,11 +284,14 @@ pub async fn audit(
 
     let mut suppressions = Suppressions::from_spec(ignore);
     for (query, result) in planned.iter().zip(&results) {
+        let mut findings = FindingGroups::with_capacity(result.vulns.len());
         let package = query.package;
         for vuln in &result.vulns {
             let doc = documents
                 .get(&(query.backend, vuln.id.clone()))
-                .expect("references were collected from these same results");
+                .ok_or_else(|| AuditError::MissingDocument {
+                    id: vuln.id.clone(),
+                })?;
             if doc.withdrawn.is_some() {
                 continue;
             }
@@ -312,6 +319,9 @@ pub async fn audit(
                 risk: RiskScore::NONE,
                 ignore_reason: None,
             };
+            findings.push(finding);
+        }
+        for finding in findings.into_findings() {
             record_finding(&mut report, finding, &mut suppressions);
         }
     }

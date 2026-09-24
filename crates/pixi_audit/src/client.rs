@@ -45,6 +45,8 @@ pub enum AuditError {
         expected: usize,
         got: usize,
     },
+    #[error("fetched vulnerability document {id} was not available")]
+    MissingDocument { id: String },
     #[error("invalid audit API base URL")]
     InvalidBaseUrl(#[source] url::ParseError),
     #[error(
