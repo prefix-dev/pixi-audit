@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn package_versions_use_native_ordering() {
+    for (ecosystem, lower, higher) in [
+        (PackageEcosystem::CondaForge, "1.9", "1.10"),
+        (PackageEcosystem::CondaForge, "1.0dev1", "1.0"),
+        (PackageEcosystem::Pypi, "1.0rc1", "1.0"),
+        (PackageEcosystem::Pypi, "1.0", "1.0.post1"),
+        (PackageEcosystem::Pypi, "9.0", "1!1.0"),
+    ] {
+        let lower = PackageVersion::parse(&ecosystem, lower).unwrap();
+        let higher = PackageVersion::parse(&ecosystem, higher).unwrap();
+        assert_eq!(lower.partial_cmp(&higher), Some(Ordering::Less));
+        assert_eq!(higher.partial_cmp(&lower), Some(Ordering::Greater));
+    }
+    for ecosystem in [PackageEcosystem::CondaForge, PackageEcosystem::Pypi] {
+        let a = PackageVersion::parse(&ecosystem, "1.0").unwrap();
+        let b = PackageVersion::parse(&ecosystem, "1.0.0").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+    }
+}
+
+#[test]
+fn package_versions_from_different_ecosystems_are_incomparable() {
+    let conda = PackageVersion::parse(&PackageEcosystem::CondaForge, "1.0").unwrap();
+    let pypi = PackageVersion::parse(&PackageEcosystem::Pypi, "1.0").unwrap();
+    assert_ne!(conda, pypi);
+    assert_eq!(conda.partial_cmp(&pypi), None);
+    assert_eq!(pypi.partial_cmp(&conda), None);
+}
+
+#[test]
+fn package_version_parsing_rejects_invalid_and_unsupported_inputs() {
+    for ecosystem in [PackageEcosystem::CondaForge, PackageEcosystem::Pypi] {
+        assert!(matches!(
+            PackageVersion::parse(&ecosystem, "not a version"),
+            Err(ParsePackageVersionError::InvalidVersion { .. })
+        ));
+    }
+    assert!(matches!(
+        PackageVersion::parse(&PackageEcosystem::Pypi, "1.0foo"),
+        Err(ParsePackageVersionError::InvalidVersion { .. })
+    ));
+    assert!(matches!(
+        PackageVersion::parse(&PackageEcosystem::Other("npm".into()), "1.0"),
+        Err(ParsePackageVersionError::UnsupportedEcosystem(_))
+    ));
+}
+
+#[test]
+fn ignore_scope_validates_versions_for_the_selected_ecosystem() {
+    for (ecosystem, version, valid) in [
+        (None, "1.0foo", true),
+        (Some("Conda-Forge"), "1.0foo", true),
+        (Some("PyPI"), "1.0foo", false),
+        (Some("pYpI"), "1.0rc1", true),
+        (None, "not a version", false),
+        (Some("conda-forge"), "not a version", false),
+        (Some("PyPI"), "not a version", false),
+        (Some("npm"), "1.0", false),
+    ] {
+        let mut scope = IgnoreScope {
+            ecosystem: ecosystem.map(str::to_string),
+            version: Some(version.to_string()),
+            ..IgnoreScope::default()
+        };
+        assert_eq!(scope.validate().is_ok(), valid, "{scope:?}");
+        scope.max_affected_version = scope.version.take();
+        assert_eq!(scope.validate().is_ok(), valid, "{scope:?}");
+    }
+}
+
+#[test]
 fn severity_band_round_trips_through_its_name() {
     for band in SeverityBand::ALL {
         assert_eq!(band.name().parse::<SeverityBand>(), Ok(band));

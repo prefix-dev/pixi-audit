@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use clap::Args;
 use jiff::civil::Date;
 use miette::{Context, IntoDiagnostic, miette};
+use pixi_audit::IgnoreScope;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::config;
@@ -88,16 +89,17 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
     } else {
         IgnoreList::Always
     };
+    let scope = IgnoreScope {
+        package: args.package,
+        ecosystem: args.ecosystem,
+        version: args.version,
+        max_affected_version: args.max_affected_version,
+    };
     let outcome = add_rules(
         &mut document,
         list,
         &args.ids,
-        args.package.as_deref(),
-        IgnoreScope {
-            ecosystem: args.ecosystem.as_deref(),
-            version: args.version.as_deref(),
-            max_affected_version: args.max_affected_version.as_deref(),
-        },
+        &scope,
         args.reason.as_deref(),
         args.until,
     )?;
@@ -151,57 +153,43 @@ pub struct Outcome {
     pub existing: Vec<String>,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct IgnoreScope<'a> {
-    pub ecosystem: Option<&'a str>,
-    pub version: Option<&'a str>,
-    pub max_affected_version: Option<&'a str>,
-}
-
-/// What one rule suppresses, lowercased for comparison.
+/// What one rule suppresses, with identifiers lowercased for comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuleKey {
     id: Option<String>,
-    package: Option<String>,
-    ecosystem: Option<String>,
-    version: Option<String>,
-    max_affected_version: Option<String>,
+    scope: IgnoreScope,
 }
 
 impl RuleKey {
-    fn new(id: Option<&str>, package: Option<&str>, scope: IgnoreScope<'_>) -> Self {
+    fn new(id: Option<&str>, scope: &IgnoreScope) -> Self {
         Self {
             id: id.map(str::to_lowercase),
-            package: package.map(str::to_lowercase),
-            ecosystem: scope.ecosystem.map(str::to_lowercase),
-            version: scope.version.map(str::to_string),
-            max_affected_version: scope.max_affected_version.map(str::to_string),
+            scope: IgnoreScope {
+                package: scope.package.as_deref().map(str::to_lowercase),
+                ecosystem: scope.ecosystem.as_deref().map(str::to_lowercase),
+                version: scope.version.clone(),
+                max_affected_version: scope.max_affected_version.clone(),
+            },
         }
     }
 }
 
 /// Appends a rule for each of `ids` to `list` in `document`, or one rule
-/// for the whole `package` when no id is given, creating the
+/// for the whole scoped package when no id is given, creating the
 /// `[tool.pixi-audit]` table and the list as needed. Rules already listed,
-/// compared case-insensitively, are left alone and reported as existing.
+/// with case-insensitive identifiers and exact version strings, are left
+/// alone and reported as existing.
 /// Formatting and comments elsewhere in the document are untouched.
 pub fn add_rules(
     document: &mut DocumentMut,
     list: IgnoreList,
     ids: &[String],
-    package: Option<&str>,
-    scope: IgnoreScope<'_>,
+    scope: &IgnoreScope,
     reason: Option<&str>,
     until: Option<Date>,
 ) -> miette::Result<Outcome> {
-    config::validate_scope(&config::ResolvedIgnore {
-        id: ids.first().cloned(),
-        package: package.map(str::to_string),
-        ecosystem: scope.ecosystem.map(str::to_string),
-        version: scope.version.map(str::to_string),
-        max_affected_version: scope.max_affected_version.map(str::to_string),
-    })
-    .map_err(|error| miette!("{error}"))?;
+    scope.validate().map_err(|error| miette!("{error}"))?;
+    let package = scope.package.as_deref();
     let table = audit_table(document)?;
     let item = table
         .entry(list.key())
@@ -218,7 +206,7 @@ pub fn add_rules(
     let mut outcome = Outcome::default();
     let mut added_keys: Vec<RuleKey> = Vec::new();
     for id in targets {
-        let key = RuleKey::new(id, package, scope);
+        let key = RuleKey::new(id, scope);
         let label = match (id, package) {
             (Some(id), Some(package)) => format!("{id} in package '{package}'"),
             (Some(id), None) => id.to_string(),
@@ -233,7 +221,7 @@ pub fn add_rules(
             outcome.existing.push(label);
             continue;
         }
-        array.push(rule_value(id, package, scope, reason, until));
+        array.push(rule_value(id, scope, reason, until));
         added_keys.push(key);
         outcome.added.push(label);
     }
@@ -263,16 +251,31 @@ fn audit_table(document: &mut DocumentMut) -> miette::Result<&mut Table> {
 /// reports them.
 fn entry_key(entry: &Value) -> Option<RuleKey> {
     match entry {
-        Value::String(id) => Some(RuleKey::new(Some(id.value()), None, IgnoreScope::default())),
-        Value::InlineTable(rule) => Some(RuleKey::new(
-            rule.get("id").and_then(Value::as_str),
-            rule.get("package").and_then(Value::as_str),
-            IgnoreScope {
-                ecosystem: rule.get("ecosystem").and_then(Value::as_str),
-                version: rule.get("version").and_then(Value::as_str),
-                max_affected_version: rule.get("max-affected-version").and_then(Value::as_str),
+        Value::String(id) => Some(RuleKey::new(Some(id.value()), &IgnoreScope::default())),
+        Value::InlineTable(rule) => Some(RuleKey {
+            id: rule
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_lowercase),
+            scope: IgnoreScope {
+                package: rule
+                    .get("package")
+                    .and_then(Value::as_str)
+                    .map(str::to_lowercase),
+                ecosystem: rule
+                    .get("ecosystem")
+                    .and_then(Value::as_str)
+                    .map(str::to_lowercase),
+                version: rule
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                max_affected_version: rule
+                    .get("max-affected-version")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             },
-        )),
+        }),
         Value::Integer(_)
         | Value::Float(_)
         | Value::Boolean(_)
@@ -285,36 +288,31 @@ fn entry_key(entry: &Value) -> Option<RuleKey> {
 /// table with the package, the reason, and a pixi-compatible quoted expiry.
 fn rule_value(
     id: Option<&str>,
-    package: Option<&str>,
-    scope: IgnoreScope<'_>,
+    scope: &IgnoreScope,
     reason: Option<&str>,
     until: Option<Date>,
 ) -> Value {
-    if let (Some(id), None, None, None, None, None, None) = (
-        id,
-        package,
-        scope.ecosystem,
-        scope.version,
-        scope.max_affected_version,
-        reason,
-        until,
-    ) {
+    if let Some(id) = id
+        && scope.is_empty()
+        && reason.is_none()
+        && until.is_none()
+    {
         return Value::from(id);
     }
     let mut rule = InlineTable::new();
     if let Some(id) = id {
         rule.insert("id", Value::from(id));
     }
-    if let Some(package) = package {
+    if let Some(package) = scope.package.as_deref() {
         rule.insert("package", Value::from(package));
     }
-    if let Some(ecosystem) = scope.ecosystem {
+    if let Some(ecosystem) = scope.ecosystem.as_deref() {
         rule.insert("ecosystem", Value::from(ecosystem));
     }
-    if let Some(version) = scope.version {
+    if let Some(version) = scope.version.as_deref() {
         rule.insert("version", Value::from(version));
     }
-    if let Some(version) = scope.max_affected_version {
+    if let Some(version) = scope.max_affected_version.as_deref() {
         rule.insert("max-affected-version", Value::from(version));
     }
     if let Some(reason) = reason {

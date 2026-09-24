@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use jiff::civil::Date;
 use miette::{Context, IntoDiagnostic, miette};
-use pixi_audit::{PackageIgnore, SeverityBand};
+use pixi_audit::{IgnoreScope, PackageIgnore, SeverityBand};
 use serde::Deserialize;
 
 /// Persistent audit configuration from `[tool.pixi-audit]`, with expired
@@ -52,16 +52,8 @@ pub enum IgnoreEntry {
 pub struct IgnoreRule {
     #[serde(default)]
     pub id: Option<String>,
-    /// Limits the rule to findings in this package; on its own, ignores
-    /// every finding in it.
-    #[serde(default)]
-    pub package: Option<String>,
-    #[serde(default)]
-    pub ecosystem: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default, rename = "max-affected-version")]
-    pub max_affected_version: Option<String>,
+    #[serde(flatten)]
+    pub scope: IgnoreScope,
     #[serde(default)]
     pub reason: Option<String>,
     /// The last day the rule applies, as a TOML date or a `YYYY-MM-DD`
@@ -74,52 +66,18 @@ pub struct IgnoreRule {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ResolvedIgnore {
     pub id: Option<String>,
-    pub package: Option<String>,
-    pub ecosystem: Option<String>,
-    pub version: Option<String>,
-    pub max_affected_version: Option<String>,
+    pub scope: IgnoreScope,
 }
 
 impl std::fmt::Display for ResolvedIgnore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match (&self.id, &self.package) {
+        match (&self.id, &self.scope.package) {
             (Some(id), Some(package)) => write!(f, "'{id}' in package '{package}'"),
             (Some(id), None) => write!(f, "'{id}'"),
             (None, Some(package)) => write!(f, "package '{package}'"),
             (None, None) => f.write_str("(empty rule)"),
         }
     }
-}
-
-pub(crate) fn validate_scope(rule: &ResolvedIgnore) -> Result<(), String> {
-    let ecosystem = rule.ecosystem.as_deref().map(str::to_ascii_lowercase);
-    if !matches!(ecosystem.as_deref(), None | Some("conda-forge" | "pypi")) {
-        return Err(format!(
-            "unsupported ecosystem '{}' (expected conda-forge or PyPI)",
-            ecosystem.unwrap_or_default()
-        ));
-    }
-    for version in [
-        rule.version.as_deref(),
-        rule.max_affected_version.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let conda = version.parse::<rattler_conda_types::Version>().is_ok();
-        let pypi = version.parse::<uv_pep440::Version>().is_ok();
-        let valid = match ecosystem.as_deref() {
-            Some("conda-forge") => conda,
-            Some("pypi") => pypi,
-            _ => conda || pypi,
-        };
-        if !valid {
-            return Err(format!(
-                "invalid version '{version}' for the selected ecosystem"
-            ));
-        }
-    }
-    Ok(())
 }
 
 impl IgnoreEntry {
@@ -129,22 +87,16 @@ impl IgnoreEntry {
         match self {
             IgnoreEntry::Id(id) => Ok(ResolvedIgnore {
                 id: Some(id.clone()),
-                package: None,
-                ecosystem: None,
-                version: None,
-                max_affected_version: None,
+                scope: IgnoreScope::default(),
             }),
             IgnoreEntry::Rule(IgnoreRule {
                 id: None,
-                package: None,
+                scope: IgnoreScope { package: None, .. },
                 ..
             }) => Err("an ignore rule needs an 'id' or a 'package'".to_string()),
             IgnoreEntry::Rule(rule) => Ok(ResolvedIgnore {
                 id: rule.id.clone(),
-                package: rule.package.clone(),
-                ecosystem: rule.ecosystem.clone(),
-                version: rule.version.clone(),
-                max_affected_version: rule.max_affected_version.clone(),
+                scope: rule.scope.clone(),
             }),
         }
     }
@@ -186,7 +138,7 @@ pub fn effective_ignores(
     let mut expired = Vec::new();
     for entry in entries {
         let rule = entry.resolved()?;
-        validate_scope(&rule)?;
+        rule.scope.validate()?;
         match entry.until()? {
             Some(until) if until < today => expired.push(ExpiredIgnore { rule, until }),
             Some(_) | None => active.push(rule),
@@ -314,29 +266,17 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
             match rule {
                 ResolvedIgnore {
                     id: Some(id),
-                    package: None,
-                    ecosystem: None,
-                    version: None,
-                    max_affected_version: None,
-                } => {
+                    scope,
+                } if scope.is_empty() => {
                     if until_fixed {
                         config.ignore_until_fixed.push(id);
                     } else {
                         config.ignore.push(id);
                     }
                 }
-                ResolvedIgnore {
+                ResolvedIgnore { id, scope } => config.package_rules.push(PackageIgnore {
                     id,
-                    package,
-                    ecosystem,
-                    version,
-                    max_affected_version,
-                } => config.package_rules.push(PackageIgnore {
-                    package,
-                    id,
-                    ecosystem,
-                    version,
-                    max_affected_version,
+                    scope,
                     until_fixed,
                 }),
             }

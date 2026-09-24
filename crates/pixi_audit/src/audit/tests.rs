@@ -8,8 +8,8 @@ use url::Url;
 
 use super::*;
 use crate::{
-    CondaPublication, MatchApplicability, MatchedIdentity, MatchedIdentityKind, UpstreamFix,
-    UpstreamOrigin,
+    CondaPublication, IgnoreScope, MatchApplicability, MatchedIdentity, MatchedIdentityKind,
+    UpstreamFix, UpstreamOrigin,
 };
 use crate::{
     client::BasiliskClient,
@@ -261,10 +261,12 @@ async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
 
 fn package_rule(package: &str, id: Option<&str>, until_fixed: bool) -> PackageIgnore {
     PackageIgnore {
-        package: Some(package.to_string()),
+        scope: IgnoreScope {
+            package: Some(package.to_string()),
+            ..IgnoreScope::default()
+        },
         id: id.map(str::to_string),
         until_fixed,
-        ..PackageIgnore::default()
     }
 }
 
@@ -320,14 +322,51 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
         .unwrap();
     let mut conda = report.vulnerabilities[0].clone();
     conda.package = conda_name("openssl");
+
+    let anonymous_rule = PackageIgnore {
+        scope: IgnoreScope {
+            version: Some(conda.version.clone()),
+            ..IgnoreScope::default()
+        },
+        ..PackageIgnore::default()
+    };
+    assert!(anonymous_rule.scope.matches(&conda));
+    assert!(!anonymous_rule.applies_to(&conda));
+
     let mut pypi = conda.clone();
     pypi.package = pypi_name("openssl");
     pypi.ecosystem = PackageEcosystem::Pypi;
 
+    // An unqualified scope uses the finding's ecosystem, not the first
+    // version parser that accepts its bound.
+    let mut scope = IgnoreScope {
+        version: Some("1.0foo".into()),
+        max_affected_version: Some("1.0foo".into()),
+        ..IgnoreScope::default()
+    };
+    let mut finding = conda.clone();
+    finding.version = "1.0foo".into();
+    assert!(scope.matches(&finding));
+    finding.ecosystem = PackageEcosystem::Pypi;
+    assert!(!scope.matches(&finding));
+    finding.version = "1.0".into();
+    scope.version = Some("1.0.0".into());
+    scope.max_affected_version = Some("1.0rc1".into());
+    assert!(!scope.matches(&finding));
+    scope.max_affected_version = Some("1.0".into());
+    assert!(scope.matches(&finding));
+    finding.ecosystem = PackageEcosystem::Other("custom".into());
+    assert!(!scope.matches(&finding));
+    finding.version = "not a version".into();
+    assert!(IgnoreScope::default().matches(&finding));
+
     let rule = PackageIgnore {
         id: Some("CVE-2026-1234".to_string()),
-        ecosystem: Some("conda-forge".to_string()),
-        version: Some("3.1.0".to_string()),
+        scope: IgnoreScope {
+            ecosystem: Some("conda-forge".to_string()),
+            version: Some("3.1.0".to_string()),
+            ..IgnoreScope::default()
+        },
         ..PackageIgnore::default()
     };
     assert!(rule.applies_to(&conda));
@@ -336,8 +375,11 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
     assert!(!rule.applies_to(&conda));
 
     let rule = PackageIgnore {
-        package: Some("openssl".to_string()),
-        max_affected_version: Some("3.1.0".to_string()),
+        scope: IgnoreScope {
+            package: Some("openssl".to_string()),
+            max_affected_version: Some("3.1.0".to_string()),
+            ..IgnoreScope::default()
+        },
         ..PackageIgnore::default()
     };
     assert!(!rule.applies_to(&conda));
@@ -348,8 +390,11 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
     let base = spawn_mock().await;
     let stale = [PackageIgnore {
         id: Some("CVE-2026-1234".to_string()),
-        ecosystem: Some("conda-forge".to_string()),
-        version: Some("3.1.1".to_string()),
+        scope: IgnoreScope {
+            ecosystem: Some("conda-forge".to_string()),
+            version: Some("3.1.1".to_string()),
+            ..IgnoreScope::default()
+        },
         ..PackageIgnore::default()
     }];
     let report = audit(
@@ -849,9 +894,10 @@ async fn package_rules_match_pypi_names_under_pep_503() {
         environments: vec!["default".to_string()],
     }];
     let rules = [PackageIgnore {
-        package: Some("Requests.Test".to_string()),
-        id: None,
-        until_fixed: false,
+        scope: IgnoreScope {
+            package: Some("Requests.Test".to_string()),
+            ..IgnoreScope::default()
+        },
         ..PackageIgnore::default()
     }];
     let report = super::audit(

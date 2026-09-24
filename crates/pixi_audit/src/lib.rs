@@ -25,10 +25,11 @@ pub use osv_protocol::*;
 #[cfg(feature = "lock")]
 pub use rattler_lock;
 pub use report::{
-    AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, IgnoreReason, IgnoreSpec,
-    InvalidPackageName, MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem,
-    PackageIgnore, PackageName, ParseSeverityBandError, SeverityBand, SortStrategy,
-    UncheckedPackage, UpstreamFix, UpstreamOrigin, audit,
+    AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, IgnoreReason, IgnoreScope,
+    IgnoreSpec, InvalidPackageName, MatchApplicability, MatchedIdentity, MatchedIdentityKind,
+    PackageEcosystem, PackageIgnore, PackageName, PackageVersion, ParsePackageVersionError,
+    ParseSeverityBandError, SeverityBand, SortStrategy, UncheckedPackage, UpstreamFix,
+    UpstreamOrigin, audit,
 };
 pub use threat::{
     EpssScore, KnownExploited, RansomwareCampaignUse, RiskScore, ThreatDataStatus,

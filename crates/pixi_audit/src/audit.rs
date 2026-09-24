@@ -518,16 +518,16 @@ impl<'a> Suppressions<'a> {
                 if let Some(id) = &rule.id {
                     parts.push(id.clone());
                 }
-                if let Some(package) = &rule.package {
+                if let Some(package) = &rule.scope.package {
                     parts.push(format!("package '{package}'"));
                 }
-                if let Some(ecosystem) = &rule.ecosystem {
+                if let Some(ecosystem) = &rule.scope.ecosystem {
                     parts.push(format!("ecosystem '{ecosystem}'"));
                 }
-                if let Some(version) = &rule.version {
+                if let Some(version) = &rule.scope.version {
                     parts.push(format!("version '{version}'"));
                 }
-                if let Some(version) = &rule.max_affected_version {
+                if let Some(version) = &rule.scope.max_affected_version {
                     parts.push(format!("max affected version '{version}'"));
                 }
                 unmatched.push(parts.join(" in "));
