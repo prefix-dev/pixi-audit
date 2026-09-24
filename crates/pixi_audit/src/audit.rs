@@ -1,10 +1,14 @@
 //! Audit orchestration across the Basilisk and PyPI backends, plus the
 //! threat-data enrichment of the resulting findings.
 
+mod findings;
+
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 
 use futures::{StreamExt, TryStreamExt};
+
+use findings::FindingGroups;
 
 use crate::{
     advisory::{
@@ -280,12 +284,14 @@ pub async fn audit(
 
     let mut suppressions = Suppressions::from_spec(ignore);
     for (query, result) in planned.iter().zip(&results) {
-        let mut findings = Vec::with_capacity(result.vulns.len());
+        let mut findings = FindingGroups::with_capacity(result.vulns.len());
         let package = query.package;
         for vuln in &result.vulns {
             let doc = documents
                 .get(&(query.backend, vuln.id.clone()))
-                .expect("references were collected from these same results");
+                .ok_or_else(|| AuditError::MissingDocument {
+                    id: vuln.id.clone(),
+                })?;
             if doc.withdrawn.is_some() {
                 continue;
             }
@@ -315,7 +321,7 @@ pub async fn audit(
             };
             findings.push(finding);
         }
-        for finding in coalesce_findings(findings) {
+        for finding in findings.into_findings() {
             record_finding(&mut report, finding, &mut suppressions);
         }
     }
@@ -424,65 +430,6 @@ fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     message
-}
-
-/// Merge documents that share an id or alias for the same queried package.
-/// An alias may connect two groups only after both have been seen.
-fn coalesce_findings(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut groups: Vec<Option<Finding>> = Vec::new();
-    let mut by_id = HashMap::<String, usize>::new();
-    for finding in findings {
-        let matches: BTreeSet<usize> = std::iter::once(&finding.id)
-            .chain(&finding.aliases)
-            .filter_map(|id| by_id.get(&id.to_ascii_lowercase()).copied())
-            .collect();
-        let index = if let Some(&index) = matches.first() {
-            merge_finding(groups[index].as_mut().expect("live group"), finding);
-            for other in matches.into_iter().filter(|other| *other != index) {
-                let previous = groups[other].take().expect("live group");
-                merge_finding(groups[index].as_mut().expect("live group"), previous);
-            }
-            index
-        } else {
-            let index = groups.len();
-            groups.push(Some(finding));
-            index
-        };
-        let group = groups[index].as_ref().expect("live group");
-        for id in std::iter::once(&group.id).chain(&group.aliases) {
-            by_id.insert(id.to_ascii_lowercase(), index);
-        }
-    }
-    groups.into_iter().flatten().collect()
-}
-
-fn merge_finding(into: &mut Finding, other: Finding) {
-    into.aliases.push(other.id);
-    into.aliases.extend(other.aliases);
-    into.aliases.retain(|id| !id.eq_ignore_ascii_case(&into.id));
-    into.aliases.sort_unstable();
-    into.aliases.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    into.severity = into.severity.max(other.severity);
-    into.cvss_base_score = match (into.cvss_base_score, other.cvss_base_score) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, b) => a.or(b),
-    };
-    for fixed in other.fixed_versions {
-        if !into.fixed_versions.contains(&fixed) {
-            into.fixed_versions.push(fixed);
-        }
-    }
-    for fixed in other.upstream_fixes {
-        if !into.upstream_fixes.contains(&fixed) {
-            into.upstream_fixes.push(fixed);
-        }
-    }
-    into.applicability = into.applicability.min(other.applicability);
-    if into.matched_identity != other.matched_identity {
-        into.matched_identity = None;
-    }
-    into.summary = into.summary.take().or(other.summary);
-    into.url = into.url.take().or(other.url);
 }
 
 /// Lowercased suppression lists, ready for case-insensitive matching, the

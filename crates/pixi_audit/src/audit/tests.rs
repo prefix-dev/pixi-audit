@@ -1265,7 +1265,9 @@ async fn advisory_aliases_count_once_before_suppression() {
                     .map(|q| {
                         if q["package"]["name"] == "openssl" {
                             serde_json::json!({"vulns": [
-                                {"id": "PYSEC-1"}, {"id": "CVE-1"}, {"id": "GHSA-1"}
+                                {"id": "PYSEC-1"}, {"id": "CVE-1"},
+                                {"id": "BSLK-OTHER"}, {"id": "GHSA-1"},
+                                {"id": "BSLK-OTHER-ALIAS"}
                             ]})
                         } else {
                             serde_json::json!({})
@@ -1277,24 +1279,28 @@ async fn advisory_aliases_count_once_before_suppression() {
         )
         .route(
             "/v1/vulns/{id}",
-            get(|axum::extract::Path(id): axum::extract::Path<String>| async move {
-                let (aliases, fixes) = match id.as_str() {
-                    "PYSEC-1" => (vec!["GHSA-1"], vec![]),
-                    "GHSA-1" => (vec!["CVE-1"], vec!["3.1.1"]),
-                    _ => (vec![], vec!["3.1.2"]),
-                };
-                Json(serde_json::json!({
-                    "id": id,
-                    "aliases": aliases,
-                    "affected": [{
-                        "package": {"ecosystem": "conda-forge", "name": "openssl"},
-                        "ranges": fixes.iter().map(|fix| serde_json::json!({
-                            "type": "ECOSYSTEM",
-                            "events": [{"introduced": "0"}, {"fixed": fix}]
-                        })).collect::<Vec<_>>()
-                    }]
-                }))
-            }),
+            get(
+                |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    let (aliases, fixes) = match id.as_str() {
+                        "PYSEC-1" => (vec!["GHSA-1"], vec![]),
+                        "GHSA-1" => (vec!["CVE-1"], vec!["3.1.1"]),
+                        "CVE-1" => (vec![], vec!["3.1.2"]),
+                        "BSLK-OTHER-ALIAS" => (vec!["BSLK-OTHER"], vec![]),
+                        _ => (vec![], vec![]),
+                    };
+                    Json(serde_json::json!({
+                        "id": id,
+                        "aliases": aliases,
+                        "affected": [{
+                            "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                            "ranges": fixes.iter().map(|fix| serde_json::json!({
+                                "type": "ECOSYSTEM",
+                                "events": [{"introduced": "0"}, {"fixed": fix}]
+                            })).collect::<Vec<_>>()
+                        }]
+                    }))
+                },
+            ),
         );
     let base = spawn(app).await;
     let ids = vec!["CVE-1".to_string()];
@@ -1303,7 +1309,9 @@ async fn advisory_aliases_count_once_before_suppression() {
         ..IgnoreSpec::default()
     };
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
-    assert!(report.vulnerabilities.is_empty());
+    assert_eq!(report.vulnerabilities.len(), 1);
+    assert_eq!(report.vulnerabilities[0].id, "BSLK-OTHER");
+    assert_eq!(report.vulnerabilities[0].aliases, ["BSLK-OTHER-ALIAS"]);
     assert_eq!(report.summary.ignored, 1);
     assert!(report.unmatched_ignores.is_empty());
     let finding = &report.ignored[0];
