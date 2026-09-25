@@ -74,6 +74,63 @@ impl Serialize for PackageEcosystem {
     }
 }
 
+/// A parsed version carrying its ecosystem's comparison rules.
+///
+/// Versions from different ecosystems are incomparable. No total ordering is
+/// defined: callers must handle `partial_cmp` returning `None`.
+///
+/// Parsing is explicit so callers can reuse a parsed value across comparisons.
+/// This type does not change the string representation of versions in reports
+/// or manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageVersion {
+    Conda(rattler_conda_types::Version),
+    Pypi(uv_pep440::Version),
+}
+
+/// Distinguishes malformed versions from ecosystems without comparison support.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ParsePackageVersionError {
+    #[error("'{version}' is not a valid {ecosystem} version")]
+    InvalidVersion {
+        ecosystem: PackageEcosystem,
+        version: String,
+    },
+    #[error("version comparison is not supported for ecosystem '{0}'")]
+    UnsupportedEcosystem(PackageEcosystem),
+}
+
+impl PackageVersion {
+    /// Parses using the selected ecosystem, without falling back to another
+    /// version format. Unsupported ecosystems return an explicit error.
+    pub fn parse(
+        ecosystem: &PackageEcosystem,
+        value: &str,
+    ) -> Result<Self, ParsePackageVersionError> {
+        let invalid = || ParsePackageVersionError::InvalidVersion {
+            ecosystem: ecosystem.clone(),
+            version: value.to_string(),
+        };
+        match ecosystem {
+            PackageEcosystem::CondaForge => value.parse().map(Self::Conda).map_err(|_| invalid()),
+            PackageEcosystem::Pypi => value.parse().map(Self::Pypi).map_err(|_| invalid()),
+            PackageEcosystem::Other(_) => Err(ParsePackageVersionError::UnsupportedEcosystem(
+                ecosystem.clone(),
+            )),
+        }
+    }
+}
+
+impl PartialOrd for PackageVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::Conda(a), Self::Conda(b)) => Some(a.cmp(b)),
+            (Self::Pypi(a), Self::Pypi(b)) => Some(a.cmp(b)),
+            _ => None,
+        }
+    }
+}
+
 /// A package name that carries its ecosystem's normalization rules, so two
 /// spellings compare equal exactly when the ecosystem says they do. Conda
 /// names are lowercased; PyPI names follow PEP 503, under which
@@ -320,32 +377,119 @@ pub struct IgnoreSpec<'a> {
     pub ignore: &'a [String],
     /// Suppress these only while no fixed release is known.
     pub ignore_until_fixed: &'a [String],
-    /// Suppressions scoped to one package.
+    /// Rules scoped by package, ecosystem or installed version.
     pub package_rules: &'a [PackageIgnore],
     /// Suppress every finding for which no fixed release is known, as if
     /// each were listed in `ignore_until_fixed`.
     pub ignore_unfixed: bool,
 }
 
-/// A suppression scoped to one package: every finding in it, or only the
-/// vulnerability `id`. The package name is matched under its ecosystem's
-/// normalization rules, so `Ruamel.YAML` finds `ruamel-yaml` on PyPI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Package, ecosystem and installed-version predicates shared by ignore rules.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IgnoreScope {
+    pub package: Option<String>,
+    pub ecosystem: Option<String>,
+    pub version: Option<String>,
+    #[serde(rename = "max-affected-version")]
+    pub max_affected_version: Option<String>,
+}
+
+impl IgnoreScope {
+    pub fn is_empty(&self) -> bool {
+        self.package.is_none()
+            && self.ecosystem.is_none()
+            && self.version.is_none()
+            && self.max_affected_version.is_none()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let ecosystem = self.ecosystem.as_deref();
+        if let Some(ecosystem) = ecosystem
+            && !ecosystem.eq_ignore_ascii_case("conda-forge")
+            && !ecosystem.eq_ignore_ascii_case("pypi")
+        {
+            return Err(format!(
+                "unsupported ecosystem '{}' (expected conda-forge or PyPI)",
+                ecosystem.to_ascii_lowercase()
+            ));
+        }
+        for version in [
+            self.version.as_deref(),
+            self.max_affected_version.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let valid = match ecosystem {
+                Some(value) if value.eq_ignore_ascii_case("conda-forge") => {
+                    PackageVersion::parse(&PackageEcosystem::CondaForge, version).is_ok()
+                }
+                Some(_) => PackageVersion::parse(&PackageEcosystem::Pypi, version).is_ok(),
+                None => {
+                    PackageVersion::parse(&PackageEcosystem::CondaForge, version).is_ok()
+                        || PackageVersion::parse(&PackageEcosystem::Pypi, version).is_ok()
+                }
+            };
+            if !valid {
+                return Err(format!(
+                    "invalid version '{version}' for the selected ecosystem"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn matches(&self, finding: &Finding) -> bool {
+        if !self
+            .package
+            .as_ref()
+            .is_none_or(|package| finding.package.matches(package))
+            || !self.ecosystem.as_ref().is_none_or(|ecosystem| {
+                finding
+                    .ecosystem
+                    .osv_ecosystem()
+                    .eq_ignore_ascii_case(ecosystem)
+            })
+        {
+            return false;
+        }
+        if self.version.is_none() && self.max_affected_version.is_none() {
+            return true;
+        }
+        let Ok(locked) = PackageVersion::parse(&finding.ecosystem, &finding.version) else {
+            return false;
+        };
+        self.version.as_deref().is_none_or(|version| {
+            PackageVersion::parse(&finding.ecosystem, version).is_ok_and(|bound| locked == bound)
+        }) && self.max_affected_version.as_deref().is_none_or(|version| {
+            PackageVersion::parse(&finding.ecosystem, version).is_ok_and(|bound| {
+                matches!(
+                    locked.partial_cmp(&bound),
+                    Some(Ordering::Less | Ordering::Equal)
+                )
+            })
+        })
+    }
+}
+
+/// A suppression optionally scoped to package, ecosystem and locked version.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PackageIgnore {
-    pub package: String,
     pub id: Option<String>,
+    pub scope: IgnoreScope,
     /// Suppress only while no fixed release is known.
     pub until_fixed: bool,
 }
 
 impl PackageIgnore {
     pub fn applies_to(&self, finding: &Finding) -> bool {
-        finding.package.matches(&self.package)
+        (self.id.is_some() || self.scope.package.is_some())
             && self.id.as_ref().is_none_or(|id| {
                 std::iter::once(&finding.id)
                     .chain(&finding.aliases)
                     .any(|candidate| candidate.eq_ignore_ascii_case(id))
             })
+            && self.scope.matches(finding)
     }
 }
 
@@ -496,9 +640,8 @@ pub struct AuditReport {
     pub ignored: Vec<Finding>,
     pub unchecked: Vec<UncheckedPackage>,
     pub summary: AuditSummary,
-    /// Ids from the ignore lists that matched no finding's id or alias, as
-    /// written and without duplicates. Usually a suppression left behind
-    /// after the package was upgraded.
+    /// Ignore ids and scoped rules that matched no finding. An expired
+    /// package or version exception remains visible after an upgrade.
     pub unmatched_ignores: Vec<String>,
     pub threat_data: ThreatDataStatus,
 }

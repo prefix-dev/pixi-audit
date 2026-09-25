@@ -83,7 +83,15 @@ pixi audit ignore --package vendored-thing --reason "never runs, only shipped fo
 pixi audit ignore CVE-2026-1234 --package requests
 ```
 
-Package names are matched under their ecosystem's rules, so `Ruamel.YAML` finds `ruamel-yaml` on PyPI. In the manifest an entry is either a bare id or a table with an `id`, a `package`, or both:
+Use `--ecosystem conda-forge` or `--ecosystem PyPI` to avoid suppressing the same package in both sources. `--version` matches one installed version; `--max-affected-version` caps the affected range:
+
+```console
+pixi audit ignore CVE-2026-1234 --package torch --ecosystem conda-forge --version 1.13.1
+```
+
+Scoped rules that no longer match a finding appear in `unmatched_ignores`.
+
+Package names are matched under their ecosystem's rules, so `Ruamel.YAML` finds `ruamel-yaml` on PyPI. In the manifest an entry is either a bare id or a table with an `id`, a `package`, or both, optionally scoped by `ecosystem`, `version`, or `max-affected-version`:
 
 ```toml
 [tool.pixi-audit]

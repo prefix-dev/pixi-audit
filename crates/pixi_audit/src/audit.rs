@@ -443,6 +443,7 @@ struct Suppressions<'a> {
     /// alias, whether or not that finding ended up suppressed: an
     /// `until_fixed` id for a finding with a known fix has still matched.
     matched: BTreeSet<String>,
+    matched_rules: BTreeSet<usize>,
 }
 
 impl<'a> Suppressions<'a> {
@@ -454,6 +455,7 @@ impl<'a> Suppressions<'a> {
             package_rules: spec.package_rules,
             ignore_unfixed: spec.ignore_unfixed,
             matched: BTreeSet::new(),
+            matched_rules: BTreeSet::new(),
         }
     }
 
@@ -473,18 +475,23 @@ impl<'a> Suppressions<'a> {
         let until_fixed = Self::listed_in(&self.until_fixed, finding);
         self.matched
             .extend(ignored.iter().chain(until_fixed.iter()).cloned());
-        let package_rule = |until_fixed: bool| {
-            self.package_rules
-                .iter()
-                .any(|rule| rule.until_fixed == until_fixed && rule.applies_to(finding))
-        };
+        let mut always = false;
+        let mut until_fix = false;
+        for (index, rule) in self.package_rules.iter().enumerate() {
+            if rule.applies_to(finding) {
+                self.matched_rules.insert(index);
+                if rule.until_fixed {
+                    until_fix = true;
+                } else {
+                    always = true;
+                }
+            }
+        }
         let has_known_fix =
             !finding.fixed_versions.is_empty() || !finding.upstream_fixes.is_empty();
-        if ignored.is_some() || package_rule(false) {
+        if ignored.is_some() || always {
             Some(IgnoreReason::Always)
-        } else if (self.ignore_unfixed || until_fixed.is_some() || package_rule(true))
-            && !has_known_fix
-        {
+        } else if (self.ignore_unfixed || until_fixed.is_some() || until_fix) && !has_known_fix {
             Some(IgnoreReason::UntilFixed)
         } else {
             None
@@ -495,7 +502,8 @@ impl<'a> Suppressions<'a> {
     /// spelling and order, each once.
     fn unmatched(&self, spec: IgnoreSpec<'_>) -> Vec<String> {
         let mut seen = BTreeSet::new();
-        spec.ignore
+        let mut unmatched: Vec<String> = spec
+            .ignore
             .iter()
             .chain(spec.ignore_until_fixed)
             .filter(|id| {
@@ -503,7 +511,29 @@ impl<'a> Suppressions<'a> {
                 !self.matched.contains(&lowercase) && seen.insert(lowercase)
             })
             .cloned()
-            .collect()
+            .collect();
+        for (index, rule) in self.package_rules.iter().enumerate() {
+            if !self.matched_rules.contains(&index) {
+                let mut parts = Vec::new();
+                if let Some(id) = &rule.id {
+                    parts.push(id.clone());
+                }
+                if let Some(package) = &rule.scope.package {
+                    parts.push(format!("package '{package}'"));
+                }
+                if let Some(ecosystem) = &rule.scope.ecosystem {
+                    parts.push(format!("ecosystem '{ecosystem}'"));
+                }
+                if let Some(version) = &rule.scope.version {
+                    parts.push(format!("version '{version}'"));
+                }
+                if let Some(version) = &rule.scope.max_affected_version {
+                    parts.push(format!("max affected version '{version}'"));
+                }
+                unmatched.push(parts.join(" in "));
+            }
+        }
+        unmatched
     }
 }
 

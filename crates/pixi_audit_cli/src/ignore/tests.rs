@@ -23,7 +23,18 @@ fn apply_to_package(
 ) -> (String, Outcome) {
     let mut document = content.parse::<DocumentMut>().unwrap();
     let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
-    let outcome = add_rules(&mut document, list, &ids, package, reason, until).unwrap();
+    let outcome = add_rules(
+        &mut document,
+        list,
+        &ids,
+        &IgnoreScope {
+            package: package.map(str::to_string),
+            ..IgnoreScope::default()
+        },
+        reason,
+        until,
+    )
+    .unwrap();
     (document.to_string(), outcome)
 }
 
@@ -143,6 +154,59 @@ fn pyproject_uses_the_same_table() {
 }
 
 #[test]
+fn version_scoped_rules_are_written_separately() {
+    let mut document = "".parse::<DocumentMut>().unwrap();
+    for version in ["1.13.1", "1.13.2"] {
+        let outcome = add_rules(
+            &mut document,
+            IgnoreList::Always,
+            &["CVE-1".to_string()],
+            &IgnoreScope {
+                ecosystem: Some("conda-forge".to_string()),
+                version: Some(version.to_string()),
+                ..IgnoreScope::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.added, ["CVE-1"]);
+    }
+    let text = document.to_string();
+    assert!(text.contains("version = \"1.13.1\""), "{text}");
+    assert!(text.contains("version = \"1.13.2\""), "{text}");
+}
+
+#[test]
+fn scope_keys_ignore_identifier_case_but_preserve_version_strings() {
+    let mut document = r#"[tool.pixi-audit]
+ignore = [{ id = "CVE-1", package = "Requests", ecosystem = "PyPI", version = "1.0RC1", max-affected-version = "2.0" }]
+"#
+    .parse::<DocumentMut>()
+    .unwrap();
+    let mut scope = IgnoreScope {
+        package: Some("requests".to_string()),
+        ecosystem: Some("pypi".to_string()),
+        version: Some("1.0RC1".to_string()),
+        max_affected_version: Some("2.0".to_string()),
+    };
+    let ids = ["cve-1".to_string()];
+    let outcome = add_rules(&mut document, IgnoreList::Always, &ids, &scope, None, None).unwrap();
+    assert!(outcome.added.is_empty());
+    assert_eq!(outcome.existing, ["cve-1 in package 'requests'"]);
+
+    scope.version = Some("1.0rc1".to_string());
+    let outcome = add_rules(&mut document, IgnoreList::Always, &ids, &scope, None, None).unwrap();
+    assert_eq!(outcome.added, ["cve-1 in package 'requests'"]);
+    assert!(outcome.existing.is_empty());
+
+    scope.max_affected_version = Some("2.0.0".to_string());
+    let outcome = add_rules(&mut document, IgnoreList::Always, &ids, &scope, None, None).unwrap();
+    assert_eq!(outcome.added, ["cve-1 in package 'requests'"]);
+    assert!(outcome.existing.is_empty());
+}
+
+#[test]
 fn a_list_that_is_not_an_array_is_an_error() {
     let mut document = "[tool.pixi-audit]\nignore = \"CVE-1\"\n"
         .parse::<DocumentMut>()
@@ -152,7 +216,7 @@ fn a_list_that_is_not_an_array_is_an_error() {
             &mut document,
             IgnoreList::Always,
             &["CVE-2".to_string()],
-            None,
+            &IgnoreScope::default(),
             None,
             None
         )

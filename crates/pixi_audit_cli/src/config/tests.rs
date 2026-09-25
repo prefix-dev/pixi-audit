@@ -96,22 +96,62 @@ ignore-until-fixed = [{ package = "libfoo", until = 2999-01-01 }]
         config.package_rules,
         vec![
             PackageIgnore {
-                package: "vendored-thing".to_string(),
+                scope: IgnoreScope {
+                    package: Some("vendored-thing".to_string()),
+                    ..IgnoreScope::default()
+                },
                 id: None,
                 until_fixed: false,
             },
             PackageIgnore {
-                package: "requests".to_string(),
+                scope: IgnoreScope {
+                    package: Some("requests".to_string()),
+                    ..IgnoreScope::default()
+                },
                 id: Some("CVE-2".to_string()),
                 until_fixed: false,
             },
             PackageIgnore {
-                package: "libfoo".to_string(),
+                scope: IgnoreScope {
+                    package: Some("libfoo".to_string()),
+                    ..IgnoreScope::default()
+                },
                 id: None,
                 until_fixed: true,
             },
         ]
     );
+}
+
+#[test]
+fn scoped_id_entries_retain_ecosystem_and_version_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", ecosystem = \"conda-forge\", version = \"1.13.1\", max-affected-version = \"1.13.2\" }]\n",
+    );
+    let config = load_config(&manifest).unwrap();
+    assert!(config.ignore.is_empty());
+    assert_eq!(
+        config.package_rules,
+        [PackageIgnore {
+            id: Some("CVE-1".to_string()),
+            scope: IgnoreScope {
+                ecosystem: Some("conda-forge".to_string()),
+                version: Some("1.13.1".to_string()),
+                max_affected_version: Some("1.13.2".to_string()),
+                ..IgnoreScope::default()
+            },
+            ..PackageIgnore::default()
+        }]
+    );
+    let manifest = write(
+        dir.path(),
+        "pixi.toml",
+        "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", ecosystem = \"npm\" }]\n",
+    );
+    assert!(load_config(&manifest).is_err());
 }
 
 #[test]
@@ -149,7 +189,7 @@ fn expired_ignore_rules_are_dropped() {
 fn ignore_rules_apply_through_their_last_day() {
     let rule = ResolvedIgnore {
         id: Some("CVE-1".to_string()),
-        package: None,
+        ..ResolvedIgnore::default()
     };
     let entries = [IgnoreEntry::Rule(IgnoreRule {
         id: Some("CVE-1".to_string()),
@@ -177,6 +217,8 @@ fn malformed_ignore_rules_are_errors() {
         "ignore = [{ id = \"CVE-1\", until = \"soon\" }]",
         "ignore = [{ id = \"CVE-1\", until = 20260901 }]",
         "ignore = [{ id = \"CVE-1\", reasn = \"typo\" }]",
+        "ignore = [{ id = \"CVE-1\", ecosystem = \"PyPI\", version = \"1.0\", max-affected-version = \"2.0\", reasn = \"typo\" }]",
+        "ignore = [{ id = \"CVE-1\", scope = { package = \"requests\" } }]",
         "ignore = [{ reason = \"neither id nor package\" }]",
     ];
     for table in cases {
