@@ -550,13 +550,13 @@ impl Guidance {
         });
         if version_unbounded {
             coverage.push(ExplanationEntry::new(
-                "Unbounded",
-                "The advisory has no affected version range, so every version matches.",
+                "No version limits",
+                "The advisory has no usable version bounds, so every version matches.",
             ));
         }
         if unevaluated {
             coverage.push(ExplanationEntry::new(
-                "Unevaluated",
+                "Version not checked",
                 "The source lacks enough version data to decide whether this version is affected.",
             ));
         }
@@ -809,13 +809,16 @@ fn fix_note(finding: &Finding) -> String {
     }
 }
 
-/// A note on how the advisory was matched, for matches that deserve a
-/// second look; `None` when basilisk evaluated it or recorded nothing.
+/// Describe the advisory's version match in human-readable output.
 pub fn match_note(finding: &Finding) -> Option<&'static str> {
     match finding.applicability {
-        MatchApplicability::VersionUnbounded => Some("match: version unbounded"),
-        MatchApplicability::Unevaluated => Some("match: unevaluated"),
-        MatchApplicability::Evaluated | MatchApplicability::Unspecified => None,
+        MatchApplicability::VersionUnbounded => Some("match: no version limits"),
+        MatchApplicability::Unevaluated => Some("match: version not checked"),
+        MatchApplicability::Evaluated => Some("match: affects version"),
+        MatchApplicability::Unspecified if finding.ecosystem == PackageEcosystem::CondaForge => {
+            Some("match details unavailable")
+        }
+        MatchApplicability::Unspecified => None,
     }
 }
 

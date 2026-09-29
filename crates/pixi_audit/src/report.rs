@@ -502,9 +502,8 @@ pub enum CondaPublication {
     Unknown,
 }
 
-/// How far basilisk got in establishing that an advisory applies to the
-/// audited conda-forge package. Orders least to most confident, so the
-/// maximum of several matches is the strongest one.
+/// How the advisory's version data matched the audited conda-forge package.
+/// Orders matches by specificity so the maximum is the strongest one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "kebab-case", deserialize = "snake_case"))]
 pub enum MatchApplicability {
@@ -517,7 +516,7 @@ pub enum MatchApplicability {
     VersionUnbounded,
     /// The package matched but the affected versions were not evaluated.
     Unevaluated,
-    /// Basilisk evaluated the affected versions against the package.
+    /// The installed version matches the advisory's affected version data.
     Evaluated,
 }
 

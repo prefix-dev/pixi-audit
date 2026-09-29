@@ -147,32 +147,84 @@ fn gate_applies_threshold_with_unknown_failsafe() {
         ..Default::default()
     };
     // No threshold: any vulnerability fails.
-    assert_eq!(gate(&report(SeverityBand::Low), None), Gate::Fail);
+    assert_eq!(gate(&report(SeverityBand::Low), None, &[]), Gate::Fail);
     // Threshold high: medium passes with a note, high and critical fail.
     assert_eq!(
-        gate(&report(SeverityBand::Medium), Some(SeverityBand::High)),
+        gate(&report(SeverityBand::Medium), Some(SeverityBand::High), &[]),
         Gate::BelowThreshold {
             band: SeverityBand::High,
             count: 1
         }
     );
     assert_eq!(
-        gate(&report(SeverityBand::High), Some(SeverityBand::High)),
+        gate(&report(SeverityBand::High), Some(SeverityBand::High), &[]),
         Gate::Fail
     );
     assert_eq!(
-        gate(&report(SeverityBand::Critical), Some(SeverityBand::High)),
+        gate(
+            &report(SeverityBand::Critical),
+            Some(SeverityBand::High),
+            &[]
+        ),
         Gate::Fail
     );
     // Unknown always fails, even against critical.
     assert_eq!(
-        gate(&report(SeverityBand::Unknown), Some(SeverityBand::Critical)),
+        gate(
+            &report(SeverityBand::Unknown),
+            Some(SeverityBand::Critical),
+            &[]
+        ),
         Gate::Fail
     );
     // Clean report never fails.
     assert_eq!(
-        gate(&AuditReport::default(), Some(SeverityBand::Low)),
+        gate(&AuditReport::default(), Some(SeverityBand::Low), &[]),
         Gate::Clean
     );
-    assert_eq!(gate(&AuditReport::default(), None), Gate::Clean);
+    assert_eq!(gate(&AuditReport::default(), None, &[]), Gate::Clean);
+}
+
+#[test]
+fn warn_only_conda_keeps_pypi_blocking() {
+    let cli = Cli::try_parse_from(["pixi-audit", "--warn-only", "conda-forge"]).unwrap();
+    assert_eq!(cli.warn_only, [WarnOnlyEcosystem::CondaForge]);
+
+    let mut conda = AuditReport::default();
+    conda.vulnerabilities.push(pixi_audit::Finding {
+        package: pixi_audit::PackageName::conda("openssl").unwrap(),
+        version: "3.1.0".into(),
+        ecosystem: pixi_audit::PackageEcosystem::CondaForge,
+        environments: vec![],
+        id: "CVE-1".into(),
+        aliases: vec![],
+        severity: SeverityBand::Critical,
+        fixed_versions: vec![],
+        upstream_fixes: vec![],
+        applicability: pixi_audit::MatchApplicability::VersionUnbounded,
+        matched_identity: None,
+        summary: None,
+        url: None,
+        cvss_base_score: None,
+        epss: vec![],
+        known_exploited: vec![],
+        risk: pixi_audit::RiskScore::NONE,
+        ignore_reason: None,
+    });
+    assert_eq!(gate(&conda, None, &cli.warn_only), Gate::Clean);
+    assert_eq!(gate(&conda, None, &[]), Gate::Fail);
+    let mut pypi = conda.vulnerabilities[0].clone();
+    pypi.package = pixi_audit::PackageName::pypi("openssl").unwrap();
+    pypi.ecosystem = pixi_audit::PackageEcosystem::Pypi;
+    conda.vulnerabilities.push(pypi);
+    assert_eq!(gate(&conda, None, &cli.warn_only), Gate::Fail);
+    let both = Cli::try_parse_from([
+        "pixi-audit",
+        "--warn-only",
+        "conda-forge",
+        "--warn-only",
+        "pypi",
+    ])
+    .unwrap();
+    assert_eq!(gate(&conda, None, &both.warn_only), Gate::Clean);
 }
