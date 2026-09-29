@@ -4,7 +4,7 @@ use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use url::Url;
 
-use super::{AuditError, basilisk::status_error};
+use super::{ThreatFeedError, http};
 use crate::threat::{KnownExploited, RansomwareCampaignUse};
 
 /// CISA's Known Exploited Vulnerabilities catalog feed.
@@ -26,25 +26,10 @@ impl KevClient {
         Self { client, url }
     }
 
-    pub async fn catalog(&self) -> Result<KevCatalog, AuditError> {
-        let url = self.url.clone();
-        let response = self
-            .client
-            .get(url.clone())
-            .send()
+    pub async fn catalog(&self) -> Result<KevCatalog, ThreatFeedError> {
+        let raw: RawCatalog = http::send_json(self.client.get(self.url.clone()))
             .await
-            .map_err(|source| AuditError::Request {
-                url: url.clone(),
-                source,
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(status_error(url, status, response).await);
-        }
-        let raw: RawCatalog = response
-            .json()
-            .await
-            .map_err(|source| AuditError::InvalidResponse { url, source })?;
+            .map_err(|failure| ThreatFeedError::from_http(self.url.clone(), failure))?;
         Ok(KevCatalog::from(raw))
     }
 }

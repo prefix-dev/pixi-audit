@@ -2,7 +2,7 @@ use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
-use super::{AuditError, basilisk::status_error};
+use super::{ThreatFeedError, http};
 use crate::threat::EpssScore;
 
 /// The default EPSS API instance (FIRST).
@@ -22,46 +22,28 @@ pub struct EpssClient {
 }
 
 impl EpssClient {
-    pub fn new(client: ClientWithMiddleware, mut base_url: Url) -> Self {
-        if !base_url.path().ends_with('/') {
-            base_url.set_path(&format!("{}/", base_url.path()));
+    pub fn new(client: ClientWithMiddleware, base_url: Url) -> Self {
+        Self {
+            client,
+            base_url: http::base_url(base_url),
         }
-        Self { client, base_url }
     }
 
     /// Fetches the current EPSS record for each of `cves`, sorted by CVE id.
     /// CVEs the API has no score for are absent from the result.
-    pub async fn scores(&self, cves: &[String]) -> Result<Vec<EpssScore>, AuditError> {
+    pub async fn scores(&self, cves: &[String]) -> Result<Vec<EpssScore>, ThreatFeedError> {
         let mut scores = Vec::new();
         for chunk in cves.chunks(MAX_CVES_PER_REQUEST) {
             let mut url = self
                 .base_url
                 .join("data/v1/epss")
-                .map_err(AuditError::InvalidBaseUrl)?;
+                .map_err(ThreatFeedError::InvalidBaseUrl)?;
             url.query_pairs_mut()
                 .append_pair("cve", &chunk.join(","))
                 .append_pair("limit", &MAX_CVES_PER_REQUEST.to_string());
-            let response = self
-                .client
-                .get(url.clone())
-                .send()
+            let body: EpssResponse = http::send_json(self.client.get(url.clone()))
                 .await
-                .map_err(|source| AuditError::Request {
-                    url: url.clone(),
-                    source,
-                })?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(status_error(url, status, response).await);
-            }
-            let body: EpssResponse =
-                response
-                    .json()
-                    .await
-                    .map_err(|source| AuditError::InvalidResponse {
-                        url: url.clone(),
-                        source,
-                    })?;
+                .map_err(|failure| ThreatFeedError::from_http(url, failure))?;
             scores.extend(body.data.into_iter().map(|record| EpssScore {
                 cve: record.cve,
                 epss: record.epss,
