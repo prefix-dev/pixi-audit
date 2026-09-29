@@ -18,8 +18,8 @@ use crate::{
     client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, Finding, FixStatus, IgnoreReason, IgnoreSpec,
-        MatchApplicability, PackageEcosystem, PackageId, PackageIgnore, SeverityBand, SortStrategy,
-        mean_cvss_base_score,
+        MatchApplicability, PackageEcosystem, PackageId, PackageIgnore, PackageVersion,
+        SeverityBand, SortStrategy, mean_cvss_base_score,
     },
     threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
@@ -474,10 +474,16 @@ impl<'a> Suppressions<'a> {
             .extend(ignored.iter().chain(until_fixed.iter()).cloned());
         let mut always = false;
         let mut until_fix = false;
+        // Parsed once per finding rather than once per rule.
+        let locked = if self.package_rules.is_empty() {
+            None
+        } else {
+            PackageVersion::parse(&finding.package.ecosystem, &finding.package.version).ok()
+        };
         for (index, rule) in self.package_rules.iter().enumerate() {
-            if rule.applies_to(finding) {
+            if rule.applies_to(finding, locked.as_ref()) {
                 self.matched_rules.insert(index);
-                if rule.until_fixed {
+                if rule.until_fixed() {
                     until_fix = true;
                 } else {
                     always = true;
@@ -511,19 +517,20 @@ impl<'a> Suppressions<'a> {
         for (index, rule) in self.package_rules.iter().enumerate() {
             if !self.matched_rules.contains(&index) {
                 let mut parts = Vec::new();
-                if let Some(id) = &rule.id {
-                    parts.push(id.clone());
+                let scope = rule.scope();
+                if let Some(id) = rule.id() {
+                    parts.push(id.to_string());
                 }
-                if let Some(package) = &rule.scope.package {
+                if let Some(package) = &scope.package {
                     parts.push(format!("package '{package}'"));
                 }
-                if let Some(ecosystem) = &rule.scope.ecosystem {
+                if let Some(ecosystem) = &scope.ecosystem {
                     parts.push(format!("ecosystem '{ecosystem}'"));
                 }
-                if let Some(version) = &rule.scope.version {
+                if let Some(version) = &scope.version {
                     parts.push(format!("version '{version}'"));
                 }
-                if let Some(version) = &rule.scope.max_affected_version {
+                if let Some(version) = &scope.max_affected_version {
                     parts.push(format!("max affected version '{version}'"));
                 }
                 unmatched.push(parts.join(" in "));

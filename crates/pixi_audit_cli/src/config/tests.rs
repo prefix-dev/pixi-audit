@@ -6,6 +6,17 @@ fn write(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf
     path
 }
 
+fn package_rule(id: Option<&str>, scope: IgnoreScope, until_fixed: bool) -> PackageIgnore {
+    PackageIgnore::new(id.map(str::to_string), scope, until_fixed).unwrap()
+}
+
+fn in_package(package: &str) -> IgnoreScope {
+    IgnoreScope {
+        package: Some(package.to_string()),
+        ..IgnoreScope::default()
+    }
+}
+
 #[test]
 fn parses_full_table_from_pixi_toml() {
     let dir = tempfile::tempdir().unwrap();
@@ -95,30 +106,9 @@ ignore-until-fixed = [{ package = "libfoo", until = 2999-01-01 }]
     assert_eq!(
         config.package_rules,
         vec![
-            PackageIgnore {
-                scope: IgnoreScope {
-                    package: Some("vendored-thing".to_string()),
-                    ..IgnoreScope::default()
-                },
-                id: None,
-                until_fixed: false,
-            },
-            PackageIgnore {
-                scope: IgnoreScope {
-                    package: Some("requests".to_string()),
-                    ..IgnoreScope::default()
-                },
-                id: Some("CVE-2".to_string()),
-                until_fixed: false,
-            },
-            PackageIgnore {
-                scope: IgnoreScope {
-                    package: Some("libfoo".to_string()),
-                    ..IgnoreScope::default()
-                },
-                id: None,
-                until_fixed: true,
-            },
+            package_rule(None, in_package("vendored-thing"), false),
+            package_rule(Some("CVE-2"), in_package("requests"), false),
+            package_rule(None, in_package("libfoo"), true),
         ]
     );
 }
@@ -135,16 +125,16 @@ fn scoped_id_entries_retain_ecosystem_and_version_bounds() {
     assert!(config.ignore.is_empty());
     assert_eq!(
         config.package_rules,
-        [PackageIgnore {
-            id: Some("CVE-1".to_string()),
-            scope: IgnoreScope {
+        [package_rule(
+            Some("CVE-1"),
+            IgnoreScope {
                 ecosystem: Some("conda-forge".to_string()),
                 version: Some("1.13.1".to_string()),
                 max_affected_version: Some("1.13.2".to_string()),
                 ..IgnoreScope::default()
             },
-            ..PackageIgnore::default()
-        }]
+            false,
+        )]
     );
     let manifest = write(
         dir.path(),

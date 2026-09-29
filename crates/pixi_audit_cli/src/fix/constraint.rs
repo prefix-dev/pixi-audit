@@ -1,9 +1,10 @@
 //! Plans fixed versions and applies them to dependency constraints.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::str::FromStr;
 
-use pixi_audit::{AuditReport, PackageName};
+use pixi_audit::{AuditReport, PackageName, PackageVersion};
 use rattler_conda_types::{
     NamelessMatchSpec, Version as CondaVersion, VersionSpec,
     version_spec::{LogicalOperator, RangeOperator},
@@ -11,56 +12,45 @@ use rattler_conda_types::{
 use toml_edit::{Item, TableLike, Value};
 use uv_pep440::{Version as PypiVersion, VersionSpecifier, VersionSpecifiers};
 
-/// A version parsed with its ecosystem's rules, so that comparisons are
-/// never lexicographic ("10.0" must sort after "9.0").
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum FixVersion {
-    Conda(CondaVersion),
-    Pypi(PypiVersion),
-}
-
-impl FixVersion {
-    /// Parses `version` with the version scheme of `package`'s ecosystem.
-    fn parse(package: &PackageName, version: &str) -> Option<Self> {
-        match package {
-            PackageName::Conda(_) => CondaVersion::from_str(version).ok().map(Self::Conda),
-            PackageName::Pypi(_) => PypiVersion::from_str(version).ok().map(Self::Pypi),
-        }
-    }
-}
-
-/// The minimum version each vulnerable package must be raised to. The
-/// name carries its ecosystem's normalization, so a manifest key spelled
-/// `Ruamel.YAML` finds the plan entry for the locked `ruamel-yaml`.
-pub(super) type FixPlan = BTreeMap<PackageName, FixVersion>;
+/// The minimum version each vulnerable package must be raised to, parsed
+/// with its ecosystem's rules so comparisons are never lexicographic
+/// ("10.0" must sort after "9.0"). The name carries its ecosystem's
+/// normalization, so a manifest key spelled `Ruamel.YAML` finds the plan
+/// entry for the locked `ruamel-yaml`.
+pub(super) type FixPlan = BTreeMap<PackageName, PackageVersion>;
 
 pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
     let mut fixes = FixPlan::new();
     for finding in &report.vulnerabilities {
-        let Some(locked) = FixVersion::parse(&finding.package.name, &finding.package.version)
-        else {
+        let package = &finding.package;
+        let Ok(locked) = PackageVersion::parse(&package.ecosystem, &package.version) else {
             continue;
         };
         // OSV can publish fixed events for multiple release branches. Pick the
         // first fix newer than the locked version instead of forcing the
         // highest (and potentially incompatible) major release. Versions that
-        // do not parse are skipped rather than compared as text.
+        // do not parse are skipped rather than compared as text. All of them
+        // parse in the package's ecosystem, so they are mutually comparable.
         let Some(fixed) = finding
             .fixed_versions
             .iter()
-            .filter_map(|fixed| FixVersion::parse(&finding.package.name, fixed))
+            .filter_map(|fixed| PackageVersion::parse(&package.ecosystem, fixed).ok())
             .filter(|fixed| *fixed > locked)
-            .min()
+            .reduce(|lowest, fixed| if fixed < lowest { fixed } else { lowest })
         else {
             continue;
         };
         // Multiple advisories for one package must all be resolved, so retain
         // the greatest of their minimum required fixes.
-        let required = fixes
-            .entry(finding.package.name.clone())
-            .or_insert_with(|| fixed.clone());
-        if *required < fixed {
-            *required = fixed;
+        match fixes.entry(package.name.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(fixed);
+            }
+            Entry::Occupied(mut entry) => {
+                if *entry.get() < fixed {
+                    entry.insert(fixed);
+                }
+            }
         }
     }
     fixes
@@ -125,7 +115,7 @@ fn update_dependencies(
 /// (`pkg = ">=1"`) is updated in place; an inline or full table is updated
 /// through its `version` field. Git, path, and URL requirements have no
 /// `version` and are left untouched.
-fn set_constraint(item: &mut Item, fixed: &FixVersion) -> bool {
+fn set_constraint(item: &mut Item, fixed: &PackageVersion) -> bool {
     let version = if item.is_str() {
         item.as_value_mut()
     } else {
@@ -136,7 +126,7 @@ fn set_constraint(item: &mut Item, fixed: &FixVersion) -> bool {
     version.is_some_and(|value| set_string_value(value, fixed))
 }
 
-fn set_string_value(value: &mut Value, fixed: &FixVersion) -> bool {
+fn set_string_value(value: &mut Value, fixed: &PackageVersion) -> bool {
     let Value::String(version) = value else {
         return false;
     };
@@ -156,9 +146,9 @@ fn set_string_value(value: &mut Value, fixed: &FixVersion) -> bool {
 /// `>= fixed` already implies are dropped, so repeated `--fix` runs do not
 /// pile up `>=` clauses. Returns `None` when `current` cannot be parsed or
 /// already excludes `fixed`, in which case the requirement is left alone.
-fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
+fn tighten_constraint(current: &str, fixed: &PackageVersion) -> Option<String> {
     match fixed {
-        FixVersion::Pypi(fixed) => {
+        PackageVersion::Pypi(fixed) => {
             let current = match current.trim() {
                 "" | "*" => VersionSpecifiers::empty(),
                 current => VersionSpecifiers::from_str(current).ok()?,
@@ -177,7 +167,7 @@ fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
                     .to_string(),
             )
         }
-        FixVersion::Conda(fixed) => {
+        PackageVersion::Conda(fixed) => {
             let mut current = current.parse::<NamelessMatchSpec>().ok()?;
             if current
                 .version

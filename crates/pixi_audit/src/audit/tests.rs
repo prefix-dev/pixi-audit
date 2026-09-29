@@ -260,14 +260,19 @@ async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
 }
 
 fn package_rule(package: &str, id: Option<&str>, until_fixed: bool) -> PackageIgnore {
-    PackageIgnore {
-        scope: IgnoreScope {
-            package: Some(package.to_string()),
-            ..IgnoreScope::default()
-        },
-        id: id.map(str::to_string),
-        until_fixed,
-    }
+    let scope = IgnoreScope {
+        package: Some(package.to_string()),
+        ..IgnoreScope::default()
+    };
+    PackageIgnore::new(id.map(str::to_string), scope, until_fixed).unwrap()
+}
+
+/// Whether `rule` suppresses `finding`, parsing the locked version the way
+/// the audit does.
+fn applies(rule: &PackageIgnore, finding: &Finding) -> bool {
+    let package = &finding.package;
+    let locked = PackageVersion::parse(&package.ecosystem, &package.version).ok();
+    rule.applies_to(finding, locked.as_ref())
 }
 
 #[tokio::test]
@@ -323,80 +328,63 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
     let mut conda = report.vulnerabilities[0].clone();
     conda.package.name = conda_name("openssl");
 
-    let anonymous_rule = PackageIgnore {
-        scope: IgnoreScope {
+    // A version alone names no package, so it suppresses nothing.
+    let anonymous_rule = PackageIgnore::new(
+        None,
+        IgnoreScope {
             version: Some(conda.package.version.clone()),
             ..IgnoreScope::default()
         },
-        ..PackageIgnore::default()
-    };
-    assert!(anonymous_rule.scope.matches(&conda.package));
-    assert!(!anonymous_rule.applies_to(&conda));
+        false,
+    )
+    .unwrap();
+    assert!(!applies(&anonymous_rule, &conda));
 
     let mut pypi = conda.clone();
     pypi.package.name = pypi_name("openssl");
     pypi.package.ecosystem = PackageEcosystem::Pypi;
 
-    // An unqualified scope uses the finding's ecosystem, not the first
-    // version parser that accepts its bound.
-    let mut scope = IgnoreScope {
-        version: Some("1.0foo".into()),
-        max_affected_version: Some("1.0foo".into()),
-        ..IgnoreScope::default()
-    };
-    let mut package = conda.package.clone();
-    package.version = "1.0foo".into();
-    assert!(scope.matches(&package));
-    package.ecosystem = PackageEcosystem::Pypi;
-    assert!(!scope.matches(&package));
-    package.version = "1.0".into();
-    scope.version = Some("1.0.0".into());
-    scope.max_affected_version = Some("1.0rc1".into());
-    assert!(!scope.matches(&package));
-    scope.max_affected_version = Some("1.0".into());
-    assert!(scope.matches(&package));
-    package.ecosystem = PackageEcosystem::Other("custom".into());
-    assert!(!scope.matches(&package));
-    package.version = "not a version".into();
-    assert!(IgnoreScope::default().matches(&package));
-
-    let rule = PackageIgnore {
-        id: Some("CVE-2026-1234".to_string()),
-        scope: IgnoreScope {
+    let rule = PackageIgnore::new(
+        Some("CVE-2026-1234".to_string()),
+        IgnoreScope {
             ecosystem: Some("conda-forge".to_string()),
             version: Some("3.1.0".to_string()),
             ..IgnoreScope::default()
         },
-        ..PackageIgnore::default()
-    };
-    assert!(rule.applies_to(&conda));
-    assert!(!rule.applies_to(&pypi));
+        false,
+    )
+    .unwrap();
+    assert!(applies(&rule, &conda));
+    assert!(!applies(&rule, &pypi));
     conda.package.version = "3.1.1".to_string();
-    assert!(!rule.applies_to(&conda));
+    assert!(!applies(&rule, &conda));
 
-    let rule = PackageIgnore {
-        scope: IgnoreScope {
+    let rule = PackageIgnore::new(
+        None,
+        IgnoreScope {
             package: Some("openssl".to_string()),
             max_affected_version: Some("3.1.0".to_string()),
             ..IgnoreScope::default()
         },
-        ..PackageIgnore::default()
-    };
-    assert!(!rule.applies_to(&conda));
+        false,
+    )
+    .unwrap();
+    assert!(!applies(&rule, &conda));
     conda.package.version = "3.1.0".to_string();
-    assert!(rule.applies_to(&conda));
+    assert!(applies(&rule, &conda));
     conda.package.version = "3.0.9".to_string();
-    assert!(rule.applies_to(&conda));
+    assert!(applies(&rule, &conda));
     let base = spawn_mock().await;
-    let stale = [PackageIgnore {
-        id: Some("CVE-2026-1234".to_string()),
-        scope: IgnoreScope {
+    let stale = [PackageIgnore::new(
+        Some("CVE-2026-1234".to_string()),
+        IgnoreScope {
             ecosystem: Some("conda-forge".to_string()),
             version: Some("3.1.1".to_string()),
             ..IgnoreScope::default()
         },
-        ..PackageIgnore::default()
-    }];
+        false,
+    )
+    .unwrap()];
     let report = audit(
         &test_client(base),
         packages(),
@@ -897,13 +885,15 @@ async fn package_rules_match_pypi_names_under_pep_503() {
         ecosystem: PackageEcosystem::Pypi,
         environments: vec!["default".to_string()],
     }];
-    let rules = [PackageIgnore {
-        scope: IgnoreScope {
+    let rules = [PackageIgnore::new(
+        None,
+        IgnoreScope {
             package: Some("Requests.Test".to_string()),
             ..IgnoreScope::default()
         },
-        ..PackageIgnore::default()
-    }];
+        false,
+    )
+    .unwrap()];
     let report = super::audit(
         &test_client(conda_base),
         &pypi_client,

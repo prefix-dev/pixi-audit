@@ -138,7 +138,7 @@ pub fn effective_ignores(
     let mut expired = Vec::new();
     for entry in entries {
         let rule = entry.resolved()?;
-        rule.scope.validate()?;
+        rule.scope.validate().map_err(|error| error.to_string())?;
         match entry.until()? {
             Some(until) if until < today => expired.push(ExpiredIgnore { rule, until }),
             Some(_) | None => active.push(rule),
@@ -274,11 +274,15 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
                         config.ignore.push(id);
                     }
                 }
-                ResolvedIgnore { id, scope } => config.package_rules.push(PackageIgnore {
-                    id,
-                    scope,
-                    until_fixed,
-                }),
+                ResolvedIgnore { id, scope } => {
+                    let rule = PackageIgnore::new(id, scope, until_fixed).map_err(|err| {
+                        miette!(
+                            "invalid '{key}' entry in [tool.pixi-audit] of '{}': {err}",
+                            manifest.display()
+                        )
+                    })?;
+                    config.package_rules.push(rule);
+                }
             }
         }
     }
