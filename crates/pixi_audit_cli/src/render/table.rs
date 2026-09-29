@@ -4,7 +4,9 @@
 use std::io::{self, Write};
 
 use iocraft::prelude::*;
-use pixi_audit::{AuditReport, Finding, MatchApplicability, SeverityBand, UncheckedPackage};
+use pixi_audit::{
+    AuditReport, Finding, FixStatus, MatchApplicability, SeverityBand, UncheckedPackage,
+};
 use supports_hyperlinks::Stream;
 
 use super::{
@@ -201,7 +203,7 @@ fn status_block(report: &AuditReport, lockfile: &str) -> Element<'static, View> 
     let fixed = report
         .vulnerabilities
         .iter()
-        .filter(|f| !f.fixed_versions.is_empty())
+        .filter(|f| f.fix_status() == FixStatus::Available)
         .count();
     let not_fixed = report.vulnerabilities.len() - fixed;
     let weak_matches = weak_match_counts(&report.vulnerabilities);

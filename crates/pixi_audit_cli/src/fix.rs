@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use miette::{IntoDiagnostic, WrapErr, miette};
-use pixi_audit::AuditReport;
+use pixi_audit::{AuditReport, FixStatus};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::workspace::ResolvedTargets;
@@ -63,7 +63,7 @@ pub async fn apply(
 pub(crate) fn fixable_package_names(report: &AuditReport) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for finding in &report.vulnerabilities {
-        if finding.fixed_versions.is_empty() {
+        if finding.fix_status() != FixStatus::Available {
             continue;
         }
         let name = finding.package.to_string();

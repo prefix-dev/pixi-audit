@@ -17,9 +17,9 @@ use crate::{
     },
     client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
     report::{
-        AuditPackage, AuditReport, Finding, IgnoreReason, IgnoreSpec, MatchApplicability,
-        PackageEcosystem, PackageIgnore, SeverityBand, SortStrategy, UncheckedPackage,
-        mean_cvss_base_score,
+        AuditPackage, AuditReport, Finding, FixStatus, IgnoreReason, IgnoreSpec,
+        MatchApplicability, PackageEcosystem, PackageIgnore, SeverityBand, SortStrategy,
+        UncheckedPackage, mean_cvss_base_score,
     },
     threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
@@ -487,8 +487,7 @@ impl<'a> Suppressions<'a> {
                 }
             }
         }
-        let has_known_fix =
-            !finding.fixed_versions.is_empty() || !finding.upstream_fixes.is_empty();
+        let has_known_fix = finding.fix_status() != FixStatus::Unfixed;
         if ignored.is_some() || always {
             Some(IgnoreReason::Always)
         } else if (self.ignore_unfixed || until_fixed.is_some() || until_fix) && !has_known_fix {

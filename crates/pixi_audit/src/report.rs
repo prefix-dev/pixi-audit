@@ -613,6 +613,29 @@ impl Finding {
         cves.dedup();
         cves
     }
+
+    /// Where the finding's fix stands.
+    pub fn fix_status(&self) -> FixStatus {
+        if !self.fixed_versions.is_empty() {
+            FixStatus::Available
+        } else if !self.upstream_fixes.is_empty() {
+            FixStatus::UpstreamOnly
+        } else {
+            FixStatus::Unfixed
+        }
+    }
+}
+
+/// Where a finding's fix stands, from [`Finding::fix_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixStatus {
+    /// A fixed release exists in the package's own ecosystem.
+    Available,
+    /// Fixes exist only outside the package's own ecosystem, so they may
+    /// not be installable for it.
+    UpstreamOnly,
+    /// No fix is known anywhere.
+    Unfixed,
 }
 
 #[derive(Debug, Clone, Serialize)]

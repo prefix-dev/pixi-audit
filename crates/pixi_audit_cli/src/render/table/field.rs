@@ -7,7 +7,8 @@ use std::cmp::Ordering;
 use clap::ValueEnum;
 use iocraft::prelude::{Color, Weight};
 use pixi_audit::{
-    Finding, IgnoreReason, MatchApplicability, PackageEcosystem, SeverityBand, SortStrategy,
+    Finding, FixStatus, IgnoreReason, MatchApplicability, PackageEcosystem, SeverityBand,
+    SortStrategy,
 };
 
 use super::grid::{Cell, Span};
@@ -261,17 +262,17 @@ pub fn environments_cell(environments: &[String]) -> Cell {
 /// Fixed versions in the package's own ecosystem, or a dim note naming
 /// where else a fix exists. Blank when nothing does.
 fn fixed_in(finding: &Finding) -> Cell {
-    if !finding.fixed_versions.is_empty() {
-        Cell::new(finding.fixed_versions.join(", ")).color(Color::Green)
-    } else if !finding.upstream_fixes.is_empty() {
-        let labels: Vec<String> = finding
-            .upstream_fixes
-            .iter()
-            .map(crate::render::upstream_fix_label)
-            .collect();
-        Cell::new(labels.join(", ")).weight(Weight::Light)
-    } else {
-        Cell::empty()
+    match finding.fix_status() {
+        FixStatus::Available => Cell::new(finding.fixed_versions.join(", ")).color(Color::Green),
+        FixStatus::UpstreamOnly => {
+            let labels: Vec<String> = finding
+                .upstream_fixes
+                .iter()
+                .map(crate::render::upstream_fix_label)
+                .collect();
+            Cell::new(labels.join(", ")).weight(Weight::Light)
+        }
+        FixStatus::Unfixed => Cell::empty(),
     }
 }
 

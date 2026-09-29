@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use console::style;
 use iocraft::prelude::Weight;
 use pixi_audit::{
-    AuditReport, CondaPublication, EpssScore, Finding, IgnoreReason, KnownExploited,
+    AuditReport, CondaPublication, EpssScore, Finding, FixStatus, IgnoreReason, KnownExploited,
     MatchApplicability, PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore,
     SeverityBand, ThreatSourceStatus, UpstreamFix, UpstreamOrigin,
 };
@@ -264,28 +264,17 @@ impl Guidance {
                 )
             })
             .count();
-        let fixable_findings = findings
-            .iter()
-            .filter(|finding| !finding.fixed_versions.is_empty())
-            .count();
+        let fix_count =
+            |status: FixStatus| findings.iter().filter(|f| f.fix_status() == status).count();
+        let fixable_findings = fix_count(FixStatus::Available);
         let audited_packages_with_fixes = findings
             .iter()
-            .filter(|finding| !finding.fixed_versions.is_empty())
+            .filter(|finding| finding.fix_status() == FixStatus::Available)
             .map(package_key)
             .collect::<BTreeSet<_>>()
             .len();
-        let upstream_only = findings
-            .iter()
-            .filter(|finding| {
-                finding.fixed_versions.is_empty() && !finding.upstream_fixes.is_empty()
-            })
-            .count();
-        let unfixed = findings
-            .iter()
-            .filter(|finding| {
-                finding.fixed_versions.is_empty() && finding.upstream_fixes.is_empty()
-            })
-            .count();
+        let upstream_only = fix_count(FixStatus::UpstreamOnly);
+        let unfixed = fix_count(FixStatus::Unfixed);
 
         Self {
             highest_risk,
@@ -797,15 +786,13 @@ pub fn kev_label(entries: &[KnownExploited]) -> Option<&'static str> {
 }
 
 fn fix_note(finding: &Finding) -> String {
-    if !finding.fixed_versions.is_empty() {
-        format!("  fixed in: {}", finding.fixed_versions.join(", "))
-    } else if !finding.upstream_fixes.is_empty() {
-        format!(
+    match finding.fix_status() {
+        FixStatus::Available => format!("  fixed in: {}", finding.fixed_versions.join(", ")),
+        FixStatus::UpstreamOnly => format!(
             "  fix released elsewhere: {}",
             describe_upstream_fixes(finding)
-        )
-    } else {
-        "  no known fixed version".to_string()
+        ),
+        FixStatus::Unfixed => "  no known fixed version".to_string(),
     }
 }
 
@@ -868,15 +855,13 @@ pub fn upstream_fix_label(fix: &UpstreamFix) -> String {
 /// Where a finding's fix stands, as a sentence fragment: `fixed in 3.1.1`,
 /// `fix released elsewhere: ...`, or `no known fixed version`.
 pub fn fix_summary(finding: &Finding) -> String {
-    if !finding.fixed_versions.is_empty() {
-        format!("fixed in {}", finding.fixed_versions.join(", "))
-    } else if !finding.upstream_fixes.is_empty() {
-        format!(
+    match finding.fix_status() {
+        FixStatus::Available => format!("fixed in {}", finding.fixed_versions.join(", ")),
+        FixStatus::UpstreamOnly => format!(
             "fix released elsewhere: {}",
             describe_upstream_fixes(finding)
-        )
-    } else {
-        "no known fixed version".to_string()
+        ),
+        FixStatus::Unfixed => "no known fixed version".to_string(),
     }
 }
 
