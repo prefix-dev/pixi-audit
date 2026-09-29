@@ -108,7 +108,7 @@ async fn unparsable_scores_are_an_invalid_response() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, AuditError::InvalidResponse { .. }),
+        matches!(err, ThreatFeedError::InvalidResponse { .. }),
         "unexpected error: {err}"
     );
 }

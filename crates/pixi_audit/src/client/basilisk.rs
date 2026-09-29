@@ -2,7 +2,7 @@ use reqwest_middleware::{ClientWithMiddleware, RequestBuilder};
 use serde::de::DeserializeOwned;
 use url::Url;
 
-use super::{AuditError, MAX_PAGINATION_ROUNDS};
+use super::{AuditError, MAX_PAGINATION_ROUNDS, http};
 use crate::types::{BatchResponse, BatchResult, OsvQuery, OsvVulnerability};
 
 /// The default Basilisk API instance.
@@ -21,13 +21,11 @@ pub struct BasiliskClient {
 }
 
 impl BasiliskClient {
-    pub fn new(client: ClientWithMiddleware, mut base_url: Url) -> Self {
-        // `Url::join` treats a path without a trailing slash as a file:
-        // https://host/prefix + "v1/querybatch" would drop "prefix".
-        if !base_url.path().ends_with('/') {
-            base_url.set_path(&format!("{}/", base_url.path()));
+    pub fn new(client: ClientWithMiddleware, base_url: Url) -> Self {
+        Self {
+            client,
+            base_url: http::base_url(base_url),
         }
-        Self { client, base_url }
     }
 
     fn endpoint(&self, path: &str) -> Result<Url, AuditError> {
@@ -105,46 +103,14 @@ impl BasiliskClient {
         self.send_json(url, request).await
     }
 
-    /// Sends `request` and decodes a successful JSON response, mapping
-    /// transport, status, and decoding failures to the matching
-    /// [`AuditError`] variant.
+    /// Sends `request` to `url` and decodes a successful JSON response.
     async fn send_json<T: DeserializeOwned>(
         &self,
         url: Url,
         request: RequestBuilder,
     ) -> Result<T, AuditError> {
-        let response = request.send().await.map_err(|source| AuditError::Request {
-            url: url.clone(),
-            source,
-        })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(status_error(url, status, response).await);
-        }
-        response
-            .json()
+        http::send_json(request)
             .await
-            .map_err(|source| AuditError::InvalidResponse { url, source })
-    }
-}
-
-/// Builds a `Status` error, extracting the server's `{"error": "..."}` body
-/// (basilisk's error format) when there is one.
-pub(super) async fn status_error(
-    url: Url,
-    status: reqwest::StatusCode,
-    response: reqwest::Response,
-) -> AuditError {
-    let message = response.text().await.ok().and_then(|body| {
-        serde_json::from_str::<serde_json::Value>(&body)
-            .ok()?
-            .get("error")?
-            .as_str()
-            .map(str::to_string)
-    });
-    AuditError::Status {
-        url,
-        status,
-        message,
+            .map_err(|failure| AuditError::from_http(url, failure))
     }
 }

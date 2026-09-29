@@ -108,7 +108,7 @@ async fn malformed_feed_is_an_invalid_response() {
     let url = spawn_router(app).await.join("kev.json").unwrap();
     let err = client(url).catalog().await.unwrap_err();
     assert!(
-        matches!(err, AuditError::InvalidResponse { .. }),
+        matches!(err, ThreatFeedError::InvalidResponse { .. }),
         "unexpected error: {err}"
     );
 }
