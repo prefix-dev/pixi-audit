@@ -1,7 +1,7 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited, PackageEcosystem,
-    PackageName, RansomwareCampaignUse, RiskScore, SeverityBand, ThreatDataStatus,
-    ThreatSourceStatus, UncheckedPackage,
+    AuditPackage, AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
+    PackageEcosystem, PackageId, PackageName, RansomwareCampaignUse, RiskScore, SeverityBand,
+    ThreatDataStatus, ThreatSourceStatus,
 };
 
 use pixi_audit::{CondaPublication, UpstreamFix, UpstreamOrigin};
@@ -47,9 +47,11 @@ fn upstream_fixes_say_where_they_exist() {
 
 fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
     Finding {
-        package: PackageName::conda(package).unwrap(),
-        version: "3.1.0".to_string(),
-        ecosystem: PackageEcosystem::CondaForge,
+        package: PackageId {
+            name: PackageName::conda(package).unwrap(),
+            version: "3.1.0".to_string(),
+            ecosystem: PackageEcosystem::CondaForge,
+        },
         environments: vec!["default".to_string(), "prod".to_string()],
         id: id.to_string(),
         aliases: vec![],
@@ -255,8 +257,8 @@ fn explain_adds_contextual_definitions_after_actions() {
     let report = AuditReport {
         vulnerabilities: vec![listed],
         ignored: vec![ignored],
-        unchecked: vec![UncheckedPackage {
-            package: PackageName::conda("samtools").unwrap(),
+        unchecked: vec![AuditPackage {
+            name: PackageName::conda("samtools").unwrap(),
             version: Some("1.2".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
             environments: vec!["default".to_string()],
@@ -319,7 +321,7 @@ fn explain_adds_contextual_definitions_after_actions() {
 #[test]
 fn unknown_severity_keeps_threat_cells() {
     let mut unknown = finding("requests", "PYSEC-2026-1", SeverityBand::Unknown);
-    unknown.ecosystem = PackageEcosystem::Pypi;
+    unknown.package.ecosystem = PackageEcosystem::Pypi;
     unknown.epss = vec![EpssScore {
         cve: "CVE-2026-9999".to_string(),
         epss: 0.25,
@@ -446,8 +448,8 @@ fn hyperlinks_wrap_the_id_and_replace_the_url_line() {
 fn findings_from_different_ecosystems_are_separate_packages() {
     let conda = finding("openssl", "CVE-2026-0001", SeverityBand::High);
     let mut pypi = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
-    pypi.package = PackageName::pypi("openssl").unwrap();
-    pypi.ecosystem = PackageEcosystem::Pypi;
+    pypi.package.name = PackageName::pypi("openssl").unwrap();
+    pypi.package.ecosystem = PackageEcosystem::Pypi;
     pypi.environments = vec!["docs".to_string()];
     let report = AuditReport {
         vulnerabilities: vec![conda, pypi],
@@ -543,8 +545,8 @@ fn grouped_report_without_manifest_does_not_offer_fix() {
 fn ignored_and_unchecked_sections_render() {
     let report = AuditReport {
         ignored: vec![finding("openssl", "CVE-2026-0001", SeverityBand::High)],
-        unchecked: vec![UncheckedPackage {
-            package: PackageName::conda("samtools").unwrap(),
+        unchecked: vec![AuditPackage {
+            name: PackageName::conda("samtools").unwrap(),
             version: Some("1.19".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
             environments: vec!["default".to_string()],
@@ -596,8 +598,8 @@ fn until_fixed_ignores_are_marked() {
 #[test]
 fn unchecked_package_without_version_renders_question_mark() {
     let report = AuditReport {
-        unchecked: vec![UncheckedPackage {
-            package: PackageName::conda("mypkg").unwrap(),
+        unchecked: vec![AuditPackage {
+            name: PackageName::conda("mypkg").unwrap(),
             version: None,
             ecosystem: PackageEcosystem::Other("unknown".to_string()),
             environments: vec!["default".to_string()],

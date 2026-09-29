@@ -37,7 +37,8 @@ pub(super) type FixPlan = BTreeMap<PackageName, FixVersion>;
 pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
     let mut fixes = FixPlan::new();
     for finding in &report.vulnerabilities {
-        let Some(locked) = FixVersion::parse(&finding.package, &finding.version) else {
+        let Some(locked) = FixVersion::parse(&finding.package.name, &finding.package.version)
+        else {
             continue;
         };
         // OSV can publish fixed events for multiple release branches. Pick the
@@ -47,7 +48,7 @@ pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
         let Some(fixed) = finding
             .fixed_versions
             .iter()
-            .filter_map(|fixed| FixVersion::parse(&finding.package, fixed))
+            .filter_map(|fixed| FixVersion::parse(&finding.package.name, fixed))
             .filter(|fixed| *fixed > locked)
             .min()
         else {
@@ -56,7 +57,7 @@ pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
         // Multiple advisories for one package must all be resolved, so retain
         // the greatest of their minimum required fixes.
         let required = fixes
-            .entry(finding.package.clone())
+            .entry(finding.package.name.clone())
             .or_insert_with(|| fixed.clone());
         if *required < fixed {
             *required = fixed;

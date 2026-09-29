@@ -4,9 +4,7 @@
 use std::io::{self, Write};
 
 use iocraft::prelude::*;
-use pixi_audit::{
-    AuditReport, Finding, FixStatus, MatchApplicability, SeverityBand, UncheckedPackage,
-};
+use pixi_audit::{AuditPackage, AuditReport, Finding, FixStatus, MatchApplicability, SeverityBand};
 use supports_hyperlinks::Stream;
 
 use super::{
@@ -299,7 +297,7 @@ fn findings_grid(
     let mut previous: Option<&Finding> = None;
     for finding in field::sorted(findings, layout.sort_by) {
         let context = RowContext {
-            repeated_package: previous.is_some_and(|p| same_package(p, finding)),
+            repeated_package: previous.is_some_and(|p| p.package == finding.package),
             hyperlinks: style.hyperlinks,
             color: style.color,
             match_column: fields.contains(&Field::Match),
@@ -313,10 +311,6 @@ fn findings_grid(
         previous = Some(finding);
     }
     grid(&headers, rows)
-}
-
-fn same_package(a: &Finding, b: &Finding) -> bool {
-    a.package == b.package && a.version == b.version && a.ecosystem == b.ecosystem
 }
 
 fn findings_table(
@@ -350,7 +344,7 @@ fn ignored_table(
 }
 
 fn unchecked_table(
-    unchecked: &[UncheckedPackage],
+    unchecked: &[AuditPackage],
     style: OutputStyle,
 ) -> Option<Element<'static, View>> {
     if unchecked.is_empty() {
@@ -365,7 +359,7 @@ fn unchecked_table(
         .map(|package| {
             vec![
                 kind_cell(&package.ecosystem, context),
-                name_cell(&package.package.to_string(), context),
+                name_cell(package.name.as_str(), context),
                 Cell::new(package.version.clone().unwrap_or_else(|| "?".to_string())),
                 Cell::new(package.ecosystem.to_string()),
                 environments_cell(&package.environments),
@@ -467,7 +461,7 @@ fn summary_line(report: &AuditReport) -> Element<'static, View> {
     let mut packages: Vec<(&str, &str)> = report
         .vulnerabilities
         .iter()
-        .map(|f| (f.package.as_str(), f.version.as_str()))
+        .map(|f| (f.package.name.as_str(), f.package.version.as_str()))
         .collect();
     packages.sort_unstable();
     packages.dedup();

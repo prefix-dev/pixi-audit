@@ -18,8 +18,8 @@ use crate::{
     client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, Finding, FixStatus, IgnoreReason, IgnoreSpec,
-        MatchApplicability, PackageEcosystem, PackageIgnore, SeverityBand, SortStrategy,
-        UncheckedPackage, mean_cvss_base_score,
+        MatchApplicability, PackageEcosystem, PackageId, PackageIgnore, SeverityBand, SortStrategy,
+        mean_cvss_base_score,
     },
     threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
@@ -132,8 +132,8 @@ struct PlannedQuery<'a> {
     backend: Backend,
     /// The version as sent to the backend.
     query_version: String,
-    /// The version as locked, reported on findings.
-    version: String,
+    /// The package as locked, reported on findings.
+    id: PackageId,
 }
 
 impl PlannedQuery<'_> {
@@ -166,7 +166,11 @@ fn plan_query(package: &AuditPackage) -> Option<PlannedQuery<'_>> {
         package,
         backend,
         query_version,
-        version,
+        id: PackageId {
+            name: package.name.clone(),
+            version,
+            ecosystem: package.ecosystem.clone(),
+        },
     })
 }
 
@@ -253,12 +257,7 @@ pub async fn audit(
     for package in &packages {
         match plan_query(package) {
             Some(query) => planned.push(query),
-            None => report.unchecked.push(UncheckedPackage {
-                package: package.name.clone(),
-                version: package.version.clone(),
-                ecosystem: package.ecosystem.clone(),
-                environments: package.environments.clone(),
-            }),
+            None => report.unchecked.push(package.clone()),
         }
     }
     // The KEV catalog does not depend on the findings, so it downloads
@@ -298,9 +297,7 @@ pub async fn audit(
             let fixes = query.backend.fixed_versions(doc, package);
             let basilisk_match = query.backend.basilisk_match(doc, package);
             let finding = Finding {
-                package: package.name.clone(),
-                version: query.version.clone(),
-                ecosystem: package.ecosystem.clone(),
+                package: query.id.clone(),
                 environments: package.environments.clone(),
                 id: doc.id.clone(),
                 aliases: doc.aliases.clone(),

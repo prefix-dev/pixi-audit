@@ -37,7 +37,7 @@ pub fn github_annotations(report: &AuditReport, level_for: impl Fn(&Finding) -> 
             level_for(finding).command(),
             escape_property(&format!(
                 "{} in {} {}",
-                finding.id, finding.package, finding.version
+                finding.id, finding.package.name, finding.package.version
             )),
             escape_data(&message(finding))
         )
@@ -60,7 +60,7 @@ fn message(finding: &Finding) -> String {
     }
     text.push_str(&format!(
         ", {fix}{match_note} ({}; {})",
-        finding.ecosystem,
+        finding.package.ecosystem,
         finding.environments.join(", ")
     ));
     if let Some(summary) = &finding.summary {
@@ -90,7 +90,7 @@ fn escape_property(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use pixi_audit::{
-        AuditSummary, MatchApplicability, PackageEcosystem, PackageName, SeverityBand,
+        AuditSummary, MatchApplicability, PackageEcosystem, PackageId, PackageName, SeverityBand,
     };
 
     use super::*;
@@ -99,9 +99,11 @@ mod tests {
     fn one_command_per_finding_with_escaped_title() {
         let report = AuditReport {
             vulnerabilities: vec![Finding {
-                package: PackageName::conda("openssl").unwrap(),
-                version: "3.1.0".to_string(),
-                ecosystem: PackageEcosystem::CondaForge,
+                package: PackageId {
+                    name: PackageName::conda("openssl").unwrap(),
+                    version: "3.1.0".to_string(),
+                    ecosystem: PackageEcosystem::CondaForge,
+                },
                 environments: vec!["default".to_string()],
                 id: "CVE-2026-1".to_string(),
                 aliases: vec![],
@@ -137,9 +139,11 @@ mod tests {
     fn weak_matches_are_noted_in_the_message() {
         let mut report = AuditReport {
             vulnerabilities: vec![Finding {
-                package: PackageName::conda("libpq").unwrap(),
-                version: "16.0".to_string(),
-                ecosystem: PackageEcosystem::CondaForge,
+                package: PackageId {
+                    name: PackageName::conda("libpq").unwrap(),
+                    version: "16.0".to_string(),
+                    ecosystem: PackageEcosystem::CondaForge,
+                },
                 environments: vec!["default".to_string()],
                 id: "CVE-2022-25852".to_string(),
                 aliases: vec![],
@@ -174,9 +178,11 @@ mod tests {
     fn risk_and_kev_are_mentioned_when_present() {
         let mut report = AuditReport::default();
         let mut finding = Finding {
-            package: PackageName::conda("openssl").unwrap(),
-            version: "3.1.0".to_string(),
-            ecosystem: PackageEcosystem::CondaForge,
+            package: PackageId {
+                name: PackageName::conda("openssl").unwrap(),
+                version: "3.1.0".to_string(),
+                ecosystem: PackageEcosystem::CondaForge,
+            },
             environments: vec!["default".to_string()],
             id: "CVE-2026-1".to_string(),
             aliases: vec![],

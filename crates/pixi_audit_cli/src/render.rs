@@ -5,7 +5,7 @@ use console::style;
 use iocraft::prelude::Weight;
 use pixi_audit::{
     AuditReport, CondaPublication, EpssScore, Finding, FixStatus, IgnoreReason, KnownExploited,
-    MatchApplicability, PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore,
+    MatchApplicability, PackageEcosystem, PackageId, RansomwareCampaignUse, RiskScore,
     SeverityBand, ThreatSourceStatus, UpstreamFix, UpstreamOrigin,
 };
 use supports_hyperlinks::Stream;
@@ -86,7 +86,7 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
             writeln!(
                 out,
                 "  {} {} ({}) — {}",
-                package.package,
+                package.name,
                 package.version.as_deref().unwrap_or("?"),
                 package.ecosystem,
                 package.environments.join(", ")
@@ -133,7 +133,7 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
             writeln!(
                 out,
                 "  {} ({} {}){marker}",
-                finding.id, finding.package, finding.version
+                finding.id, finding.package.name, finding.package.version
             )
             .unwrap();
         }
@@ -142,8 +142,8 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
 
     let summary = &report.summary;
     if summary.vulnerable > 0 {
-        let packages: BTreeSet<PackageKey<'_>> =
-            report.vulnerabilities.iter().map(package_key).collect();
+        let packages: BTreeSet<&PackageId> =
+            report.vulnerabilities.iter().map(|f| &f.package).collect();
         writeln!(
             out,
             "{} vulnerabilities in {} package(s) ({} audited, {} ignored, {} unchecked)",
@@ -270,7 +270,7 @@ impl Guidance {
         let audited_packages_with_fixes = findings
             .iter()
             .filter(|finding| finding.fix_status() == FixStatus::Available)
-            .map(package_key)
+            .map(|finding| &finding.package)
             .collect::<BTreeSet<_>>()
             .len();
         let upstream_only = fix_count(FixStatus::UpstreamOnly);
@@ -607,21 +607,9 @@ fn render_guidance(out: &mut String, report: &AuditReport, options: GuidanceOpti
     }
 }
 
-/// Identifies one locked package: the same name at a different version or
-/// from a different ecosystem is a different package.
-type PackageKey<'a> = (&'a PackageName, &'a str, &'a PackageEcosystem);
-
-fn package_key(finding: &Finding) -> PackageKey<'_> {
-    (
-        &finding.package,
-        finding.version.as_str(),
-        &finding.ecosystem,
-    )
-}
-
 /// The findings for one locked package, under a shared header.
 struct Group<'a> {
-    key: PackageKey<'a>,
+    key: &'a PackageId,
     header: String,
     members: Vec<&'a Finding>,
 }
@@ -631,16 +619,16 @@ struct Group<'a> {
 fn grouped(findings: &[Finding]) -> Vec<Group<'_>> {
     let mut groups: Vec<Group<'_>> = Vec::new();
     for finding in findings {
-        let key = package_key(finding);
+        let key = &finding.package;
         match groups.iter_mut().find(|group| group.key == key) {
             Some(group) => group.members.push(finding),
             None => groups.push(Group {
                 key,
                 header: format!(
                     "{} {} ({}) — {}",
-                    style(&finding.package).bold(),
-                    finding.version,
-                    finding.ecosystem,
+                    style(&finding.package.name).bold(),
+                    finding.package.version,
+                    finding.package.ecosystem,
                     finding.environments.join(", ")
                 ),
                 members: vec![finding],
@@ -802,7 +790,9 @@ pub fn match_note(finding: &Finding) -> Option<&'static str> {
         MatchApplicability::VersionUnbounded => Some("match: no version limits"),
         MatchApplicability::Unevaluated => Some("match: version not checked"),
         MatchApplicability::Evaluated => Some("match: affects version"),
-        MatchApplicability::Unspecified if finding.ecosystem == PackageEcosystem::CondaForge => {
+        MatchApplicability::Unspecified
+            if finding.package.ecosystem == PackageEcosystem::CondaForge =>
+        {
             Some("match details unavailable")
         }
         MatchApplicability::Unspecified => None,

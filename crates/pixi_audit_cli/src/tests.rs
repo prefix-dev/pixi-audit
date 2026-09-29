@@ -119,9 +119,11 @@ fn invalid_severity_is_rejected_at_parse_time() {
 #[test]
 fn gate_applies_threshold_with_unknown_failsafe() {
     let finding = |severity| pixi_audit::Finding {
-        package: pixi_audit::PackageName::conda("p").unwrap(),
-        version: "1".into(),
-        ecosystem: pixi_audit::PackageEcosystem::CondaForge,
+        package: pixi_audit::PackageId {
+            name: pixi_audit::PackageName::conda("p").unwrap(),
+            version: "1".into(),
+            ecosystem: pixi_audit::PackageEcosystem::CondaForge,
+        },
         environments: vec![],
         id: "X".into(),
         aliases: vec![],
@@ -192,9 +194,11 @@ fn warn_only_conda_keeps_pypi_blocking() {
 
     let mut conda = AuditReport::default();
     conda.vulnerabilities.push(pixi_audit::Finding {
-        package: pixi_audit::PackageName::conda("openssl").unwrap(),
-        version: "3.1.0".into(),
-        ecosystem: pixi_audit::PackageEcosystem::CondaForge,
+        package: pixi_audit::PackageId {
+            name: pixi_audit::PackageName::conda("openssl").unwrap(),
+            version: "3.1.0".into(),
+            ecosystem: pixi_audit::PackageEcosystem::CondaForge,
+        },
         environments: vec![],
         id: "CVE-1".into(),
         aliases: vec![],
@@ -214,8 +218,8 @@ fn warn_only_conda_keeps_pypi_blocking() {
     assert_eq!(gate(&conda, None, &cli.warn_only), Gate::Clean);
     assert_eq!(gate(&conda, None, &[]), Gate::Fail);
     let mut pypi = conda.vulnerabilities[0].clone();
-    pypi.package = pixi_audit::PackageName::pypi("openssl").unwrap();
-    pypi.ecosystem = pixi_audit::PackageEcosystem::Pypi;
+    pypi.package.name = pixi_audit::PackageName::pypi("openssl").unwrap();
+    pypi.package.ecosystem = pixi_audit::PackageEcosystem::Pypi;
     conda.vulnerabilities.push(pypi);
     assert_eq!(gate(&conda, None, &cli.warn_only), Gate::Fail);
     let both = Cli::try_parse_from([

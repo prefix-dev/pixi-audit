@@ -175,7 +175,7 @@ impl SarifLog {
 /// One rule per vulnerability and package, so dashboards group alerts the
 /// way people fix them.
 fn rule_id(finding: &Finding) -> String {
-    format!("{}-{}", finding.id, finding.package)
+    format!("{}-{}", finding.id, finding.package.name)
 }
 
 fn rule(finding: &Finding, lockfile: &LockfileSource<'_>) -> Rule {
@@ -203,9 +203,9 @@ fn rule(finding: &Finding, lockfile: &LockfileSource<'_>) -> Rule {
                 .map(str::to_string)
                 .unwrap_or_default(),
         ),
-        ("Package", finding.package.to_string()),
-        ("Version", finding.version.clone()),
-        ("Ecosystem", finding.ecosystem.to_string()),
+        ("Package", finding.package.name.to_string()),
+        ("Version", finding.package.version.clone()),
+        ("Ecosystem", finding.package.ecosystem.to_string()),
         ("Fix", fix_summary(finding)),
         (
             "Match",
@@ -253,14 +253,14 @@ fn rule(finding: &Finding, lockfile: &LockfileSource<'_>) -> Rule {
                 "{} {} vulnerability for {} package",
                 finding.id,
                 finding.severity.name(),
-                finding.package
+                finding.package.name
             ),
         },
         full_description: Message {
             text: finding
                 .summary
                 .clone()
-                .unwrap_or_else(|| format!("{} affects {}", finding.id, finding.package)),
+                .unwrap_or_else(|| format!("{} affects {}", finding.id, finding.package.name)),
         },
         help_uri: finding.url.clone(),
         help: MultiformatMessage { text, markdown },
@@ -300,9 +300,9 @@ fn level(band: SeverityBand) -> &'static str {
 }
 
 fn purl(finding: &Finding) -> String {
-    let name = finding.package.as_str();
-    let version = &finding.version;
-    match &finding.ecosystem {
+    let name = finding.package.name.as_str();
+    let version = &finding.package.version;
+    match &finding.package.ecosystem {
         PackageEcosystem::Pypi => format!("pkg:pypi/{name}@{version}"),
         PackageEcosystem::CondaForge => format!("pkg:conda/{name}@{version}?channel=conda-forge"),
         PackageEcosystem::Other(channel) => {
@@ -332,9 +332,9 @@ fn result(finding: &Finding, uri: &str, lockfile_contents: &str) -> SarifResult 
                 "{}: {} vulnerability in {} package {} {}. {}{}",
                 finding.id,
                 finding.severity.name(),
-                finding.ecosystem,
-                finding.package,
-                finding.version,
+                finding.package.ecosystem,
+                finding.package.name,
+                finding.package.version,
                 fix_summary(finding),
                 match_note(finding)
                     .map(|note| format!(". {note}"))
@@ -386,8 +386,8 @@ fn git_repository_root(path: &Path) -> Option<&Path> {
 /// archive filename in a package URL, such as `openssl-3.1.0-hd590300_3`
 /// or `requests-2.32.0-py3-none-any.whl`. Line 1 when nothing matches.
 fn package_line(contents: &str, finding: &Finding) -> usize {
-    let version = finding.version.to_ascii_lowercase();
-    let name = finding.package.as_str().to_ascii_lowercase();
+    let version = finding.package.version.to_ascii_lowercase();
+    let name = finding.package.name.as_str().to_ascii_lowercase();
     // Wheel and sdist filenames spell the name with underscores.
     let spellings = [name.clone(), name.replace('-', "_")];
     let needles: Vec<String> = spellings

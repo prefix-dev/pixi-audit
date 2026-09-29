@@ -350,7 +350,7 @@ packages:
 
         assert_eq!(report.vulnerabilities.len(), 1);
         let finding = &report.vulnerabilities[0];
-        assert_eq!(finding.package.as_str(), "openssl");
+        assert_eq!(finding.package.name.as_str(), "openssl");
         assert_eq!(finding.id, "BSLK-1");
         assert_eq!(finding.severity, crate::report::SeverityBand::Critical);
         assert_eq!(finding.environments, vec!["default", "prod"]);
