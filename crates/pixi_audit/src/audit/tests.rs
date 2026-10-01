@@ -321,21 +321,21 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
         .await
         .unwrap();
     let mut conda = report.vulnerabilities[0].clone();
-    conda.package = conda_name("openssl");
+    conda.package.name = conda_name("openssl");
 
     let anonymous_rule = PackageIgnore {
         scope: IgnoreScope {
-            version: Some(conda.version.clone()),
+            version: Some(conda.package.version.clone()),
             ..IgnoreScope::default()
         },
         ..PackageIgnore::default()
     };
-    assert!(anonymous_rule.scope.matches(&conda));
+    assert!(anonymous_rule.scope.matches(&conda.package));
     assert!(!anonymous_rule.applies_to(&conda));
 
     let mut pypi = conda.clone();
-    pypi.package = pypi_name("openssl");
-    pypi.ecosystem = PackageEcosystem::Pypi;
+    pypi.package.name = pypi_name("openssl");
+    pypi.package.ecosystem = PackageEcosystem::Pypi;
 
     // An unqualified scope uses the finding's ecosystem, not the first
     // version parser that accepts its bound.
@@ -344,21 +344,21 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
         max_affected_version: Some("1.0foo".into()),
         ..IgnoreScope::default()
     };
-    let mut finding = conda.clone();
-    finding.version = "1.0foo".into();
-    assert!(scope.matches(&finding));
-    finding.ecosystem = PackageEcosystem::Pypi;
-    assert!(!scope.matches(&finding));
-    finding.version = "1.0".into();
+    let mut package = conda.package.clone();
+    package.version = "1.0foo".into();
+    assert!(scope.matches(&package));
+    package.ecosystem = PackageEcosystem::Pypi;
+    assert!(!scope.matches(&package));
+    package.version = "1.0".into();
     scope.version = Some("1.0.0".into());
     scope.max_affected_version = Some("1.0rc1".into());
-    assert!(!scope.matches(&finding));
+    assert!(!scope.matches(&package));
     scope.max_affected_version = Some("1.0".into());
-    assert!(scope.matches(&finding));
-    finding.ecosystem = PackageEcosystem::Other("custom".into());
-    assert!(!scope.matches(&finding));
-    finding.version = "not a version".into();
-    assert!(IgnoreScope::default().matches(&finding));
+    assert!(scope.matches(&package));
+    package.ecosystem = PackageEcosystem::Other("custom".into());
+    assert!(!scope.matches(&package));
+    package.version = "not a version".into();
+    assert!(IgnoreScope::default().matches(&package));
 
     let rule = PackageIgnore {
         id: Some("CVE-2026-1234".to_string()),
@@ -371,7 +371,7 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
     };
     assert!(rule.applies_to(&conda));
     assert!(!rule.applies_to(&pypi));
-    conda.version = "3.1.1".to_string();
+    conda.package.version = "3.1.1".to_string();
     assert!(!rule.applies_to(&conda));
 
     let rule = PackageIgnore {
@@ -383,9 +383,9 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
         ..PackageIgnore::default()
     };
     assert!(!rule.applies_to(&conda));
-    conda.version = "3.1.0".to_string();
+    conda.package.version = "3.1.0".to_string();
     assert!(rule.applies_to(&conda));
-    conda.version = "3.0.9".to_string();
+    conda.package.version = "3.0.9".to_string();
     assert!(rule.applies_to(&conda));
     let base = spawn_mock().await;
     let stale = [PackageIgnore {
@@ -562,7 +562,7 @@ async fn audit_reports_findings_and_unchecked() {
 
     assert_eq!(report.vulnerabilities.len(), 1);
     let finding = &report.vulnerabilities[0];
-    assert_eq!(finding.package.as_str(), "openssl");
+    assert_eq!(finding.package.name.as_str(), "openssl");
     assert_eq!(finding.id, "BSLK-1");
     assert_eq!(finding.severity, SeverityBand::Critical);
     assert_eq!(finding.fixed_versions, vec!["3.1.1"]);
@@ -607,7 +607,11 @@ async fn ignored_findings_are_sorted_like_vulnerabilities() {
     let report = audit(&test_client(base), packages(), spec).await.unwrap();
 
     // Same severity everywhere, so the tie-break is the package name.
-    let order: Vec<&str> = report.ignored.iter().map(|f| f.package.as_str()).collect();
+    let order: Vec<&str> = report
+        .ignored
+        .iter()
+        .map(|f| f.package.name.as_str())
+        .collect();
     assert_eq!(order, vec!["openssl", "zlib"]);
 }
 
@@ -696,7 +700,7 @@ async fn unknown_version_packages_are_unchecked_and_never_queried() {
     assert_eq!(*received.lock().unwrap(), 1);
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(report.unchecked.len(), 1);
-    assert_eq!(report.unchecked[0].package.as_str(), "mystery");
+    assert_eq!(report.unchecked[0].name.as_str(), "mystery");
     assert_eq!(report.unchecked[0].version, None);
     assert_eq!(report.summary.audited, 1);
 }
@@ -745,7 +749,7 @@ async fn other_ecosystem_packages_are_unchecked_and_never_queried() {
 
     assert_eq!(*received.lock().unwrap(), 1);
     assert_eq!(report.unchecked.len(), 1);
-    assert_eq!(report.unchecked[0].package.as_str(), "samtools");
+    assert_eq!(report.unchecked[0].name.as_str(), "samtools");
     assert_eq!(
         report.unchecked[0].ecosystem,
         PackageEcosystem::Other("bioconda".to_string())
@@ -942,8 +946,8 @@ async fn pypi_package_is_audited_with_osv() {
     assert_eq!(report.vulnerabilities.len(), 1);
     assert!(report.unchecked.is_empty());
     let finding = &report.vulnerabilities[0];
-    assert_eq!(finding.package.as_str(), "requests-test");
-    assert_eq!(finding.ecosystem, PackageEcosystem::Pypi);
+    assert_eq!(finding.package.name.as_str(), "requests-test");
+    assert_eq!(finding.package.ecosystem, PackageEcosystem::Pypi);
     assert_eq!(finding.id, "PYSEC-2026-1");
     assert_eq!(
         finding.summary.as_deref(),

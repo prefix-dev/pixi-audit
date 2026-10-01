@@ -220,18 +220,31 @@ impl Serialize for PackageName {
     }
 }
 
-/// A deduplicated locked package to audit.
-#[derive(Debug, Clone)]
+/// A deduplicated locked package to audit. Reports list the packages that
+/// could not be checked in this form too.
+#[derive(Debug, Clone, Serialize)]
 pub struct AuditPackage {
+    #[serde(rename = "package")]
     pub name: PackageName,
     /// `None` when the version could not be determined (e.g. an unresolved
     /// conda source package). Such packages are never queried — a
     /// version-less OSV query matches every version ever affected — and are
     /// always reported as unchecked.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub ecosystem: PackageEcosystem,
     /// Environments (across all platforms) that contain this exact package.
     pub environments: Vec<String>,
+}
+
+/// Identifies one locked package with a known version: the same name at a
+/// different version or from a different ecosystem is a different package.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PackageId {
+    #[serde(rename = "package")]
+    pub name: PackageName,
+    pub version: String,
+    pub ecosystem: PackageEcosystem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -439,13 +452,14 @@ impl IgnoreScope {
         Ok(())
     }
 
-    pub fn matches(&self, finding: &Finding) -> bool {
+    /// Whether `package` falls under this scope.
+    pub fn matches(&self, package: &PackageId) -> bool {
         if !self
             .package
             .as_ref()
-            .is_none_or(|package| finding.package.matches(package))
+            .is_none_or(|name| package.name.matches(name))
             || !self.ecosystem.as_ref().is_none_or(|ecosystem| {
-                finding
+                package
                     .ecosystem
                     .osv_ecosystem()
                     .eq_ignore_ascii_case(ecosystem)
@@ -456,13 +470,13 @@ impl IgnoreScope {
         if self.version.is_none() && self.max_affected_version.is_none() {
             return true;
         }
-        let Ok(locked) = PackageVersion::parse(&finding.ecosystem, &finding.version) else {
+        let Ok(locked) = PackageVersion::parse(&package.ecosystem, &package.version) else {
             return false;
         };
         self.version.as_deref().is_none_or(|version| {
-            PackageVersion::parse(&finding.ecosystem, version).is_ok_and(|bound| locked == bound)
+            PackageVersion::parse(&package.ecosystem, version).is_ok_and(|bound| locked == bound)
         }) && self.max_affected_version.as_deref().is_none_or(|version| {
-            PackageVersion::parse(&finding.ecosystem, version).is_ok_and(|bound| {
+            PackageVersion::parse(&package.ecosystem, version).is_ok_and(|bound| {
                 matches!(
                     locked.partial_cmp(&bound),
                     Some(Ordering::Less | Ordering::Equal)
@@ -489,7 +503,7 @@ impl PackageIgnore {
                     .chain(&finding.aliases)
                     .any(|candidate| candidate.eq_ignore_ascii_case(id))
             })
-            && self.scope.matches(finding)
+            && self.scope.matches(&finding.package)
     }
 }
 
@@ -566,9 +580,9 @@ pub struct UpstreamFix {
 /// One (package, vulnerability) pair.
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
-    pub package: PackageName,
-    pub version: String,
-    pub ecosystem: PackageEcosystem,
+    /// Serialized as the top-level `package`, `version`, and `ecosystem`.
+    #[serde(flatten)]
+    pub package: PackageId,
     pub environments: Vec<String>,
     pub id: String,
     pub aliases: Vec<String>,
@@ -638,15 +652,6 @@ pub enum FixStatus {
     Unfixed,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct UncheckedPackage {
-    pub package: PackageName,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    pub ecosystem: PackageEcosystem,
-    pub environments: Vec<String>,
-}
-
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AuditSummary {
     /// Packages in an ecosystem the database can answer for.
@@ -660,7 +665,7 @@ pub struct AuditSummary {
 pub struct AuditReport {
     pub vulnerabilities: Vec<Finding>,
     pub ignored: Vec<Finding>,
-    pub unchecked: Vec<UncheckedPackage>,
+    pub unchecked: Vec<AuditPackage>,
     pub summary: AuditSummary,
     /// Ignore ids and scoped rules that matched no finding. An expired
     /// package or version exception remains visible after an upgrade.
@@ -794,9 +799,10 @@ fn by_kev(a: &Finding, b: &Finding) -> Ordering {
 
 /// By spelling, not by [`PackageName`]'s ecosystem-first derive.
 fn by_package(a: &Finding, b: &Finding) -> Ordering {
-    a.package
+    let (a, b) = (&a.package, &b.package);
+    a.name
         .as_str()
-        .cmp(b.package.as_str())
+        .cmp(b.name.as_str())
         .then_with(|| a.version.cmp(&b.version))
         .then_with(|| a.ecosystem.cmp(&b.ecosystem))
 }

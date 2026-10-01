@@ -1,7 +1,7 @@
 use pixi_audit::{
     AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
-    MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageName,
-    RansomwareCampaignUse, RiskScore, SeverityBand,
+    MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageId,
+    PackageName, RansomwareCampaignUse, RiskScore, SeverityBand,
 };
 
 use super::{LockfileSource, SarifLog};
@@ -21,9 +21,11 @@ packages:
 
 fn finding(id: &str, severity: SeverityBand) -> Finding {
     Finding {
-        package: PackageName::conda("openssl").unwrap(),
-        version: "3.1.0".to_string(),
-        ecosystem: PackageEcosystem::CondaForge,
+        package: PackageId {
+            name: PackageName::conda("openssl").unwrap(),
+            version: "3.1.0".to_string(),
+            ecosystem: PackageEcosystem::CondaForge,
+        },
         environments: vec!["default".to_string(), "prod".to_string()],
         id: id.to_string(),
         aliases: vec![],
@@ -189,9 +191,9 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
     ignored.ignore_reason = Some(IgnoreReason::UntilFixed);
     ignored.fixed_versions = vec![];
     let mut pypi = finding("GHSA-1", SeverityBand::Low);
-    pypi.package = PackageName::pypi("ruamel-yaml").unwrap();
-    pypi.version = "0.18.6".to_string();
-    pypi.ecosystem = PackageEcosystem::Pypi;
+    pypi.package.name = PackageName::pypi("ruamel-yaml").unwrap();
+    pypi.package.version = "0.18.6".to_string();
+    pypi.package.ecosystem = PackageEcosystem::Pypi;
     pypi.cvss_base_score = None;
     let report = AuditReport {
         vulnerabilities: vec![finding("CVE-2026-0001", SeverityBand::High), pypi],
@@ -250,7 +252,7 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
 #[test]
 fn a_package_missing_from_the_lock_file_text_falls_back_to_line_1() {
     let mut elsewhere = finding("CVE-2026-0003", SeverityBand::Low);
-    elsewhere.version = "9.9.9".to_string();
+    elsewhere.package.version = "9.9.9".to_string();
     let report = AuditReport {
         vulnerabilities: vec![elsewhere],
         summary: AuditSummary {

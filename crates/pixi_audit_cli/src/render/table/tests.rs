@@ -1,16 +1,18 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
-    MatchApplicability, PackageEcosystem, PackageName, RansomwareCampaignUse, RiskScore,
-    SeverityBand, UncheckedPackage, UpstreamFix, UpstreamOrigin,
+    AuditPackage, AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
+    MatchApplicability, PackageEcosystem, PackageId, PackageName, RansomwareCampaignUse, RiskScore,
+    SeverityBand, UpstreamFix, UpstreamOrigin,
 };
 
 use super::{Field, TableLayout, render_table, render_table_after_fix, render_table_explained};
 
 fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
     Finding {
-        package: PackageName::conda(package).unwrap(),
-        version: "3.1.0".to_string(),
-        ecosystem: PackageEcosystem::CondaForge,
+        package: PackageId {
+            name: PackageName::conda(package).unwrap(),
+            version: "3.1.0".to_string(),
+            ecosystem: PackageEcosystem::CondaForge,
+        },
         environments: vec!["default".to_string(), "prod".to_string()],
         id: id.to_string(),
         aliases: vec![],
@@ -31,9 +33,11 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
 
 fn pypi_finding(id: &str) -> Finding {
     Finding {
-        package: PackageName::pypi("requests").unwrap(),
-        version: "2.32.0".to_string(),
-        ecosystem: PackageEcosystem::Pypi,
+        package: PackageId {
+            name: PackageName::pypi("requests").unwrap(),
+            version: "2.32.0".to_string(),
+            ecosystem: PackageEcosystem::Pypi,
+        },
         environments: vec!["default".to_string()],
         id: id.to_string(),
         aliases: vec!["CVE-2026-9".to_string()],
@@ -224,8 +228,8 @@ fn full_report() -> AuditReport {
             pypi_finding("GHSA-1"),
         ],
         ignored: vec![ignored],
-        unchecked: vec![UncheckedPackage {
-            package: PackageName::conda("samtools").unwrap(),
+        unchecked: vec![AuditPackage {
+            name: PackageName::conda("samtools").unwrap(),
             version: Some("1.2".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
             environments: vec!["default".to_string()],

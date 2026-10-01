@@ -298,7 +298,7 @@ enum Gate {
 fn eligible(finding: &Finding, warn_only: &[WarnOnlyEcosystem]) -> bool {
     !warn_only
         .iter()
-        .any(|ecosystem| ecosystem.matches(&finding.ecosystem))
+        .any(|ecosystem| ecosystem.matches(&finding.package.ecosystem))
 }
 
 fn meets_severity_threshold(finding: &Finding, threshold: Option<SeverityBand>) -> bool {

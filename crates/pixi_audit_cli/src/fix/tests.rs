@@ -1,6 +1,6 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, Finding, MatchApplicability, PackageEcosystem, PackageName,
-    SeverityBand,
+    AuditReport, AuditSummary, Finding, MatchApplicability, PackageEcosystem, PackageId,
+    PackageName, SeverityBand,
 };
 
 use super::*;
@@ -15,9 +15,11 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
         _ => PackageEcosystem::CondaForge,
     };
     Finding {
-        package: PackageName::parse(&ecosystem, package).unwrap(),
-        version: "1.0".to_string(),
-        ecosystem,
+        package: PackageId {
+            name: PackageName::parse(&ecosystem, package).unwrap(),
+            version: "1.0".to_string(),
+            ecosystem,
+        },
         environments: vec![],
         id: id.to_string(),
         aliases: vec![],
@@ -268,7 +270,7 @@ requests = "*"
         "PyPI",
         &["not-a-version", "10.0", "11.0"],
     );
-    finding.version = "9.5".to_string();
+    finding.package.version = "9.5".to_string();
     let report = AuditReport {
         vulnerabilities: vec![finding],
         ..Default::default()

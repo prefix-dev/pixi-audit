@@ -123,8 +123,8 @@ impl Field {
     pub fn cells(self, finding: &Finding, context: RowContext) -> Vec<Cell> {
         match self {
             Field::Name => vec![
-                kind_cell(&finding.ecosystem, context),
-                name_cell(&finding.package.to_string(), context),
+                kind_cell(&finding.package.ecosystem, context),
+                name_cell(&finding.package.name.to_string(), context),
             ],
             other => vec![other.cell(finding, context)],
         }
@@ -132,16 +132,15 @@ impl Field {
 
     pub fn cell(self, finding: &Finding, context: RowContext) -> Cell {
         match self {
-            Field::Name => name_cell(&finding.package.to_string(), context),
-            Field::Version => {
-                Cell::new(finding.version.clone()).weight(context.identity_weight(Weight::Normal))
-            }
+            Field::Name => name_cell(&finding.package.name.to_string(), context),
+            Field::Version => Cell::new(finding.package.version.clone())
+                .weight(context.identity_weight(Weight::Normal)),
             Field::FixedIn => fixed_in(finding),
             Field::Kind => {
-                let (name, color) = kind(&finding.ecosystem);
+                let (name, color) = kind(&finding.package.ecosystem);
                 Cell::new(name).color(color)
             }
-            Field::Source => Cell::new(finding.ecosystem.to_string()),
+            Field::Source => Cell::new(finding.package.ecosystem.to_string()),
             Field::Vulnerability => {
                 let url = finding.url.clone().filter(|_| context.hyperlinks);
                 let cell = Cell::new(finding.id.clone()).hyperlink(url);
@@ -190,8 +189,9 @@ impl Field {
     pub fn compare(self, a: &Finding, b: &Finding) -> Ordering {
         match self {
             // By spelling, not by `PackageName`'s ecosystem-first derive.
-            Field::Name => (a.package.as_str(), &a.version).cmp(&(b.package.as_str(), &b.version)),
-            Field::Version => a.version.cmp(&b.version),
+            Field::Name => (a.package.name.as_str(), &a.package.version)
+                .cmp(&(b.package.name.as_str(), &b.package.version)),
+            Field::Version => a.package.version.cmp(&b.package.version),
             // Fixed versions first, ordered by version; unfixed last.
             Field::FixedIn => match (a.fixed_versions.first(), b.fixed_versions.first()) {
                 (Some(x), Some(y)) => x.cmp(y),
@@ -199,8 +199,10 @@ impl Field {
                 (None, Some(_)) => Ordering::Greater,
                 (None, None) => Ordering::Equal,
             },
-            Field::Kind => kind(&a.ecosystem).0.cmp(kind(&b.ecosystem).0),
-            Field::Source => a.ecosystem.cmp(&b.ecosystem),
+            Field::Kind => kind(&a.package.ecosystem)
+                .0
+                .cmp(kind(&b.package.ecosystem).0),
+            Field::Source => a.package.ecosystem.cmp(&b.package.ecosystem),
             Field::Vulnerability => a.id.cmp(&b.id),
             Field::Severity => SortStrategy::Severity.compare(a, b),
             Field::Epss => SortStrategy::Epss.compare(a, b),

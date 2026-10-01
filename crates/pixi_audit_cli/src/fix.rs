@@ -66,7 +66,7 @@ pub(crate) fn fixable_package_names(report: &AuditReport) -> Vec<String> {
         if finding.fix_status() != FixStatus::Available {
             continue;
         }
-        let name = finding.package.to_string();
+        let name = finding.package.name.to_string();
         if !names.contains(&name) {
             names.push(name);
         }
