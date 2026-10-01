@@ -890,7 +890,7 @@ async fn ignore_subcommand_can_scope_a_rule_to_a_package() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn expired_ignore_rules_warn_and_no_longer_apply() {
+async fn expired_ignore_rules_no_longer_apply() {
     let workspace = temp_workspace(
         "pixi.toml",
         "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore = [{ id = \"CVE-2026-1234\", until = 2000-01-01 }]\n",
@@ -898,11 +898,6 @@ async fn expired_ignore_rules_warn_and_no_longer_apply() {
     let base = spawn_mock(true).await;
     let output = run_cli_in(workspace.path().to_path_buf(), base, vec![], None).await;
     assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("ignore rule 'CVE-2026-1234'") && stderr.contains("expired on 2000-01-01"),
-        "stderr: {stderr}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

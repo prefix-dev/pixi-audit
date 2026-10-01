@@ -83,7 +83,7 @@ pub(crate) fn fixable_package_names(report: &AuditReport) -> Vec<String> {
 /// and URL dependencies without a version are left untouched. The original
 /// TOML formatting and comments are retained by `toml_edit`.
 fn bump_manifest_constraints(manifest: &Path, report: &AuditReport) -> miette::Result<usize> {
-    let fixes = constraint::plan_fixed_versions(report);
+    let fixes = constraint::FixPlan::from_report(report);
     if fixes.is_empty() {
         return Ok(0);
     }
@@ -108,7 +108,7 @@ fn bump_manifest_constraints(manifest: &Path, report: &AuditReport) -> miette::R
             document.as_table_mut()
         };
 
-    let changed = constraint::update_manifest_dependencies(root, &fixes);
+    let changed = fixes.apply_to_manifest(root);
     if changed > 0 {
         std::fs::write(manifest, document.to_string())
             .into_diagnostic()

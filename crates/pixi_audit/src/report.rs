@@ -247,6 +247,13 @@ pub struct PackageId {
     pub ecosystem: PackageEcosystem,
 }
 
+impl PackageId {
+    /// The locked version, parsed with the package's ecosystem rules.
+    pub fn parsed_version(&self) -> Result<PackageVersion, ParsePackageVersionError> {
+        PackageVersion::parse(&self.ecosystem, &self.version)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SeverityBand {
@@ -370,30 +377,25 @@ impl FromStr for SeverityBand {
     }
 }
 
-/// Which suppression list put a finding into the ignored bucket.
+/// Which suppression rule put a finding into the ignored bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IgnoreReason {
-    /// Listed in the unconditional ignore list.
+    /// Matched an unconditional ignore rule.
     Always,
-    /// Listed in the ignore-until-fixed list and no fix is known yet. The
-    /// finding resurfaces once any fixed version (own ecosystem or
-    /// upstream) is published.
+    /// Matched an until-fixed rule (or `ignore_unfixed`) with no fix known
+    /// yet. The finding resurfaces once any fixed version (own ecosystem
+    /// or upstream) is published.
     UntilFixed,
 }
 
-/// Suppression lists applied during an audit. Ids/aliases match
-/// case-insensitively; `ignore` wins when an id appears in both lists.
+/// Suppression rules applied during an audit. Ids/aliases match
+/// case-insensitively; unconditional rules win over until-fixed rules.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IgnoreSpec<'a> {
-    /// Always suppress these vulnerability ids/aliases.
-    pub ignore: &'a [String],
-    /// Suppress these only while no fixed release is known.
-    pub ignore_until_fixed: &'a [String],
-    /// Rules scoped by package, ecosystem or installed version.
-    pub package_rules: &'a [PackageIgnore],
-    /// Suppress every finding for which no fixed release is known, as if
-    /// each were listed in `ignore_until_fixed`.
+    /// Rules optionally scoped by package, ecosystem or installed version.
+    pub rules: &'a [IgnoreRule],
+    /// Suppress every finding for which no fixed release is known.
     pub ignore_unfixed: bool,
 }
 
@@ -401,10 +403,16 @@ pub struct IgnoreSpec<'a> {
 /// rules, as written in the configuration.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IgnoreScope {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ecosystem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(rename = "max-affected-version")]
+    #[serde(
+        rename = "max-affected-version",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_affected_version: Option<String>,
 }
 
@@ -552,14 +560,14 @@ impl VersionBound {
 /// version. Its scope is parsed on construction, so matching findings never
 /// re-parses it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageIgnore {
+pub struct IgnoreRule {
     id: Option<String>,
     scope: IgnoreScope,
     until_fixed: bool,
     matcher: ScopeMatcher,
 }
 
-impl PackageIgnore {
+impl IgnoreRule {
     pub fn new(
         id: Option<String>,
         scope: IgnoreScope,
@@ -572,6 +580,16 @@ impl PackageIgnore {
             until_fixed,
             matcher,
         })
+    }
+
+    /// An unscoped vulnerability id or alias, preserved as written.
+    pub fn from_id(id: String, until_fixed: bool) -> Self {
+        Self {
+            id: Some(id),
+            scope: IgnoreScope::default(),
+            until_fixed,
+            matcher: ScopeMatcher::default(),
+        }
     }
 
     pub fn id(&self) -> Option<&str> {
@@ -588,6 +606,10 @@ impl PackageIgnore {
         self.until_fixed
     }
 
+    pub(crate) fn needs_locked_version(&self) -> bool {
+        self.matcher.version.is_some() || self.matcher.max_affected_version.is_some()
+    }
+
     /// Whether the rule suppresses `finding`, whose locked version parsed
     /// as `locked`.
     pub(crate) fn applies_to(&self, finding: &Finding, locked: Option<&PackageVersion>) -> bool {
@@ -598,6 +620,36 @@ impl PackageIgnore {
                     .any(|candidate| candidate.eq_ignore_ascii_case(id))
             })
             && self.matcher.matches(&finding.package, locked)
+    }
+}
+
+/// The rule as written, e.g. `CVE-1 in package 'openssl' in version '3.1.0'`.
+impl std::fmt::Display for IgnoreRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scope = &self.scope;
+        let parts = [
+            (None, self.id.as_deref()),
+            (Some("package"), scope.package.as_deref()),
+            (Some("ecosystem"), scope.ecosystem.as_deref()),
+            (Some("version"), scope.version.as_deref()),
+            (
+                Some("max affected version"),
+                scope.max_affected_version.as_deref(),
+            ),
+        ];
+        let mut separator = "";
+        for (label, value) in parts {
+            let Some(value) = value else {
+                continue;
+            };
+            f.write_str(separator)?;
+            match label {
+                Some(label) => write!(f, "{label} '{value}'")?,
+                None => f.write_str(value)?,
+            }
+            separator = " in ";
+        }
+        Ok(())
     }
 }
 
@@ -731,6 +783,23 @@ impl Finding {
         } else {
             FixStatus::Unfixed
         }
+    }
+
+    /// The lowest fixed release newer than the locked version, or `None`
+    /// when there is none or the locked version does not parse. OSV can
+    /// publish fixed events for several release branches; the lowest newer
+    /// one avoids forcing the highest (and potentially incompatible) major
+    /// release. Fixed versions that do not parse are skipped rather than
+    /// compared as text.
+    pub fn lowest_fixed_version(&self) -> Option<PackageVersion> {
+        let locked = self.package.parsed_version().ok()?;
+        self.fixed_versions
+            .iter()
+            .filter_map(|fixed| PackageVersion::parse(&self.package.ecosystem, fixed).ok())
+            .filter(|fixed| *fixed > locked)
+            // All parsed in the package's ecosystem, so they are mutually
+            // comparable.
+            .reduce(|lowest, fixed| if fixed < lowest { fixed } else { lowest })
     }
 }
 

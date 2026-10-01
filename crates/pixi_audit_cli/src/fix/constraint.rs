@@ -17,43 +17,76 @@ use uv_pep440::{Version as PypiVersion, VersionSpecifier, VersionSpecifiers};
 /// ("10.0" must sort after "9.0"). The name carries its ecosystem's
 /// normalization, so a manifest key spelled `Ruamel.YAML` finds the plan
 /// entry for the locked `ruamel-yaml`.
-pub(super) type FixPlan = BTreeMap<PackageName, PackageVersion>;
+#[derive(Debug, Default)]
+pub(super) struct FixPlan(BTreeMap<PackageName, PackageVersion>);
 
-pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
-    let mut fixes = FixPlan::new();
-    for finding in &report.vulnerabilities {
-        let package = &finding.package;
-        let Ok(locked) = PackageVersion::parse(&package.ecosystem, &package.version) else {
-            continue;
-        };
-        // OSV can publish fixed events for multiple release branches. Pick the
-        // first fix newer than the locked version instead of forcing the
-        // highest (and potentially incompatible) major release. Versions that
-        // do not parse are skipped rather than compared as text. All of them
-        // parse in the package's ecosystem, so they are mutually comparable.
-        let Some(fixed) = finding
-            .fixed_versions
-            .iter()
-            .filter_map(|fixed| PackageVersion::parse(&package.ecosystem, fixed).ok())
-            .filter(|fixed| *fixed > locked)
-            .reduce(|lowest, fixed| if fixed < lowest { fixed } else { lowest })
-        else {
-            continue;
-        };
-        // Multiple advisories for one package must all be resolved, so retain
-        // the greatest of their minimum required fixes.
-        match fixes.entry(package.name.clone()) {
-            Entry::Vacant(entry) => {
-                entry.insert(fixed);
-            }
-            Entry::Occupied(mut entry) => {
-                if *entry.get() < fixed {
+impl FixPlan {
+    pub(super) fn from_report(report: &AuditReport) -> Self {
+        let mut plan = Self::default();
+        for finding in &report.vulnerabilities {
+            let Some(fixed) = finding.lowest_fixed_version() else {
+                continue;
+            };
+            // Multiple advisories for one package must all be resolved, so
+            // retain the greatest of their minimum required fixes.
+            match plan.0.entry(finding.package.name.clone()) {
+                Entry::Vacant(entry) => {
                     entry.insert(fixed);
+                }
+                Entry::Occupied(mut entry) => {
+                    if *entry.get() < fixed {
+                        entry.insert(fixed);
+                    }
                 }
             }
         }
+        plan
     }
-    fixes
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Walks every dependency table under `table`, at any nesting depth
+    /// (`[dependencies]`, `[feature.x.pypi-dependencies]`,
+    /// `[target.linux-64.host-dependencies]`, ...), and returns how many
+    /// constraints were changed.
+    pub(super) fn apply_to_manifest(&self, table: &mut dyn TableLike) -> usize {
+        let mut changed = 0;
+        for (key, item) in table.iter_mut() {
+            let parse_name = dependency_table_kind(key.get());
+            let Some(child) = item.as_table_like_mut() else {
+                continue;
+            };
+            changed += match parse_name {
+                Some(parse_name) => self.apply_to_dependencies(child, parse_name),
+                None => self.apply_to_manifest(child),
+            };
+        }
+        changed
+    }
+
+    fn apply_to_dependencies(
+        &self,
+        dependencies: &mut dyn TableLike,
+        parse_name: NameParser,
+    ) -> usize {
+        let mut changed = 0;
+        for (name, item) in dependencies.iter_mut() {
+            // A key that is not a valid name in this table's ecosystem cannot
+            // match any finding; pixi itself would reject it.
+            let Ok(name) = parse_name(name.get()) else {
+                continue;
+            };
+            let Some(fixed) = self.0.get(&name) else {
+                continue;
+            };
+            if set_constraint(item, fixed) {
+                changed += 1;
+            }
+        }
+        changed
+    }
 }
 
 /// Parses a manifest dependency key with the normalization of the table it
@@ -68,47 +101,6 @@ fn dependency_table_kind(key: &str) -> Option<NameParser> {
         "dependencies" | "host-dependencies" | "build-dependencies" => Some(PackageName::conda),
         _ => None,
     }
-}
-
-/// Walks every dependency table under `table`, at any nesting depth
-/// (`[dependencies]`, `[feature.x.pypi-dependencies]`,
-/// `[target.linux-64.host-dependencies]`, ...), and returns how many
-/// constraints were changed.
-pub(super) fn update_manifest_dependencies(table: &mut dyn TableLike, fixes: &FixPlan) -> usize {
-    let mut changed = 0;
-    for (key, item) in table.iter_mut() {
-        let parse_name = dependency_table_kind(key.get());
-        let Some(child) = item.as_table_like_mut() else {
-            continue;
-        };
-        changed += match parse_name {
-            Some(parse_name) => update_dependencies(child, parse_name, fixes),
-            None => update_manifest_dependencies(child, fixes),
-        };
-    }
-    changed
-}
-
-fn update_dependencies(
-    dependencies: &mut dyn TableLike,
-    parse_name: NameParser,
-    fixes: &FixPlan,
-) -> usize {
-    let mut changed = 0;
-    for (name, item) in dependencies.iter_mut() {
-        // A key that is not a valid name in this table's ecosystem cannot
-        // match any finding; pixi itself would reject it.
-        let Ok(name) = parse_name(name.get()) else {
-            continue;
-        };
-        let Some(fixed) = fixes.get(&name) else {
-            continue;
-        };
-        if set_constraint(item, fixed) {
-            changed += 1;
-        }
-    }
-    changed
 }
 
 /// Raises the constraint in a single dependency entry. A registry string

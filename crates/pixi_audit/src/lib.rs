@@ -26,10 +26,10 @@ pub use osv_protocol::*;
 pub use rattler_lock;
 pub use report::{
     AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, FixStatus, IgnoreReason,
-    IgnoreScope, IgnoreSpec, InvalidIgnoreScope, InvalidPackageName, MatchApplicability,
-    MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageId, PackageIgnore, PackageName,
-    PackageVersion, ParsePackageVersionError, ParseSeverityBandError, SeverityBand, SortStrategy,
-    UpstreamFix, UpstreamOrigin, audit,
+    IgnoreRule, IgnoreScope, IgnoreSpec, InvalidIgnoreScope, InvalidPackageName,
+    MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageId,
+    PackageName, PackageVersion, ParsePackageVersionError, ParseSeverityBandError, SeverityBand,
+    SortStrategy, UpstreamFix, UpstreamOrigin, audit,
 };
 pub use threat::{
     EpssScore, KnownExploited, RansomwareCampaignUse, RiskScore, ThreatDataStatus,

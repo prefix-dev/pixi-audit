@@ -73,7 +73,7 @@ fn ignore_scope_validates_versions_for_the_selected_ecosystem() {
 }
 
 fn scope_matches(scope: &IgnoreScope, package: &PackageId) -> bool {
-    let locked = PackageVersion::parse(&package.ecosystem, &package.version).ok();
+    let locked = package.parsed_version().ok();
     ScopeMatcher::parse(scope)
         .unwrap()
         .matches(package, locked.as_ref())

@@ -9,10 +9,10 @@ use iocraft::prelude::*;
 use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
     AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL,
-    DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, Finding, IgnoreSpec,
-    KEV_URL_ENV_VAR, KevClient, PYPI_BASE_URL_ENV_VAR, PackageEcosystem, PypiAuditClient,
-    SeverityBand, ThreatDataStatus, ThreatSourceStatus, ThreatSources, audit_lock_file,
-    rattler_lock::LockFile,
+    DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, Finding, IgnoreRule,
+    IgnoreSpec, KEV_URL_ENV_VAR, KevClient, PYPI_BASE_URL_ENV_VAR, PackageEcosystem,
+    PypiAuditClient, SeverityBand, ThreatDataStatus, ThreatSourceStatus, ThreatSources,
+    audit_lock_file, rattler_lock::LockFile,
 };
 use render::table::{DEFAULT_FIELDS, Field, OutputStyle, TableLayout};
 use reqwest_middleware::ClientWithMiddleware;
@@ -412,11 +412,18 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         None => config::AuditConfig::default(),
     };
 
-    // Union config + CLI ignore lists; CLI severity overrides config.
-    let mut ignore = config.ignore;
-    ignore.extend(cli.ignore.iter().cloned());
-    let mut ignore_until_fixed = config.ignore_until_fixed;
-    ignore_until_fixed.extend(cli.ignore_until_fixed.iter().cloned());
+    // Union config + CLI rules; CLI severity overrides config.
+    let mut rules = config.rules;
+    rules.extend(
+        cli.ignore
+            .into_iter()
+            .map(|id| IgnoreRule::from_id(id, false)),
+    );
+    rules.extend(
+        cli.ignore_until_fixed
+            .into_iter()
+            .map(|id| IgnoreRule::from_id(id, true)),
+    );
     let threshold = cli.severity.or(config.severity);
     let ignore_unfixed = cli.ignore_unfixed || config.ignore_unfixed;
 
@@ -445,9 +452,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
         environments: &cli.environments,
         platforms: &cli.platforms,
         ignore: IgnoreSpec {
-            ignore: &ignore,
-            ignore_until_fixed: &ignore_until_fixed,
-            package_rules: &config.package_rules,
+            rules: &rules,
             ignore_unfixed,
         },
     };

@@ -32,7 +32,7 @@ serde_json = { workspace = true }
 supports-hyperlinks = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 toml = { workspace = true }
-toml_edit = { workspace = true }
+toml_edit = { workspace = true, features = ["serde"] }
 url = { workspace = true }
 uv-pep440 = { workspace = true }
 
