@@ -49,6 +49,29 @@ pixi audit \
 
 Unknown environment and platform names are errors. A typo should not produce an empty, clean-looking audit.
 
+### Optional Basilisk sign-in
+
+Auditing remains public and does not require login. To explicitly obtain a
+Basilisk-specific prefix.dev token:
+
+```console
+pixi audit --login
+```
+
+The existing Rattler OAuth flow obtains the token, the CLI stores it under an
+isolated issuer/client/audience key, and middleware reuses or refreshes it on
+later audits. Package-channel credentials are never used or overwritten.
+Missing credentials and login or refresh failures allow anonymous auditing.
+
+Normal audits never initiate login. `--login` requires an interactive terminal
+and is skipped whenever `CI` is set. Custom Basilisk origins stay anonymous.
+The dedicated Basilisk client disables redirects; credentials are never sent
+to OSV, EPSS, or KEV services. Reports contain no tokens.
+
+`--offline` stops the command before any login, refresh, audit, threat-feed
+request, or `--fix` update. It exits with code `2`: cached threat feeds alone
+cannot provide an up-to-date vulnerability audit.
+
 ### Ignore known findings
 
 Ignore an advisory by its vulnerability ID or one of its aliases:
@@ -268,6 +291,13 @@ The default endpoints are:
 - `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` for the KEV catalog
 
 Override them with `PIXI_AUDIT_BASE_URL`, `PIXI_AUDIT_PYPI_BASE_URL`, `PIXI_AUDIT_EPSS_BASE_URL`, and `PIXI_AUDIT_KEV_URL` respectively. Each HTTP request has a 30-second timeout.
+
+Authentication uses Rattler's standard credential storage. `RATTLER_AUTH_FILE`
+selects an explicit credential file; without it, the standard storage backends
+apply. `CI` disables interactive audit login whenever it is present.
+`PIXI_AUDIT_BASE_URL` must be HTTP(S), without credentials, query parameters,
+or a fragment. Changing it to another origin never forwards the production
+Basilisk token or starts a login for that origin.
 
 EPSS and KEV responses are cached under `pixi-audit/http-cache` in the pixi cache directory (`PIXI_CACHE_DIR`, else `RATTLER_CACHE_DIR`, else `rattler/cache` in the platform's cache directory), so the KEV catalog is revalidated instead of downloaded again on every run.
 

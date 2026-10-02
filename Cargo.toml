@@ -12,6 +12,11 @@ repository = "https://github.com/prefix-dev/pixi_audit"
 rust-version = "1.95"
 
 [workspace.dependencies]
+async-trait = "0.1"
+http = "1"
+# Temporary audience APIs from conda/rattler#2880; replace with a release.
+rattler = { git = "https://github.com/nichmor/rattler", rev = "19c40da4de727fbfa8b18b226e66a6f6caee7b78", features = ["cli-tools"] }
+rattler_networking = { git = "https://github.com/nichmor/rattler", rev = "19c40da4de727fbfa8b18b226e66a6f6caee7b78" }
 axum = "0.8"
 clap = "4.6"
 console = "0.16"
