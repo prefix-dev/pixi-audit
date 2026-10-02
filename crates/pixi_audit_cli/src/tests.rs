@@ -8,6 +8,23 @@ fn cli_definition_is_valid() {
 }
 
 #[test]
+fn audience_login_is_opt_in() {
+    assert!(!Cli::try_parse_from(["pixi-audit"]).unwrap().login);
+    let cli = Cli::try_parse_from(["pixi-audit", "--login", "--offline"]).unwrap();
+    assert!(cli.login && cli.offline);
+}
+
+#[tokio::test]
+async fn offline_stops_before_login_feeds_or_fix() {
+    let cli = Cli::try_parse_from(["pixi-audit", "--offline", "--login", "--fix"]).unwrap();
+    let error = match run(cli).await {
+        Ok(_) => panic!("offline audit must not report success"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("network access is disabled"));
+}
+
+#[test]
 fn lockfile_is_now_optional() {
     assert!(Cli::try_parse_from(["pixi-audit"]).is_ok());
 }

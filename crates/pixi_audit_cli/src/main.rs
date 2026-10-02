@@ -19,6 +19,7 @@ use reqwest_middleware::ClientWithMiddleware;
 use url::Url;
 
 mod annotations;
+mod auth;
 mod config;
 mod fix;
 mod ignore;
@@ -67,6 +68,14 @@ struct Cli {
     /// Path to the pixi.lock file to audit. When omitted, searches the
     /// current directory and its parents for a pixi workspace.
     lockfile: Option<PathBuf>,
+
+    /// Explicitly obtain a Basilisk-specific prefix.dev token (interactive only).
+    #[arg(long)]
+    login: bool,
+
+    /// Disable network access. Auditing requires online vulnerability data.
+    #[arg(long)]
+    offline: bool,
 
     /// Audit only this environment (repeatable)
     #[arg(long = "environment", value_name = "ENV")]
@@ -402,10 +411,16 @@ fn base_url_from_env(var: &str, default: &str) -> miette::Result<Url> {
     let raw = std::env::var(var).unwrap_or_else(|_| default.to_string());
     Url::parse(&raw)
         .into_diagnostic()
-        .wrap_err_with(|| format!("invalid {var} value '{raw}'"))
+        .wrap_err_with(|| format!("invalid {var} value"))
 }
 
 async fn run(cli: Cli) -> miette::Result<RunOutcome> {
+    // Stop before login, refresh, threat feeds, or `--fix` can access the network.
+    if cli.offline {
+        miette::bail!(
+            "Auditing requires online vulnerability data; network access is disabled by --offline"
+        );
+    }
     let targets = workspace::resolve_targets(cli.lockfile.clone())?;
     let config = match &targets.manifest {
         Some(manifest) => config::load_config(manifest)?,
@@ -431,6 +446,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let pypi_base_url = base_url_from_env(PYPI_BASE_URL_ENV_VAR, DEFAULT_PYPI_BASE_URL)?;
     let epss_base_url = base_url_from_env(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?;
     let kev_url = base_url_from_env(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?;
+    let basilisk_http = auth::build(cli.offline, &base_url, cli.login).await?;
     let audit_message = format!(
         "Auditing {} against {base_url} and {pypi_base_url} ...",
         targets.lockfile.display()
@@ -444,7 +460,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let http = reqwest_middleware::ClientBuilder::new(http_client.clone()).build();
     let threat_http = threat_http_client(http_client);
     let auditor = Auditor {
-        client: BasiliskClient::new(http.clone(), base_url),
+        client: BasiliskClient::new(basilisk_http, base_url),
         pypi_client: PypiAuditClient::new(http, pypi_base_url),
         epss_client: EpssClient::new(threat_http.clone(), epss_base_url),
         kev_client: KevClient::new(threat_http, kev_url),
