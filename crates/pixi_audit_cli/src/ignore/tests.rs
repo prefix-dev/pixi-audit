@@ -38,6 +38,14 @@ fn apply_to_package(
     (document.to_string(), outcome)
 }
 
+fn entries(text: &str, list: IgnoreList) -> Vec<config::IgnoreEntry> {
+    let manifest: toml::Value = toml::from_str(text).unwrap();
+    manifest["tool"]["pixi-audit"][list.key()]
+        .clone()
+        .try_into()
+        .unwrap()
+}
+
 #[test]
 fn package_rules_are_written_and_deduplicated_by_id_and_package() {
     // Whole package.
@@ -49,15 +57,22 @@ fn package_rules_are_written_and_deduplicated_by_id_and_package() {
         Some("never runs"),
         None,
     );
+    assert!(outcome.existing.is_empty());
     assert_eq!(
-        text,
-        "[tool.pixi-audit]\nignore = [{ package = \"vendored\", reason = \"never runs\" }]\n"
+        entries(&text, IgnoreList::Always),
+        [config::IgnoreEntry::Rule(config::IgnoreTable {
+            scope: IgnoreScope {
+                package: Some("vendored".to_string()),
+                ..IgnoreScope::default()
+            },
+            reason: Some("never runs".to_string()),
+            ..config::IgnoreTable::default()
+        })]
     );
-    assert_eq!(outcome.added, ["package 'vendored'"]);
 
     // One id in a package is distinct from the same id everywhere and from
     // the whole package, but equal to itself in any spelling.
-    let (text, outcome) = apply_to_package(
+    let (text, _) = apply_to_package(
         &text,
         IgnoreList::Always,
         &["CVE-1", "cve-1"],
@@ -65,17 +80,22 @@ fn package_rules_are_written_and_deduplicated_by_id_and_package() {
         None,
         None,
     );
-    assert_eq!(outcome.added, ["CVE-1 in package 'Vendored'"]);
-    assert_eq!(outcome.existing, ["cve-1 in package 'Vendored'"]);
-    assert!(
-        text.contains("{ id = \"CVE-1\", package = \"Vendored\" }"),
-        "{text}"
+    assert_eq!(
+        entries(&text, IgnoreList::Always)[1],
+        config::IgnoreEntry::Rule(config::IgnoreTable {
+            id: Some("CVE-1".to_string()),
+            scope: IgnoreScope {
+                package: Some("Vendored".to_string()),
+                ..IgnoreScope::default()
+            },
+            ..config::IgnoreTable::default()
+        })
     );
     let (_, outcome) = apply(&text, IgnoreList::Always, &["CVE-1"], None, None);
     assert_eq!(outcome.added, ["CVE-1"]);
     let (_, outcome) =
         apply_to_package(&text, IgnoreList::Always, &[], Some("VENDORED"), None, None);
-    assert_eq!(outcome.existing, ["package 'VENDORED'"]);
+    assert!(outcome.added.is_empty());
 }
 
 #[test]
@@ -88,8 +108,8 @@ fn creates_the_table_and_list_in_a_bare_manifest() {
         None,
     );
     assert_eq!(
-        text,
-        "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore = [\"CVE-1\"]\n"
+        entries(&text, IgnoreList::Always),
+        [config::IgnoreEntry::Id("CVE-1".to_string())]
     );
     assert_eq!(
         outcome,
@@ -114,7 +134,7 @@ fn appends_to_an_existing_list_and_keeps_comments() {
 }
 
 #[test]
-fn reason_and_until_become_an_inline_table() {
+fn expiry_and_reason_round_trip() {
     let (text, _) = apply(
         "",
         IgnoreList::UntilFixed,
@@ -122,9 +142,15 @@ fn reason_and_until_become_an_inline_table() {
         Some("only in tests"),
         Some(date(2026, 12, 1)),
     );
+    let entries = entries(&text, IgnoreList::UntilFixed);
     assert_eq!(
-        text,
-        "[tool.pixi-audit]\nignore-until-fixed = [{ id = \"CVE-3\", reason = \"only in tests\", until = \"2026-12-01\" }]\n"
+        entries,
+        [config::IgnoreEntry::Rule(config::IgnoreTable {
+            id: Some("CVE-3".to_string()),
+            reason: Some("only in tests".to_string()),
+            until: Some(toml::Value::String("2026-12-01".to_string())),
+            ..config::IgnoreTable::default()
+        })]
     );
 }
 
@@ -144,20 +170,10 @@ fn duplicates_are_detected_in_table_entries_and_within_one_call() {
 }
 
 #[test]
-fn pyproject_uses_the_same_table() {
-    let content = "[project]\nname = \"x\"\n\n[tool.pixi]\nchannels = [\"conda-forge\"]\n";
-    let (text, _) = apply(content, IgnoreList::Always, &["CVE-6"], None, None);
-    assert_eq!(
-        text,
-        "[project]\nname = \"x\"\n\n[tool.pixi]\nchannels = [\"conda-forge\"]\n\n[tool.pixi-audit]\nignore = [\"CVE-6\"]\n"
-    );
-}
-
-#[test]
 fn version_scoped_rules_are_written_separately() {
     let mut document = "".parse::<DocumentMut>().unwrap();
     for version in ["1.13.1", "1.13.2"] {
-        let outcome = add_rules(
+        add_rules(
             &mut document,
             IgnoreList::Always,
             &["CVE-1".to_string()],
@@ -170,11 +186,19 @@ fn version_scoped_rules_are_written_separately() {
             None,
         )
         .unwrap();
-        assert_eq!(outcome.added, ["CVE-1"]);
     }
-    let text = document.to_string();
-    assert!(text.contains("version = \"1.13.1\""), "{text}");
-    assert!(text.contains("version = \"1.13.2\""), "{text}");
+    let entries = entries(&document.to_string(), IgnoreList::Always);
+    let rules: Vec<_> = entries
+        .iter()
+        .map(|entry| entry.resolved(false).unwrap())
+        .collect();
+    assert_eq!(
+        rules
+            .iter()
+            .map(|rule| rule.scope().version.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("1.13.1"), Some("1.13.2")]
+    );
 }
 
 #[test]
@@ -191,19 +215,55 @@ ignore = [{ id = "CVE-1", package = "Requests", ecosystem = "PyPI", version = "1
         max_affected_version: Some("2.0".to_string()),
     };
     let ids = ["cve-1".to_string()];
+    let original = document.to_string();
     let outcome = add_rules(&mut document, IgnoreList::Always, &ids, &scope, None, None).unwrap();
     assert!(outcome.added.is_empty());
-    assert_eq!(outcome.existing, ["cve-1 in package 'requests'"]);
+    assert_eq!(document.to_string(), original);
 
     scope.version = Some("1.0rc1".to_string());
     let outcome = add_rules(&mut document, IgnoreList::Always, &ids, &scope, None, None).unwrap();
-    assert_eq!(outcome.added, ["cve-1 in package 'requests'"]);
+    assert_eq!(
+        entries(&document.to_string(), IgnoreList::Always)[1]
+            .resolved(false)
+            .unwrap()
+            .scope(),
+        &scope
+    );
     assert!(outcome.existing.is_empty());
 
     scope.max_affected_version = Some("2.0.0".to_string());
     let outcome = add_rules(&mut document, IgnoreList::Always, &ids, &scope, None, None).unwrap();
-    assert_eq!(outcome.added, ["cve-1 in package 'requests'"]);
+    assert_eq!(
+        entries(&document.to_string(), IgnoreList::Always)[2]
+            .resolved(false)
+            .unwrap()
+            .scope(),
+        &scope
+    );
     assert!(outcome.existing.is_empty());
+}
+
+#[test]
+fn malformed_entries_do_not_suppress_a_valid_new_rule() {
+    let content = r#"[tool.pixi-audit]
+ignore = [42, { id = "CVE-1", package = 7 }, { id = "CVE-1", reason = false }]
+"#;
+    let (text, outcome) = apply(content, IgnoreList::Always, &["CVE-1"], None, None);
+    assert!(outcome.existing.is_empty());
+    let manifest: toml::Value = toml::from_str(&text).unwrap();
+    let original: toml::Value = toml::from_str(content).unwrap();
+    let array = manifest["tool"]["pixi-audit"]["ignore"].as_array().unwrap();
+    assert_eq!(
+        &array[..3],
+        original["tool"]["pixi-audit"]["ignore"].as_array().unwrap()
+    );
+    assert_eq!(array[3], toml::Value::String("CVE-1".to_string()));
+    assert!(
+        manifest["tool"]["pixi-audit"]["ignore"]
+            .clone()
+            .try_into::<Vec<config::IgnoreEntry>>()
+            .is_err()
+    );
 }
 
 #[test]

@@ -17,8 +17,8 @@ use crate::{
     },
     client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
     report::{
-        AuditPackage, AuditReport, Finding, FixStatus, IgnoreReason, IgnoreSpec,
-        MatchApplicability, PackageEcosystem, PackageId, PackageIgnore, SeverityBand, SortStrategy,
+        AuditPackage, AuditReport, Finding, FixStatus, IgnoreReason, IgnoreRule, IgnoreSpec,
+        MatchApplicability, PackageEcosystem, PackageId, SeverityBand, SortStrategy,
         mean_cvss_base_score,
     },
     threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
@@ -322,7 +322,7 @@ pub async fn audit(
             record_finding(&mut report, finding, &mut suppressions);
         }
     }
-    report.unmatched_ignores = suppressions.unmatched(ignore);
+    report.unmatched_ignores = suppressions.unmatched();
 
     let epss_status = attach_threat_data(&mut report, threat.epss, &kev_catalog).await;
     report.threat_data = ThreatDataStatus {
@@ -429,107 +429,70 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     message
 }
 
-/// Lowercased suppression lists, ready for case-insensitive matching, the
-/// package-scoped rules, and a record of which ids matched a finding.
+/// A single rule list and an indexed record of every rule that matched.
 struct Suppressions<'a> {
-    ignore: BTreeSet<String>,
-    until_fixed: BTreeSet<String>,
-    package_rules: &'a [PackageIgnore],
+    rules: &'a [IgnoreRule],
     ignore_unfixed: bool,
-    /// Lowercased ids from either list that matched a finding's id or
-    /// alias, whether or not that finding ended up suppressed: an
-    /// `until_fixed` id for a finding with a known fix has still matched.
-    matched: BTreeSet<String>,
-    matched_rules: BTreeSet<usize>,
+    needs_locked_version: bool,
+    /// Matching is recorded even when another rule wins or a fix is known.
+    matched: Vec<bool>,
 }
 
 impl<'a> Suppressions<'a> {
     fn from_spec(spec: IgnoreSpec<'a>) -> Self {
-        let lowercase = |ids: &[String]| ids.iter().map(|id| id.to_lowercase()).collect();
         Self {
-            ignore: lowercase(spec.ignore),
-            until_fixed: lowercase(spec.ignore_until_fixed),
-            package_rules: spec.package_rules,
+            rules: spec.rules,
             ignore_unfixed: spec.ignore_unfixed,
-            matched: BTreeSet::new(),
-            matched_rules: BTreeSet::new(),
+            needs_locked_version: spec.rules.iter().any(IgnoreRule::needs_locked_version),
+            matched: vec![false; spec.rules.len()],
         }
     }
 
-    /// The lowercased id or alias of `finding` that `set` lists, if any.
-    fn listed_in(set: &BTreeSet<String>, finding: &Finding) -> Option<String> {
-        std::iter::once(&finding.id)
-            .chain(&finding.aliases)
-            .map(|id| id.to_lowercase())
-            .find(|id| set.contains(id))
-    }
-
-    /// Why `finding` is suppressed, if it is. An unconditional rule, by id
-    /// or by package, wins over an until-fixed one, and until-fixed rules
-    /// lapse once any fix is known.
+    /// Why `finding` is suppressed, if it is. Unconditional rules win over
+    /// until-fixed ones, which lapse once any release fix is known.
     fn reason_for(&mut self, finding: &Finding) -> Option<IgnoreReason> {
-        let ignored = Self::listed_in(&self.ignore, finding);
-        let until_fixed = Self::listed_in(&self.until_fixed, finding);
-        self.matched
-            .extend(ignored.iter().chain(until_fixed.iter()).cloned());
         let mut always = false;
-        let mut until_fix = false;
-        for (index, rule) in self.package_rules.iter().enumerate() {
-            if rule.applies_to(finding) {
-                self.matched_rules.insert(index);
-                if rule.until_fixed {
-                    until_fix = true;
+        let mut until_fixed = false;
+        // Parse once per finding, and only when a rule has version bounds.
+        let locked = if self.needs_locked_version {
+            finding.package.parsed_version().ok()
+        } else {
+            None
+        };
+        for (index, rule) in self.rules.iter().enumerate() {
+            if rule.applies_to(finding, locked.as_ref()) {
+                self.matched[index] = true;
+                if rule.until_fixed() {
+                    until_fixed = true;
                 } else {
                     always = true;
                 }
             }
         }
         let has_known_fix = finding.fix_status() != FixStatus::Unfixed;
-        if ignored.is_some() || always {
+        if always {
             Some(IgnoreReason::Always)
-        } else if (self.ignore_unfixed || until_fixed.is_some() || until_fix) && !has_known_fix {
+        } else if (self.ignore_unfixed || until_fixed) && !has_known_fix {
             Some(IgnoreReason::UntilFixed)
         } else {
             None
         }
     }
 
-    /// The ids of `spec` that matched no finding, in their original
-    /// spelling and order, each once.
-    fn unmatched(&self, spec: IgnoreSpec<'_>) -> Vec<String> {
+    /// Unmatched rules in their original spelling and order. Unscoped ids
+    /// are deduplicated case-insensitively across both suppression modes.
+    fn unmatched(&self) -> Vec<String> {
         let mut seen = BTreeSet::new();
-        let mut unmatched: Vec<String> = spec
-            .ignore
+        self.rules
             .iter()
-            .chain(spec.ignore_until_fixed)
-            .filter(|id| {
-                let lowercase = id.to_lowercase();
-                !self.matched.contains(&lowercase) && seen.insert(lowercase)
+            .zip(&self.matched)
+            .filter(|(rule, matched)| {
+                !**matched
+                    && (!rule.scope().is_empty()
+                        || rule.id().is_none_or(|id| seen.insert(id.to_lowercase())))
             })
-            .cloned()
-            .collect();
-        for (index, rule) in self.package_rules.iter().enumerate() {
-            if !self.matched_rules.contains(&index) {
-                let mut parts = Vec::new();
-                if let Some(id) = &rule.id {
-                    parts.push(id.clone());
-                }
-                if let Some(package) = &rule.scope.package {
-                    parts.push(format!("package '{package}'"));
-                }
-                if let Some(ecosystem) = &rule.scope.ecosystem {
-                    parts.push(format!("ecosystem '{ecosystem}'"));
-                }
-                if let Some(version) = &rule.scope.version {
-                    parts.push(format!("version '{version}'"));
-                }
-                if let Some(version) = &rule.scope.max_affected_version {
-                    parts.push(format!("max affected version '{version}'"));
-                }
-                unmatched.push(parts.join(" in "));
-            }
-        }
-        unmatched
+            .map(|(rule, _)| rule.to_string())
+            .collect()
     }
 }
 

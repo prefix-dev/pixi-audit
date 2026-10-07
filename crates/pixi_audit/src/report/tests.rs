@@ -72,6 +72,42 @@ fn ignore_scope_validates_versions_for_the_selected_ecosystem() {
     }
 }
 
+fn scope_matches(scope: &IgnoreScope, package: &PackageId) -> bool {
+    let locked = package.parsed_version().ok();
+    ScopeMatcher::parse(scope)
+        .unwrap()
+        .matches(package, locked.as_ref())
+}
+
+#[test]
+fn unqualified_scope_compares_under_the_package_ecosystem() {
+    // Not the first version parser that accepts the bound: `1.0foo` is a
+    // conda version but not a PEP 440 one.
+    let mut package = PackageId {
+        name: PackageName::conda("openssl").unwrap(),
+        version: "1.0foo".into(),
+        ecosystem: PackageEcosystem::CondaForge,
+    };
+    let mut scope = IgnoreScope {
+        version: Some("1.0foo".into()),
+        max_affected_version: Some("1.0foo".into()),
+        ..IgnoreScope::default()
+    };
+    assert!(scope_matches(&scope, &package));
+    package.ecosystem = PackageEcosystem::Pypi;
+    assert!(!scope_matches(&scope, &package));
+    package.version = "1.0".into();
+    scope.version = Some("1.0.0".into());
+    scope.max_affected_version = Some("1.0rc1".into());
+    assert!(!scope_matches(&scope, &package));
+    scope.max_affected_version = Some("1.0".into());
+    assert!(scope_matches(&scope, &package));
+    package.ecosystem = PackageEcosystem::Other("custom".into());
+    assert!(!scope_matches(&scope, &package));
+    package.version = "not a version".into();
+    assert!(scope_matches(&IgnoreScope::default(), &package));
+}
+
 #[test]
 fn severity_band_round_trips_through_its_name() {
     for band in SeverityBand::ALL {

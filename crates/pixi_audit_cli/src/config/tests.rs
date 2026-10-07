@@ -6,6 +6,17 @@ fn write(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf
     path
 }
 
+fn rule(id: Option<&str>, scope: IgnoreScope, until_fixed: bool) -> IgnoreRule {
+    IgnoreRule::new(id.map(str::to_string), scope, until_fixed).unwrap()
+}
+
+fn in_package(package: &str) -> IgnoreScope {
+    IgnoreScope {
+        package: Some(package.to_string()),
+        ..IgnoreScope::default()
+    }
+}
+
 #[test]
 fn parses_full_table_from_pixi_toml() {
     let dir = tempfile::tempdir().unwrap();
@@ -23,8 +34,13 @@ severity = "high"
 "#,
     );
     let config = load_config(&manifest).unwrap();
-    assert_eq!(config.ignore, vec!["CVE-1"]);
-    assert_eq!(config.ignore_until_fixed, vec!["CVE-2"]);
+    assert_eq!(
+        config.rules,
+        [
+            IgnoreRule::from_id("CVE-1".into(), false),
+            IgnoreRule::from_id("CVE-2".into(), true),
+        ]
+    );
     assert_eq!(config.severity, Some(SeverityBand::High));
 }
 
@@ -69,12 +85,19 @@ ignore-until-fixed = [{ id = "CVE-4" }]
 "#,
     );
     let config = load_config(&manifest).unwrap();
-    assert_eq!(config.ignore, vec!["CVE-1", "CVE-2", "CVE-3"]);
-    assert_eq!(config.ignore_until_fixed, vec!["CVE-4"]);
+    assert_eq!(
+        config.rules,
+        [
+            IgnoreRule::from_id("CVE-1".into(), false),
+            IgnoreRule::from_id("CVE-2".into(), false),
+            IgnoreRule::from_id("CVE-3".into(), false),
+            IgnoreRule::from_id("CVE-4".into(), true),
+        ]
+    );
 }
 
 #[test]
-fn package_scoped_entries_become_package_rules() {
+fn id_and_package_entries_share_one_rule_list() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(
         dir.path(),
@@ -90,35 +113,13 @@ ignore-until-fixed = [{ package = "libfoo", until = 2999-01-01 }]
 "#,
     );
     let config = load_config(&manifest).unwrap();
-    assert_eq!(config.ignore, vec!["CVE-1"]);
-    assert!(config.ignore_until_fixed.is_empty());
     assert_eq!(
-        config.package_rules,
+        config.rules,
         vec![
-            PackageIgnore {
-                scope: IgnoreScope {
-                    package: Some("vendored-thing".to_string()),
-                    ..IgnoreScope::default()
-                },
-                id: None,
-                until_fixed: false,
-            },
-            PackageIgnore {
-                scope: IgnoreScope {
-                    package: Some("requests".to_string()),
-                    ..IgnoreScope::default()
-                },
-                id: Some("CVE-2".to_string()),
-                until_fixed: false,
-            },
-            PackageIgnore {
-                scope: IgnoreScope {
-                    package: Some("libfoo".to_string()),
-                    ..IgnoreScope::default()
-                },
-                id: None,
-                until_fixed: true,
-            },
+            IgnoreRule::from_id("CVE-1".into(), false),
+            rule(None, in_package("vendored-thing"), false),
+            rule(Some("CVE-2"), in_package("requests"), false),
+            rule(None, in_package("libfoo"), true),
         ]
     );
 }
@@ -132,19 +133,18 @@ fn scoped_id_entries_retain_ecosystem_and_version_bounds() {
         "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", ecosystem = \"conda-forge\", version = \"1.13.1\", max-affected-version = \"1.13.2\" }]\n",
     );
     let config = load_config(&manifest).unwrap();
-    assert!(config.ignore.is_empty());
     assert_eq!(
-        config.package_rules,
-        [PackageIgnore {
-            id: Some("CVE-1".to_string()),
-            scope: IgnoreScope {
+        config.rules,
+        [rule(
+            Some("CVE-1"),
+            IgnoreScope {
                 ecosystem: Some("conda-forge".to_string()),
                 version: Some("1.13.1".to_string()),
                 max_affected_version: Some("1.13.2".to_string()),
                 ..IgnoreScope::default()
             },
-            ..PackageIgnore::default()
-        }]
+            false,
+        )]
     );
     let manifest = write(
         dir.path(),
@@ -182,25 +182,24 @@ fn expired_ignore_rules_are_dropped() {
         "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", until = 2000-01-01 }, \"CVE-2\"]\n",
     );
     let config = load_config(&manifest).unwrap();
-    assert_eq!(config.ignore, vec!["CVE-2"]);
+    assert_eq!(config.rules, [IgnoreRule::from_id("CVE-2".into(), false)]);
 }
 
 #[test]
 fn ignore_rules_apply_through_their_last_day() {
-    let rule = ResolvedIgnore {
-        id: Some("CVE-1".to_string()),
-        ..ResolvedIgnore::default()
-    };
-    let entries = [IgnoreEntry::Rule(IgnoreRule {
+    let rule = IgnoreRule::from_id("CVE-1".into(), true);
+    let entries = [IgnoreEntry::Rule(IgnoreTable {
         id: Some("CVE-1".to_string()),
         until: Some(toml::Value::String("2026-09-02".to_string())),
-        ..IgnoreRule::default()
+        ..IgnoreTable::default()
     })];
-    let (active, expired) = effective_ignores(&entries, jiff::civil::date(2026, 9, 2)).unwrap();
+    let (active, expired) =
+        effective_ignores(&entries, jiff::civil::date(2026, 9, 2), true).unwrap();
     assert_eq!(active, std::slice::from_ref(&rule));
     assert!(expired.is_empty());
 
-    let (active, expired) = effective_ignores(&entries, jiff::civil::date(2026, 9, 3)).unwrap();
+    let (active, expired) =
+        effective_ignores(&entries, jiff::civil::date(2026, 9, 3), true).unwrap();
     assert!(active.is_empty());
     assert_eq!(
         expired,
@@ -237,8 +236,7 @@ fn missing_table_yields_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(dir.path(), "pixi.toml", "[workspace]\nname = \"demo\"\n");
     let config = load_config(&manifest).unwrap();
-    assert!(config.ignore.is_empty());
-    assert!(config.ignore_until_fixed.is_empty());
+    assert!(config.rules.is_empty());
     assert_eq!(config.severity, None);
 }
 
@@ -280,7 +278,7 @@ fn unknown_keys_are_tolerated() {
         "[tool.pixi-audit]\nignore = [\"CVE-1\"]\nfuture-option = true\n",
     );
     let config = load_config(&manifest).unwrap();
-    assert_eq!(config.ignore, vec!["CVE-1"]);
+    assert_eq!(config.rules, [IgnoreRule::from_id("CVE-1".into(), false)]);
 }
 
 #[test]
@@ -300,7 +298,10 @@ fn pyproject_with_tool_pixi_is_a_manifest() {
     );
     let manifest = find_manifest_in(dir.path()).unwrap().unwrap();
     assert!(manifest.ends_with("pyproject.toml"));
-    assert_eq!(load_config(&manifest).unwrap().ignore, vec!["CVE-9"]);
+    assert_eq!(
+        load_config(&manifest).unwrap().rules,
+        [IgnoreRule::from_id("CVE-9".into(), false)]
+    );
 }
 
 #[test]

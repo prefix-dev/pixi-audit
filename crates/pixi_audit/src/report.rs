@@ -247,6 +247,13 @@ pub struct PackageId {
     pub ecosystem: PackageEcosystem,
 }
 
+impl PackageId {
+    /// The locked version, parsed with the package's ecosystem rules.
+    pub fn parsed_version(&self) -> Result<PackageVersion, ParsePackageVersionError> {
+        PackageVersion::parse(&self.ecosystem, &self.version)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SeverityBand {
@@ -370,40 +377,42 @@ impl FromStr for SeverityBand {
     }
 }
 
-/// Which suppression list put a finding into the ignored bucket.
+/// Which suppression rule put a finding into the ignored bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IgnoreReason {
-    /// Listed in the unconditional ignore list.
+    /// Matched an unconditional ignore rule.
     Always,
-    /// Listed in the ignore-until-fixed list and no fix is known yet. The
-    /// finding resurfaces once any fixed version (own ecosystem or
-    /// upstream) is published.
+    /// Matched an until-fixed rule (or `ignore_unfixed`) with no fix known
+    /// yet. The finding resurfaces once any fixed version (own ecosystem
+    /// or upstream) is published.
     UntilFixed,
 }
 
-/// Suppression lists applied during an audit. Ids/aliases match
-/// case-insensitively; `ignore` wins when an id appears in both lists.
+/// Suppression rules applied during an audit. Ids/aliases match
+/// case-insensitively; unconditional rules win over until-fixed rules.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IgnoreSpec<'a> {
-    /// Always suppress these vulnerability ids/aliases.
-    pub ignore: &'a [String],
-    /// Suppress these only while no fixed release is known.
-    pub ignore_until_fixed: &'a [String],
-    /// Rules scoped by package, ecosystem or installed version.
-    pub package_rules: &'a [PackageIgnore],
-    /// Suppress every finding for which no fixed release is known, as if
-    /// each were listed in `ignore_until_fixed`.
+    /// Rules optionally scoped by package, ecosystem or installed version.
+    pub rules: &'a [IgnoreRule],
+    /// Suppress every finding for which no fixed release is known.
     pub ignore_unfixed: bool,
 }
 
-/// Package, ecosystem and installed-version predicates shared by ignore rules.
+/// Package, ecosystem and installed-version predicates shared by ignore
+/// rules, as written in the configuration.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IgnoreScope {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ecosystem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(rename = "max-affected-version")]
+    #[serde(
+        rename = "max-affected-version",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_affected_version: Option<String>,
 }
 
@@ -415,95 +424,232 @@ impl IgnoreScope {
             && self.max_affected_version.is_none()
     }
 
-    pub fn validate(&self) -> Result<(), String> {
-        let ecosystem = self.ecosystem.as_deref();
-        if let Some(ecosystem) = ecosystem
-            && !ecosystem.eq_ignore_ascii_case("conda-forge")
-            && !ecosystem.eq_ignore_ascii_case("pypi")
-        {
-            return Err(format!(
-                "unsupported ecosystem '{}' (expected conda-forge or PyPI)",
-                ecosystem.to_ascii_lowercase()
-            ));
-        }
-        for version in [
-            self.version.as_deref(),
-            self.max_affected_version.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let valid = match ecosystem {
-                Some(value) if value.eq_ignore_ascii_case("conda-forge") => {
-                    PackageVersion::parse(&PackageEcosystem::CondaForge, version).is_ok()
+    /// Checks that the ecosystem is supported and every version bound
+    /// parses for it.
+    pub fn validate(&self) -> Result<(), InvalidIgnoreScope> {
+        ScopeMatcher::parse(self).map(drop)
+    }
+}
+
+/// Why an [`IgnoreScope`] cannot be applied.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum InvalidIgnoreScope {
+    #[error("unsupported ecosystem '{0}' (expected conda-forge or PyPI)")]
+    UnsupportedEcosystem(String),
+    #[error("invalid version '{0}' for the selected ecosystem")]
+    InvalidVersion(String),
+}
+
+/// An [`IgnoreScope`] parsed for matching: the ecosystem resolved and every
+/// version bound parsed once.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ScopeMatcher {
+    package: Option<String>,
+    ecosystem: Option<PackageEcosystem>,
+    version: Option<VersionBound>,
+    max_affected_version: Option<VersionBound>,
+}
+
+impl ScopeMatcher {
+    fn parse(scope: &IgnoreScope) -> Result<Self, InvalidIgnoreScope> {
+        let ecosystem = scope
+            .ecosystem
+            .as_deref()
+            .map(|ecosystem| {
+                if ecosystem.eq_ignore_ascii_case("conda-forge") {
+                    Ok(PackageEcosystem::CondaForge)
+                } else if ecosystem.eq_ignore_ascii_case("pypi") {
+                    Ok(PackageEcosystem::Pypi)
+                } else {
+                    Err(InvalidIgnoreScope::UnsupportedEcosystem(
+                        ecosystem.to_ascii_lowercase(),
+                    ))
                 }
-                Some(_) => PackageVersion::parse(&PackageEcosystem::Pypi, version).is_ok(),
-                None => {
-                    PackageVersion::parse(&PackageEcosystem::CondaForge, version).is_ok()
-                        || PackageVersion::parse(&PackageEcosystem::Pypi, version).is_ok()
-                }
-            };
-            if !valid {
-                return Err(format!(
-                    "invalid version '{version}' for the selected ecosystem"
-                ));
-            }
-        }
-        Ok(())
+            })
+            .transpose()?;
+        let bound = |version: &Option<String>| {
+            version
+                .as_deref()
+                .map(|version| VersionBound::parse(ecosystem.as_ref(), version))
+                .transpose()
+        };
+        Ok(Self {
+            package: scope.package.clone(),
+            version: bound(&scope.version)?,
+            max_affected_version: bound(&scope.max_affected_version)?,
+            ecosystem,
+        })
     }
 
-    /// Whether `package` falls under this scope.
-    pub fn matches(&self, package: &PackageId) -> bool {
-        if !self
+    /// Whether `package`, whose locked version parsed as `locked`, falls
+    /// under this scope. A version-bounded scope never matches a package
+    /// whose version does not parse (`locked` is `None`).
+    fn matches(&self, package: &PackageId, locked: Option<&PackageVersion>) -> bool {
+        let other_package = self
             .package
+            .as_deref()
+            .is_some_and(|name| !package.name.matches(name));
+        let other_ecosystem = self
+            .ecosystem
             .as_ref()
-            .is_none_or(|name| package.name.matches(name))
-            || !self.ecosystem.as_ref().is_none_or(|ecosystem| {
-                package
-                    .ecosystem
-                    .osv_ecosystem()
-                    .eq_ignore_ascii_case(ecosystem)
-            })
-        {
+            .is_some_and(|ecosystem| *ecosystem != package.ecosystem);
+        if other_package || other_ecosystem {
             return false;
         }
         if self.version.is_none() && self.max_affected_version.is_none() {
             return true;
         }
-        let Ok(locked) = PackageVersion::parse(&package.ecosystem, &package.version) else {
+        let Some(locked) = locked else {
             return false;
         };
-        self.version.as_deref().is_none_or(|version| {
-            PackageVersion::parse(&package.ecosystem, version).is_ok_and(|bound| locked == bound)
-        }) && self.max_affected_version.as_deref().is_none_or(|version| {
-            PackageVersion::parse(&package.ecosystem, version).is_ok_and(|bound| {
+        self.version
+            .as_ref()
+            .is_none_or(|bound| bound.compare(locked) == Some(Ordering::Equal))
+            && self.max_affected_version.as_ref().is_none_or(|bound| {
                 matches!(
-                    locked.partial_cmp(&bound),
+                    bound.compare(locked),
                     Some(Ordering::Less | Ordering::Equal)
                 )
             })
-        })
     }
 }
 
-/// A suppression optionally scoped to package, ecosystem and locked version.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct PackageIgnore {
-    pub id: Option<String>,
-    pub scope: IgnoreScope,
-    /// Suppress only while no fixed release is known.
-    pub until_fixed: bool,
+/// A version bound of an ignore rule, parsed with each version scheme the
+/// rule applies to. A rule without an ecosystem keeps both parses, so every
+/// package is compared under its own ecosystem's rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VersionBound {
+    conda: Option<rattler_conda_types::Version>,
+    pypi: Option<uv_pep440::Version>,
 }
 
-impl PackageIgnore {
-    pub fn applies_to(&self, finding: &Finding) -> bool {
+impl VersionBound {
+    fn parse(ecosystem: Option<&PackageEcosystem>, text: &str) -> Result<Self, InvalidIgnoreScope> {
+        let bound = match ecosystem {
+            Some(PackageEcosystem::CondaForge) => Self {
+                conda: text.parse().ok(),
+                pypi: None,
+            },
+            Some(PackageEcosystem::Pypi) => Self {
+                conda: None,
+                pypi: text.parse().ok(),
+            },
+            // Unqualified; a scope never names another ecosystem.
+            Some(PackageEcosystem::Other(_)) | None => Self {
+                conda: text.parse().ok(),
+                pypi: text.parse().ok(),
+            },
+        };
+        if bound.conda.is_none() && bound.pypi.is_none() {
+            return Err(InvalidIgnoreScope::InvalidVersion(text.to_string()));
+        }
+        Ok(bound)
+    }
+
+    /// How `locked` compares with the bound, or `None` when the bound has
+    /// no parse in `locked`'s ecosystem.
+    fn compare(&self, locked: &PackageVersion) -> Option<Ordering> {
+        match locked {
+            PackageVersion::Conda(version) => self.conda.as_ref().map(|bound| version.cmp(bound)),
+            PackageVersion::Pypi(version) => self.pypi.as_ref().map(|bound| version.cmp(bound)),
+        }
+    }
+}
+
+/// A suppression optionally scoped to package, ecosystem and locked
+/// version. Its scope is parsed on construction, so matching findings never
+/// re-parses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoreRule {
+    id: Option<String>,
+    scope: IgnoreScope,
+    until_fixed: bool,
+    matcher: ScopeMatcher,
+}
+
+impl IgnoreRule {
+    pub fn new(
+        id: Option<String>,
+        scope: IgnoreScope,
+        until_fixed: bool,
+    ) -> Result<Self, InvalidIgnoreScope> {
+        let matcher = ScopeMatcher::parse(&scope)?;
+        Ok(Self {
+            id,
+            scope,
+            until_fixed,
+            matcher,
+        })
+    }
+
+    /// An unscoped vulnerability id or alias, preserved as written.
+    pub fn from_id(id: String, until_fixed: bool) -> Self {
+        Self {
+            id: Some(id),
+            scope: IgnoreScope::default(),
+            until_fixed,
+            matcher: ScopeMatcher::default(),
+        }
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// The scope as written.
+    pub fn scope(&self) -> &IgnoreScope {
+        &self.scope
+    }
+
+    /// Whether the rule suppresses only while no fixed release is known.
+    pub fn until_fixed(&self) -> bool {
+        self.until_fixed
+    }
+
+    pub(crate) fn needs_locked_version(&self) -> bool {
+        self.matcher.version.is_some() || self.matcher.max_affected_version.is_some()
+    }
+
+    /// Whether the rule suppresses `finding`, whose locked version parsed
+    /// as `locked`.
+    pub(crate) fn applies_to(&self, finding: &Finding, locked: Option<&PackageVersion>) -> bool {
         (self.id.is_some() || self.scope.package.is_some())
             && self.id.as_ref().is_none_or(|id| {
                 std::iter::once(&finding.id)
                     .chain(&finding.aliases)
                     .any(|candidate| candidate.eq_ignore_ascii_case(id))
             })
-            && self.scope.matches(&finding.package)
+            && self.matcher.matches(&finding.package, locked)
+    }
+}
+
+/// The rule as written, e.g. `CVE-1 in package 'openssl' in version '3.1.0'`.
+impl std::fmt::Display for IgnoreRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scope = &self.scope;
+        let parts = [
+            (None, self.id.as_deref()),
+            (Some("package"), scope.package.as_deref()),
+            (Some("ecosystem"), scope.ecosystem.as_deref()),
+            (Some("version"), scope.version.as_deref()),
+            (
+                Some("max affected version"),
+                scope.max_affected_version.as_deref(),
+            ),
+        ];
+        let mut separator = "";
+        for (label, value) in parts {
+            let Some(value) = value else {
+                continue;
+            };
+            f.write_str(separator)?;
+            match label {
+                Some(label) => write!(f, "{label} '{value}'")?,
+                None => f.write_str(value)?,
+            }
+            separator = " in ";
+        }
+        Ok(())
     }
 }
 
@@ -637,6 +783,23 @@ impl Finding {
         } else {
             FixStatus::Unfixed
         }
+    }
+
+    /// The lowest fixed release newer than the locked version, or `None`
+    /// when there is none or the locked version does not parse. OSV can
+    /// publish fixed events for several release branches; the lowest newer
+    /// one avoids forcing the highest (and potentially incompatible) major
+    /// release. Fixed versions that do not parse are skipped rather than
+    /// compared as text.
+    pub fn lowest_fixed_version(&self) -> Option<PackageVersion> {
+        let locked = self.package.parsed_version().ok()?;
+        self.fixed_versions
+            .iter()
+            .filter_map(|fixed| PackageVersion::parse(&self.package.ecosystem, fixed).ok())
+            .filter(|fixed| *fixed > locked)
+            // All parsed in the package's ecosystem, so they are mutually
+            // comparable.
+            .reduce(|lowest, fixed| if fixed < lowest { fixed } else { lowest })
     }
 }
 

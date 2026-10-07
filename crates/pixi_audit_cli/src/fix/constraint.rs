@@ -1,9 +1,10 @@
 //! Plans fixed versions and applies them to dependency constraints.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::str::FromStr;
 
-use pixi_audit::{AuditReport, PackageName};
+use pixi_audit::{AuditReport, PackageName, PackageVersion};
 use rattler_conda_types::{
     NamelessMatchSpec, Version as CondaVersion, VersionSpec,
     version_spec::{LogicalOperator, RangeOperator},
@@ -11,59 +12,81 @@ use rattler_conda_types::{
 use toml_edit::{Item, TableLike, Value};
 use uv_pep440::{Version as PypiVersion, VersionSpecifier, VersionSpecifiers};
 
-/// A version parsed with its ecosystem's rules, so that comparisons are
-/// never lexicographic ("10.0" must sort after "9.0").
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum FixVersion {
-    Conda(CondaVersion),
-    Pypi(PypiVersion),
-}
+/// The minimum version each vulnerable package must be raised to, parsed
+/// with its ecosystem's rules so comparisons are never lexicographic
+/// ("10.0" must sort after "9.0"). The name carries its ecosystem's
+/// normalization, so a manifest key spelled `Ruamel.YAML` finds the plan
+/// entry for the locked `ruamel-yaml`.
+#[derive(Debug, Default)]
+pub(super) struct FixPlan(BTreeMap<PackageName, PackageVersion>);
 
-impl FixVersion {
-    /// Parses `version` with the version scheme of `package`'s ecosystem.
-    fn parse(package: &PackageName, version: &str) -> Option<Self> {
-        match package {
-            PackageName::Conda(_) => CondaVersion::from_str(version).ok().map(Self::Conda),
-            PackageName::Pypi(_) => PypiVersion::from_str(version).ok().map(Self::Pypi),
+impl FixPlan {
+    pub(super) fn from_report(report: &AuditReport) -> Self {
+        let mut plan = Self::default();
+        for finding in &report.vulnerabilities {
+            let Some(fixed) = finding.lowest_fixed_version() else {
+                continue;
+            };
+            // Multiple advisories for one package must all be resolved, so
+            // retain the greatest of their minimum required fixes.
+            match plan.0.entry(finding.package.name.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(fixed);
+                }
+                Entry::Occupied(mut entry) => {
+                    if *entry.get() < fixed {
+                        entry.insert(fixed);
+                    }
+                }
+            }
         }
+        plan
     }
-}
 
-/// The minimum version each vulnerable package must be raised to. The
-/// name carries its ecosystem's normalization, so a manifest key spelled
-/// `Ruamel.YAML` finds the plan entry for the locked `ruamel-yaml`.
-pub(super) type FixPlan = BTreeMap<PackageName, FixVersion>;
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 
-pub(super) fn plan_fixed_versions(report: &AuditReport) -> FixPlan {
-    let mut fixes = FixPlan::new();
-    for finding in &report.vulnerabilities {
-        let Some(locked) = FixVersion::parse(&finding.package.name, &finding.package.version)
-        else {
-            continue;
-        };
-        // OSV can publish fixed events for multiple release branches. Pick the
-        // first fix newer than the locked version instead of forcing the
-        // highest (and potentially incompatible) major release. Versions that
-        // do not parse are skipped rather than compared as text.
-        let Some(fixed) = finding
-            .fixed_versions
-            .iter()
-            .filter_map(|fixed| FixVersion::parse(&finding.package.name, fixed))
-            .filter(|fixed| *fixed > locked)
-            .min()
-        else {
-            continue;
-        };
-        // Multiple advisories for one package must all be resolved, so retain
-        // the greatest of their minimum required fixes.
-        let required = fixes
-            .entry(finding.package.name.clone())
-            .or_insert_with(|| fixed.clone());
-        if *required < fixed {
-            *required = fixed;
+    /// Walks every dependency table under `table`, at any nesting depth
+    /// (`[dependencies]`, `[feature.x.pypi-dependencies]`,
+    /// `[target.linux-64.host-dependencies]`, ...), and returns how many
+    /// constraints were changed.
+    pub(super) fn apply_to_manifest(&self, table: &mut dyn TableLike) -> usize {
+        let mut changed = 0;
+        for (key, item) in table.iter_mut() {
+            let parse_name = dependency_table_kind(key.get());
+            let Some(child) = item.as_table_like_mut() else {
+                continue;
+            };
+            changed += match parse_name {
+                Some(parse_name) => self.apply_to_dependencies(child, parse_name),
+                None => self.apply_to_manifest(child),
+            };
         }
+        changed
     }
-    fixes
+
+    fn apply_to_dependencies(
+        &self,
+        dependencies: &mut dyn TableLike,
+        parse_name: NameParser,
+    ) -> usize {
+        let mut changed = 0;
+        for (name, item) in dependencies.iter_mut() {
+            // A key that is not a valid name in this table's ecosystem cannot
+            // match any finding; pixi itself would reject it.
+            let Ok(name) = parse_name(name.get()) else {
+                continue;
+            };
+            let Some(fixed) = self.0.get(&name) else {
+                continue;
+            };
+            if set_constraint(item, fixed) {
+                changed += 1;
+            }
+        }
+        changed
+    }
 }
 
 /// Parses a manifest dependency key with the normalization of the table it
@@ -80,52 +103,11 @@ fn dependency_table_kind(key: &str) -> Option<NameParser> {
     }
 }
 
-/// Walks every dependency table under `table`, at any nesting depth
-/// (`[dependencies]`, `[feature.x.pypi-dependencies]`,
-/// `[target.linux-64.host-dependencies]`, ...), and returns how many
-/// constraints were changed.
-pub(super) fn update_manifest_dependencies(table: &mut dyn TableLike, fixes: &FixPlan) -> usize {
-    let mut changed = 0;
-    for (key, item) in table.iter_mut() {
-        let parse_name = dependency_table_kind(key.get());
-        let Some(child) = item.as_table_like_mut() else {
-            continue;
-        };
-        changed += match parse_name {
-            Some(parse_name) => update_dependencies(child, parse_name, fixes),
-            None => update_manifest_dependencies(child, fixes),
-        };
-    }
-    changed
-}
-
-fn update_dependencies(
-    dependencies: &mut dyn TableLike,
-    parse_name: NameParser,
-    fixes: &FixPlan,
-) -> usize {
-    let mut changed = 0;
-    for (name, item) in dependencies.iter_mut() {
-        // A key that is not a valid name in this table's ecosystem cannot
-        // match any finding; pixi itself would reject it.
-        let Ok(name) = parse_name(name.get()) else {
-            continue;
-        };
-        let Some(fixed) = fixes.get(&name) else {
-            continue;
-        };
-        if set_constraint(item, fixed) {
-            changed += 1;
-        }
-    }
-    changed
-}
-
 /// Raises the constraint in a single dependency entry. A registry string
 /// (`pkg = ">=1"`) is updated in place; an inline or full table is updated
 /// through its `version` field. Git, path, and URL requirements have no
 /// `version` and are left untouched.
-fn set_constraint(item: &mut Item, fixed: &FixVersion) -> bool {
+fn set_constraint(item: &mut Item, fixed: &PackageVersion) -> bool {
     let version = if item.is_str() {
         item.as_value_mut()
     } else {
@@ -136,7 +118,7 @@ fn set_constraint(item: &mut Item, fixed: &FixVersion) -> bool {
     version.is_some_and(|value| set_string_value(value, fixed))
 }
 
-fn set_string_value(value: &mut Value, fixed: &FixVersion) -> bool {
+fn set_string_value(value: &mut Value, fixed: &PackageVersion) -> bool {
     let Value::String(version) = value else {
         return false;
     };
@@ -156,9 +138,9 @@ fn set_string_value(value: &mut Value, fixed: &FixVersion) -> bool {
 /// `>= fixed` already implies are dropped, so repeated `--fix` runs do not
 /// pile up `>=` clauses. Returns `None` when `current` cannot be parsed or
 /// already excludes `fixed`, in which case the requirement is left alone.
-fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
+fn tighten_constraint(current: &str, fixed: &PackageVersion) -> Option<String> {
     match fixed {
-        FixVersion::Pypi(fixed) => {
+        PackageVersion::Pypi(fixed) => {
             let current = match current.trim() {
                 "" | "*" => VersionSpecifiers::empty(),
                 current => VersionSpecifiers::from_str(current).ok()?,
@@ -177,7 +159,7 @@ fn tighten_constraint(current: &str, fixed: &FixVersion) -> Option<String> {
                     .to_string(),
             )
         }
-        FixVersion::Conda(fixed) => {
+        PackageVersion::Conda(fixed) => {
             let mut current = current.parse::<NamelessMatchSpec>().ok()?;
             if current
                 .version
