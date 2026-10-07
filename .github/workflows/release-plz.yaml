@@ -1,0 +1,58 @@
+name: Release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    name: Release-plz
+    if: github.repository == 'prefix-dev/pixi_audit'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Tags and PRs created with GITHUB_TOKEN start no workflows, so neither
+      # release.yaml nor CI would run. The octo-sts token avoids that.
+      - name: Obtain GitHub app token
+        id: octo-sts
+        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+        with:
+          scope: ${{ github.repository }}
+          identity: write
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.octo-sts.outputs.token }}
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      # When a release PR was merged, tag it. The tag push starts release.yaml.
+      # This runs first: release-plz reads the last release from tags, so the
+      # next release PR must see the new tag.
+      - name: Tag release
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.octo-sts.outputs.token }}
+
+      # release-plz can create the tag through the GitHub API; fetch it so the
+      # release PR starts from the new version.
+      - name: Fetch tags
+        run: git fetch --tags --force origin
+
+      - name: Update release PR
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.octo-sts.outputs.token }}

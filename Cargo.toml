@@ -29,10 +29,10 @@ http-cache-reqwest = { version = "1.0.0-alpha.8", default-features = false, feat
 iocraft = "0.8.5"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 miette = "7.6.0"
-osv_protocol = { path = "crates/osv_protocol", version = "0.1.0" }
-osv_client = { path = "crates/osv_client", version = "0.1.0" }
+osv_protocol = { path = "crates/osv_protocol", version = "0.1.2" }
+osv_client = { path = "crates/osv_client", version = "0.1.2" }
 pixi_audit_test_support = { path = "crates/pixi_audit_test_support" }
-pixi_audit = { path = "crates/pixi_audit", version = "0.1.0" }
+pixi_audit = { path = "crates/pixi_audit", version = "0.1.2" }
 # Same version pixi pins, so the `LockFile` type identity unifies when pixi
 # consumes these crates. `rattler_conda_types` must be the version
 # `rattler_lock` depends on, so the `PackageName` inside a lock file is the
@@ -49,7 +49,7 @@ serde_json = "1.0.139"
 supports-hyperlinks = "3.2"
 tempfile = "3"
 thiserror = "2.0.12"
-threat_feeds = { path = "crates/threat_feeds", version = "0.1.0" }
+threat_feeds = { path = "crates/threat_feeds", version = "0.1.2" }
 tokio = "1.43.0"
 toml = "1.0"
 toml_edit = "0.25"

@@ -2,7 +2,17 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    # Skip dev builds for merges that change nothing in the package.
+    # GitHub does not apply path filters to tag pushes.
+    paths-ignore:
+      - "**.md"
+      - LICENSE
+      - release-plz.toml
+      - .github/chainguard/**
+      - .github/workflows/ci.yml
+      - .github/workflows/release-plz.yaml
   workflow_dispatch:
     inputs:
       channel:
@@ -16,12 +26,16 @@ permissions:
 jobs:
   metadata:
     name: Release metadata
-    if: github.repository == 'prefix-dev/pixi_audit' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      github.repository == 'prefix-dev/pixi_audit' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     outputs:
       build-number: ${{ steps.release.outputs.build-number }}
       channel: ${{ steps.release.outputs.channel }}
-      version: ${{ steps.release.outputs.version }}
+      cli-version: ${{ steps.release.outputs.cli-version }}
+      kind: ${{ steps.release.outputs.kind }}
+      package-version: ${{ steps.release.outputs.package-version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -50,23 +64,83 @@ jobs:
             echo "Could not determine the pixi_audit_cli version." >&2
             exit 1
           fi
-          if [[ "$RELEASE_TAG" != "v$VERSION" ]]; then
-            echo "Release tag $RELEASE_TAG does not match pixi_audit_cli version $VERSION." >&2
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "Release tag must point to a commit on main." >&2
-            exit 1
+
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [[ "$RELEASE_TAG" != "v$VERSION" ]]; then
+              echo "Release tag $RELEASE_TAG does not match pixi_audit_cli version $VERSION." >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "Release tag must point to a commit on main." >&2
+              exit 1
+            fi
+            KIND=release
+            CLI_VERSION="$VERSION"
+            PACKAGE_VERSION="$VERSION"
+          else
+            # A merged release PR changes the version. Its v<version> tag
+            # publishes the release, so skip the dev build of that commit.
+            PREVIOUS_VERSION=$(git show HEAD^1:crates/pixi_audit_cli/Cargo.toml | \
+              sed -n 's/^version = "\([^"]*\)"$/\1/p')
+            if [[ -z "$PREVIOUS_VERSION" ]]; then
+              echo "Could not read the pixi_audit_cli version of the previous commit." >&2
+              exit 1
+            fi
+            if [[ "$VERSION" != "$PREVIOUS_VERSION" ]]; then
+              echo "This commit changes the version from $PREVIOUS_VERSION to $VERSION; the v$VERSION tag publishes it."
+              echo "kind=skip" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "Cannot derive a dev version from pixi_audit_cli version $VERSION." >&2
+              exit 1
+            fi
+            # Dev builds sort after the current release and before the next one:
+            # 0.1.2 < 0.1.3.dev52 < 0.1.3, and also < 0.2.0.
+            NEXT="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+            KIND=dev
+            CLI_VERSION="$NEXT-dev.$BUILD_NUMBER"
+            PACKAGE_VERSION="$NEXT.dev$BUILD_NUMBER"
           fi
 
           echo "build-number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing pixi-audit $VERSION build $BUILD_NUMBER to $CHANNEL"
+          echo "cli-version=$CLI_VERSION" >> "$GITHUB_OUTPUT"
+          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+          echo "package-version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing pixi-audit $PACKAGE_VERSION build $BUILD_NUMBER to $CHANNEL"
+
+      # Cargo needs a semver pre-release (0.1.3-dev.52) while Conda versions
+      # cannot contain a dash, so pixi.toml sets the package version (0.1.3.dev52).
+      - name: Set dev version
+        if: steps.release.outputs.kind == 'dev'
+        shell: bash
+        env:
+          CLI_VERSION: ${{ steps.release.outputs.cli-version }}
+          PACKAGE_VERSION: ${{ steps.release.outputs.package-version }}
+        run: |
+          set -euo pipefail
+          sed -i "0,/^version = \".*\"$/s//version = \"$CLI_VERSION\"/" crates/pixi_audit_cli/Cargo.toml
+          cargo update --workspace
+          sed -i "/^\[package\]$/a version = \"$PACKAGE_VERSION\"" pixi.toml
+          git diff
+
+      - name: Save dev sources
+        if: steps.release.outputs.kind == 'dev'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dev-sources
+          path: |
+            Cargo.lock
+            pixi.toml
+            crates/pixi_audit_cli/Cargo.toml
+          if-no-files-found: error
+          retention-days: 1
 
   build:
     name: Build ${{ matrix.target }}
     needs: metadata
+    if: needs.metadata.outputs.kind != 'skip'
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +156,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Restore dev sources
+        if: needs.metadata.outputs.kind == 'dev'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dev-sources
+          path: .
       - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
         with:
           pixi-version: v0.78.0
@@ -101,7 +181,8 @@ jobs:
       - name: Verify package
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}
+          EXPECTED_CLI_VERSION: ${{ needs.metadata.outputs.cli-version }}
+          EXPECTED_VERSION: ${{ needs.metadata.outputs.package-version }}
         run: |
           shopt -s nullglob
           packages=(dist/*.conda)
@@ -110,12 +191,12 @@ jobs:
             exit 1
           fi
           if [[ $(basename "${packages[0]}") != "pixi-audit-${EXPECTED_VERSION}-"*.conda ]]; then
-            echo "Package version does not match pixi_audit_cli $EXPECTED_VERSION." >&2
+            echo "Package version does not match $EXPECTED_VERSION." >&2
             exit 1
           fi
           ACTUAL_VERSION=$(pixi exec --spec "${packages[0]}" pixi-audit --version)
-          if [[ "$ACTUAL_VERSION" != "pixi-audit $EXPECTED_VERSION" ]]; then
-            echo "Binary version $ACTUAL_VERSION does not match package version $EXPECTED_VERSION." >&2
+          if [[ "$ACTUAL_VERSION" != "pixi-audit $EXPECTED_CLI_VERSION" ]]; then
+            echo "Binary version $ACTUAL_VERSION does not match $EXPECTED_CLI_VERSION." >&2
             exit 1
           fi
           echo "Built and tested ${packages[0]}"
