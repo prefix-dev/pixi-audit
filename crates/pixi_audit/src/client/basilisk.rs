@@ -11,6 +11,29 @@ pub const DEFAULT_BASE_URL: &str = "https://api.basilisk.prefix.dev";
 /// Environment variable to override the audit API base URL.
 pub const BASE_URL_ENV_VAR: &str = "PIXI_AUDIT_BASE_URL";
 
+/// Environment variable carrying a Basilisk user API token (`bsk_…`), the
+/// credential for CI: generated under Settings on the Basilisk explorer and
+/// sent as `Authorization: Bearer` to the configured audit origin only.
+pub const TOKEN_ENV_VAR: &str = "PIXI_AUDIT_TOKEN";
+
+/// Visible prefix of a Basilisk user API token.
+pub const TOKEN_PREFIX: &str = "bsk_";
+
+/// Full length of a Basilisk user API token: the prefix, an 8-character key
+/// id and a 32-character secret.
+pub const TOKEN_LENGTH: usize = 44;
+
+/// Whether `value` has the shape of a Basilisk user API token. A cheap check
+/// that keeps channel tokens, OAuth grants and typos from ever being sent as
+/// one; it says nothing about validity.
+pub fn looks_like_basilisk_token(value: &str) -> bool {
+    value.len() == TOKEN_LENGTH
+        && value.starts_with(TOKEN_PREFIX)
+        && value[TOKEN_PREFIX.len()..]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric())
+}
+
 /// Maximum number of queries per `querybatch` request (Basilisk/OSV limit).
 const MAX_BATCH_SIZE: usize = 1000;
 

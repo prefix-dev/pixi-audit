@@ -1,5 +1,10 @@
 //! Audit transport is separate from package downloads: no channel credentials,
 //! mirror rewriting, or automatic challenge-driven login.
+//!
+//! Two credentials can authenticate a Basilisk audit, in this order of
+//! precedence: a Basilisk user API token (`bsk_…`, for CI and scripts) and the
+//! prefix.dev OAuth audience grant obtained by `--login`. Both are optional; a
+//! public audit always remains the fallback.
 
 use std::{io::IsTerminal, time::Duration};
 
@@ -7,14 +12,140 @@ use miette::IntoDiagnostic;
 use rattler::cli::auth::oauth::{
     CallbackPageTemplate, OAuthConfig, OAuthFlow, callback_page_renderer, perform_oauth_login,
 };
-use rattler_networking::{AuthenticationMiddleware, AuthenticationStorage, OfflineMiddleware};
+use rattler_networking::{
+    Authentication, AuthenticationMiddleware, AuthenticationStorage, OfflineMiddleware,
+};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
-use url::Url;
+use url::{Origin, Url};
 
-use pixi_audit::DEFAULT_BASE_URL;
+use pixi_audit::{DEFAULT_BASE_URL, TOKEN_ENV_VAR, looks_like_basilisk_token};
 
 const ISSUER: &str = "https://prefix.dev";
 const CLIENT_ID: &str = "rattler";
+
+/// A Basilisk user API token bound to the one origin it may be sent to.
+/// `Debug` never prints the token.
+#[derive(Clone)]
+pub(super) struct BasiliskToken {
+    token: String,
+    origin: Origin,
+}
+
+impl std::fmt::Debug for BasiliskToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BasiliskToken")
+            .field("token", &"<redacted>")
+            .field("origin", &self.origin.ascii_serialization())
+            .finish()
+    }
+}
+
+/// Where a token came from, for the one-line notice that explains an
+/// authenticated audit without echoing any secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TokenSource {
+    Environment,
+    AuthStore,
+}
+
+/// A token may travel only where it cannot be read in transit: TLS, or plain
+/// HTTP to the local machine (a developer's own Basilisk).
+fn token_transport_allowed(base_url: &Url) -> bool {
+    match base_url.scheme() {
+        "https" => true,
+        "http" => matches!(
+            base_url.host(),
+            Some(url::Host::Domain("localhost"))
+                | Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+                | Some(url::Host::Ipv6(std::net::Ipv6Addr::LOCALHOST))
+        ),
+        _ => false,
+    }
+}
+
+/// Resolve the Basilisk token for `base_url`, if any.
+///
+/// `PIXI_AUDIT_TOKEN` wins; a malformed value there is an error, because a
+/// CI secret that silently falls back to an anonymous audit is worse than a
+/// failed job. Otherwise a `BearerToken` stored for the *exact* audit host
+/// (`pixi auth login <host> --token bsk_…`) is used when it has the token
+/// shape; the wildcard host walk is never consulted, so a `*.prefix.dev`
+/// channel credential cannot reach the audit API. Anything else is ignored.
+pub(super) fn resolve_basilisk_token(
+    env_value: Option<String>,
+    storage: Option<&AuthenticationStorage>,
+    base_url: &Url,
+) -> miette::Result<Option<(BasiliskToken, TokenSource)>> {
+    let origin = base_url.origin();
+    if let Some(value) = env_value {
+        let value = value.trim().to_owned();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        if !looks_like_basilisk_token(&value) {
+            miette::bail!(
+                "{TOKEN_ENV_VAR} is not a Basilisk API token (expected `bsk_` followed by 40 alphanumeric characters)"
+            );
+        }
+        if !token_transport_allowed(base_url) {
+            miette::bail!(
+                "{TOKEN_ENV_VAR} is set but the audit API URL is not HTTPS (or local HTTP); refusing to send the token"
+            );
+        }
+        return Ok(Some((
+            BasiliskToken {
+                token: value,
+                origin,
+            },
+            TokenSource::Environment,
+        )));
+    }
+    let Some(storage) = storage else {
+        return Ok(None);
+    };
+    if !token_transport_allowed(base_url) {
+        return Ok(None);
+    }
+    let Some(host) = base_url.host_str() else {
+        return Ok(None);
+    };
+    match storage.get(host) {
+        Ok(Some(Authentication::BearerToken(value))) if looks_like_basilisk_token(&value) => {
+            Ok(Some((
+                BasiliskToken {
+                    token: value,
+                    origin,
+                },
+                TokenSource::AuthStore,
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Sends the Basilisk token to its origin and nowhere else. Runs ahead of the
+/// audience middleware, which skips requests that already carry
+/// `Authorization`, so an explicit token takes precedence over `--login`.
+struct BasiliskTokenMiddleware(BasiliskToken);
+
+#[async_trait::async_trait]
+impl reqwest_middleware::Middleware for BasiliskTokenMiddleware {
+    async fn handle(
+        &self,
+        mut req: reqwest::Request,
+        extensions: &mut http::Extensions,
+        next: reqwest_middleware::Next<'_>,
+    ) -> reqwest_middleware::Result<reqwest::Response> {
+        if req.url().origin() == self.0.origin && req.headers().get(AUTHORIZATION).is_none() {
+            let mut value = HeaderValue::from_str(&format!("Bearer {}", self.0.token))
+                .map_err(reqwest_middleware::Error::middleware)?;
+            value.set_sensitive(true);
+            req.headers_mut().insert(AUTHORIZATION, value);
+        }
+        next.run(req, extensions).await
+    }
+}
 
 fn production_origin(base_url: &Url) -> bool {
     base_url.origin()
@@ -50,7 +181,10 @@ pub(super) async fn build(
     login: bool,
 ) -> miette::Result<ClientWithMiddleware> {
     validate_base_url(base_url)?;
-    let storage = if production_origin(base_url) && !offline {
+    // The audience grant is production-only; a Basilisk token may also be
+    // used against a custom origin (staging, self-hosted), so the store is
+    // loaded whenever a credential could legitimately be sent.
+    let storage = if !offline && token_transport_allowed(base_url) {
         match AuthenticationStorage::from_env_and_defaults() {
             Ok(storage) => Some(storage),
             Err(_error) => {
@@ -61,6 +195,27 @@ pub(super) async fn build(
     } else {
         None
     };
+
+    let token = if offline {
+        None
+    } else {
+        resolve_basilisk_token(
+            std::env::var(TOKEN_ENV_VAR).ok(),
+            storage.as_ref(),
+            base_url,
+        )?
+    };
+    if let Some((_, source)) = &token {
+        let via = match source {
+            TokenSource::Environment => TOKEN_ENV_VAR,
+            TokenSource::AuthStore => "the stored credential for the audit host",
+        };
+        eprintln!("Auditing with the Basilisk API token from {via}");
+        if login {
+            eprintln!("A Basilisk API token is configured; skipping --login");
+        }
+    }
+    let login = login && token.is_none();
 
     if login {
         if !production_origin(base_url) {
@@ -113,13 +268,14 @@ pub(super) async fn build(
         }
     }
 
-    Ok(client_builder(offline, base_url, storage)?.build())
+    Ok(client_builder(offline, base_url, storage, token.map(|(token, _)| token))?.build())
 }
 
 fn client_builder(
     offline: bool,
     base_url: &Url,
     storage: Option<AuthenticationStorage>,
+    token: Option<BasiliskToken>,
 ) -> miette::Result<ClientBuilder> {
     validate_base_url(base_url)?;
     // Dedicated API transport: never redirect a bearer to another service.
@@ -131,6 +287,12 @@ fn client_builder(
     let mut builder = ClientBuilder::new(http);
     if offline {
         builder = builder.with(OfflineMiddleware);
+    }
+    if let Some(token) = token
+        && !offline
+        && token_transport_allowed(base_url)
+    {
+        builder = builder.with(BasiliskTokenMiddleware(token));
     }
     if production_origin(base_url)
         && !offline
@@ -207,13 +369,25 @@ mod tests {
         url: &Url,
         store: Option<AuthenticationStorage>,
     ) -> (ClientWithMiddleware, Seen) {
+        capture_client_with_token(offline, url, store, None)
+    }
+    fn capture_client_with_token(
+        offline: bool,
+        url: &Url,
+        store: Option<AuthenticationStorage>,
+        env_token: Option<&str>,
+    ) -> (ClientWithMiddleware, Seen) {
         let seen = Seen::default();
-        let http = client_builder(offline, url, store)
+        let token = resolve_basilisk_token(env_token.map(str::to_owned), store.as_ref(), url)
+            .unwrap()
+            .map(|(token, _)| token);
+        let http = client_builder(offline, url, store, token)
             .unwrap()
             .with(Capture(seen.clone()))
             .build();
         (http, seen)
     }
+    const BSK: &str = "bsk_Lm3xT9aK4fGh7JkLmN2pQrStUvWxYz0123456789";
 
     #[test]
     fn login_requires_online_interactive_non_ci_execution() {
@@ -269,6 +443,117 @@ mod tests {
             );
             assert_eq!(*seen.lock().unwrap(), vec![None]);
         }
+    }
+
+    #[tokio::test]
+    async fn environment_token_is_sent_to_the_configured_origin_only() {
+        for base in [DEFAULT_BASE_URL, "https://staging.basilisk.example/api/"] {
+            let url = Url::parse(base).unwrap();
+            let (http, seen) = capture_client_with_token(false, &url, None, Some(BSK));
+            http.post(url.join("v1/querybatch").unwrap())
+                .send()
+                .await
+                .unwrap();
+            for other in [
+                "https://other.example/v1/querybatch",
+                pixi_audit::DEFAULT_PYPI_BASE_URL,
+                pixi_audit::DEFAULT_EPSS_BASE_URL,
+                pixi_audit::DEFAULT_KEV_URL,
+            ] {
+                http.get(other).send().await.unwrap();
+            }
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![Some(format!("Bearer {BSK}")), None, None, None, None],
+                "{base}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn environment_token_takes_precedence_over_the_audience_grant() {
+        let store = storage();
+        store
+            .store(&key(), &grant("http://127.0.0.1:1/token".into(), i64::MAX))
+            .unwrap();
+        let url = Url::parse(DEFAULT_BASE_URL).unwrap();
+        let (http, seen) = capture_client_with_token(false, &url, Some(store), Some(BSK));
+        http.post(url).send().await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![Some(format!("Bearer {BSK}"))]);
+    }
+
+    #[test]
+    fn malformed_or_unsafe_environment_token_is_an_error_that_never_echoes_it() {
+        let url = Url::parse(DEFAULT_BASE_URL).unwrap();
+        for bad in [
+            "pfx-notabasilisktoken",
+            "bsk_short",
+            &format!("{BSK}x"),
+            "Bearer bsk_x",
+        ] {
+            let error = resolve_basilisk_token(Some(bad.into()), None, &url).unwrap_err();
+            assert!(!error.to_string().contains(bad), "{bad}");
+        }
+        // Blank is "unset", not an error.
+        assert!(
+            resolve_basilisk_token(Some("  ".into()), None, &url)
+                .unwrap()
+                .is_none()
+        );
+        // Non-local plain HTTP refuses to carry a secret; local plain HTTP is a
+        // developer's own instance.
+        let plain = Url::parse("http://basilisk.internal/").unwrap();
+        let error = resolve_basilisk_token(Some(BSK.into()), None, &plain).unwrap_err();
+        assert!(!error.to_string().contains(BSK));
+        for local in [
+            "http://localhost:3000/",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:3000/",
+        ] {
+            let local = Url::parse(local).unwrap();
+            assert!(
+                resolve_basilisk_token(Some(BSK.into()), None, &local)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_token_is_used_only_for_the_exact_host_and_only_with_the_token_shape() {
+        let url = Url::parse(DEFAULT_BASE_URL).unwrap();
+        // A Basilisk token stored for the exact audit host is sent.
+        let store = storage();
+        store
+            .store(
+                "api.basilisk.prefix.dev",
+                &Authentication::BearerToken(BSK.into()),
+            )
+            .unwrap();
+        let (http, seen) = capture_client(false, &url, Some(store));
+        http.post(url.clone()).send().await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![Some(format!("Bearer {BSK}"))]);
+
+        // A wildcard prefix.dev channel credential, even with the token shape, is not consulted.
+        let store = storage();
+        store
+            .store("*.prefix.dev", &Authentication::BearerToken(BSK.into()))
+            .unwrap();
+        let (http, seen) = capture_client(false, &url, Some(store));
+        http.post(url.clone()).send().await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![None]);
+
+        // Other credential kinds for the exact host are ignored too.
+        let store = storage();
+        store
+            .store(
+                "api.basilisk.prefix.dev",
+                &Authentication::CondaToken(BSK.into()),
+            )
+            .unwrap();
+        let (http, seen) = capture_client(false, &url, Some(store));
+        http.post(url).send().await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![None]);
     }
 
     #[tokio::test]
@@ -391,7 +676,7 @@ mod tests {
                 }),
             );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let http = client_builder(false, &url, None).unwrap().build();
+        let http = client_builder(false, &url, None, None).unwrap().build();
         assert_eq!(
             http.post(url.join("redirect").unwrap())
                 .send()

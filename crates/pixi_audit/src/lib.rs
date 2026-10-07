@@ -15,7 +15,8 @@ pub mod threat;
 pub use client::{
     AuditError, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL,
     DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, KEV_URL_ENV_VAR,
-    KevCatalog, KevClient, PYPI_BASE_URL_ENV_VAR, PypiAuditClient, ThreatFeedError,
+    KevCatalog, KevClient, PYPI_BASE_URL_ENV_VAR, PypiAuditClient, TOKEN_ENV_VAR, TOKEN_LENGTH,
+    TOKEN_PREFIX, ThreatFeedError, looks_like_basilisk_token,
 };
 #[cfg(feature = "lock")]
 pub use lock::{LockFileAuditError, audit_lock_file, collect_packages};

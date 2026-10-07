@@ -10,7 +10,10 @@ mod http;
 mod kev;
 mod pypi;
 
-pub use basilisk::{BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL};
+pub use basilisk::{
+    BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, TOKEN_ENV_VAR, TOKEN_LENGTH, TOKEN_PREFIX,
+    looks_like_basilisk_token,
+};
 pub use epss::{DEFAULT_EPSS_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient};
 pub use kev::{DEFAULT_KEV_URL, KEV_URL_ENV_VAR, KevCatalog, KevClient};
 pub use pypi::{DEFAULT_PYPI_BASE_URL, PYPI_BASE_URL_ENV_VAR, PypiAuditClient};

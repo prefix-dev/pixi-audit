@@ -49,10 +49,38 @@ pixi audit \
 
 Unknown environment and platform names are errors. A typo should not produce an empty, clean-looking audit.
 
+### Authenticate in CI with a Basilisk API token
+
+Auditing remains public and does not require login. To attribute audits to
+your account, for example from CI, generate a user API token under
+**Settings → API tokens** on the Basilisk explorer and expose it as
+`PIXI_AUDIT_TOKEN`:
+
+```yaml
+# GitHub Actions
+- run: pixi-audit
+  env:
+    PIXI_AUDIT_TOKEN: ${{ secrets.BASILISK_API_TOKEN }}
+```
+
+The token is sent as `Authorization: Bearer` to the configured Basilisk origin
+only, never to OSV, EPSS, KEV, or package channels, and only over HTTPS (or
+plain HTTP to `localhost`). A value that is not a Basilisk token (`bsk_`
+followed by 40 alphanumeric characters) is an error rather than a silent
+anonymous audit, so a misconfigured secret fails the job. Tokens act as their
+owner with the owner's current Basilisk permissions; revoking a token on the
+Settings page takes effect immediately, and the audit then fails with HTTP 401
+instead of falling back to a public audit.
+
+Outside CI, the same token can be stored for the audit host with
+`pixi auth login api.basilisk.prefix.dev --token bsk_…`. Only a credential
+stored for the *exact* audit host with the token shape is used; wildcard
+`*.prefix.dev` channel credentials are never sent to the audit API. When both
+are present, `PIXI_AUDIT_TOKEN` wins, and a configured token skips `--login`.
+
 ### Optional Basilisk sign-in
 
-Auditing remains public and does not require login. To explicitly obtain a
-Basilisk-specific prefix.dev token:
+To explicitly obtain a Basilisk-specific prefix.dev token:
 
 ```console
 pixi audit --login
@@ -64,7 +92,8 @@ later audits. Package-channel credentials are never used or overwritten.
 Missing credentials and login or refresh failures allow anonymous auditing.
 
 Normal audits never initiate login. `--login` requires an interactive terminal
-and is skipped whenever `CI` is set. Custom Basilisk origins stay anonymous.
+and is skipped whenever `CI` is set. Custom Basilisk origins stay anonymous
+unless a Basilisk API token is configured for them.
 The dedicated Basilisk client disables redirects; credentials are never sent
 to OSV, EPSS, or KEV services. Reports contain no tokens.
 
@@ -297,7 +326,9 @@ selects an explicit credential file; without it, the standard storage backends
 apply. `CI` disables interactive audit login whenever it is present.
 `PIXI_AUDIT_BASE_URL` must be HTTP(S), without credentials, query parameters,
 or a fragment. Changing it to another origin never forwards the production
-Basilisk token or starts a login for that origin.
+Basilisk audience token or starts a login for that origin; a `PIXI_AUDIT_TOKEN`,
+or a token stored for the custom host, is sent to that origin, so a staging or
+self-hosted Basilisk can authenticate CI the same way.
 
 EPSS and KEV responses are cached under `pixi-audit/http-cache` in the pixi cache directory (`PIXI_CACHE_DIR`, else `RATTLER_CACHE_DIR`, else `rattler/cache` in the platform's cache directory), so the KEV catalog is revalidated instead of downloaded again on every run.
 
