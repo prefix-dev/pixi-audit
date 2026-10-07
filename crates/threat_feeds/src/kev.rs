@@ -5,7 +5,7 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{ThreatFeedError, http};
-use crate::threat::{KnownExploited, RansomwareCampaignUse};
+use crate::{KnownExploited, RansomwareCampaignUse};
 
 /// CISA's Known Exploited Vulnerabilities catalog feed.
 pub const DEFAULT_KEV_URL: &str =

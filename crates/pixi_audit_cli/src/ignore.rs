@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use clap::Args;
 use jiff::civil::Date;
 use miette::{Context, IntoDiagnostic, miette};
-use pixi_audit::{IgnoreRule, IgnoreScope};
+use pixi_audit::{
+    IgnoreRule, IgnoreScope,
+    config::{IgnoreEntry, IgnoreList, IgnoreTable},
+};
 use serde::{Deserialize, Serialize, de::IntoDeserializer};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
@@ -124,22 +127,6 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
     Ok(())
 }
 
-/// The two ignore lists of `[tool.pixi-audit]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IgnoreList {
-    Always,
-    UntilFixed,
-}
-
-impl IgnoreList {
-    pub fn key(self) -> &'static str {
-        match self {
-            IgnoreList::Always => "ignore",
-            IgnoreList::UntilFixed => "ignore-until-fixed",
-        }
-    }
-}
-
 /// Which rules a call recorded and which were already listed, as labels
 /// such as `CVE-1`, `package 'x'`, or `CVE-1 in package 'x'`.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -204,12 +191,8 @@ pub fn add_rules(
     let mut added_keys: Vec<RuleKey> = Vec::new();
     for id in targets {
         let key = RuleKey::new(id, scope);
-        let rule = IgnoreRule::new(
-            id.map(str::to_string),
-            scope.clone(),
-            matches!(list, IgnoreList::UntilFixed),
-        )
-        .map_err(|error| miette!("{error}"))?;
+        let rule = IgnoreRule::new(id.map(str::to_string), scope.clone(), list.until_fixed())
+            .map_err(|error| miette!("{error}"))?;
         let label = rule.to_string();
         let listed = existing_keys.contains(&key);
         if listed || added_keys.contains(&key) {
@@ -245,7 +228,7 @@ fn audit_table(document: &mut DocumentMut) -> miette::Result<&mut Table> {
 /// forms. Entries of another shape are skipped here; the config loader
 /// reports them.
 fn entry_key(entry: &Value) -> Option<RuleKey> {
-    let entry = config::IgnoreEntry::deserialize(entry.clone().into_deserializer()).ok()?;
+    let entry = IgnoreEntry::deserialize(entry.clone().into_deserializer()).ok()?;
     let rule = entry.resolved(false).ok()?;
     Some(RuleKey::new(rule.id(), rule.scope()))
 }
@@ -263,9 +246,9 @@ fn rule_value(
         && reason.is_none()
         && until.is_none()
     {
-        config::IgnoreEntry::Id(id.to_string())
+        IgnoreEntry::Id(id.to_string())
     } else {
-        config::IgnoreEntry::Rule(config::IgnoreTable {
+        IgnoreEntry::Rule(IgnoreTable {
             id: id.map(str::to_string),
             scope: scope.clone(),
             reason: reason.map(str::to_string),

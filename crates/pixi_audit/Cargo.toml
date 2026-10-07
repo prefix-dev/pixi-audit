@@ -21,6 +21,8 @@ required-features = ["lock"]
 [dependencies]
 cvss = { workspace = true }
 futures = { workspace = true }
+jiff = { workspace = true }
+osv_client = { workspace = true }
 osv_protocol = { workspace = true }
 rattler_conda_types = { workspace = true }
 rattler_lock = { workspace = true, optional = true }
@@ -29,12 +31,15 @@ reqwest-middleware = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+threat_feeds = { workspace = true }
+toml = { workspace = true }
 url = { workspace = true }
 uv-normalize = { workspace = true }
 uv-pep440 = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "json"] }
+pixi_audit_test_support = { workspace = true }
 # TLS for the `audit_lockfile` example, which talks to the real API; library
 # consumers bring their own configured client.
 reqwest = { workspace = true, features = ["json", "rustls"] }

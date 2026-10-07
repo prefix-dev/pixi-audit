@@ -1,4 +1,5 @@
 use super::*;
+use pixi_audit::IgnoreScope;
 
 fn write(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
     let path = dir.join(name);
@@ -183,31 +184,6 @@ fn expired_ignore_rules_are_dropped() {
     );
     let config = load_config(&manifest).unwrap();
     assert_eq!(config.rules, [IgnoreRule::from_id("CVE-2".into(), false)]);
-}
-
-#[test]
-fn ignore_rules_apply_through_their_last_day() {
-    let rule = IgnoreRule::from_id("CVE-1".into(), true);
-    let entries = [IgnoreEntry::Rule(IgnoreTable {
-        id: Some("CVE-1".to_string()),
-        until: Some(toml::Value::String("2026-09-02".to_string())),
-        ..IgnoreTable::default()
-    })];
-    let (active, expired) =
-        effective_ignores(&entries, jiff::civil::date(2026, 9, 2), true).unwrap();
-    assert_eq!(active, std::slice::from_ref(&rule));
-    assert!(expired.is_empty());
-
-    let (active, expired) =
-        effective_ignores(&entries, jiff::civil::date(2026, 9, 3), true).unwrap();
-    assert!(active.is_empty());
-    assert_eq!(
-        expired,
-        [ExpiredIgnore {
-            rule,
-            until: jiff::civil::date(2026, 9, 2),
-        }]
-    );
 }
 
 #[test]

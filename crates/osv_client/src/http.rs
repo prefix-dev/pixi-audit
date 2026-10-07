@@ -7,7 +7,8 @@ use serde::de::DeserializeOwned;
 use url::Url;
 
 /// Why an HTTP exchange failed.
-pub(super) enum HttpFailure {
+#[derive(Debug)]
+pub enum HttpFailure {
     Request(reqwest_middleware::Error),
     Status {
         status: reqwest::StatusCode,
@@ -20,7 +21,7 @@ pub(super) enum HttpFailure {
 /// `url` with a trailing slash on its path. `Url::join` treats a path
 /// without one as a file: `https://host/prefix` + `v1/querybatch` would
 /// drop `prefix`.
-pub(super) fn base_url(mut url: Url) -> Url {
+pub fn base_url(mut url: Url) -> Url {
     if !url.path().ends_with('/') {
         url.set_path(&format!("{}/", url.path()));
     }
@@ -28,9 +29,7 @@ pub(super) fn base_url(mut url: Url) -> Url {
 }
 
 /// Sends `request` and decodes a successful JSON response.
-pub(super) async fn send_json<T: DeserializeOwned>(
-    request: RequestBuilder,
-) -> Result<T, HttpFailure> {
+pub async fn send_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, HttpFailure> {
     let response = request.send().await.map_err(HttpFailure::Request)?;
     let status = response.status();
     if !status.is_success() {

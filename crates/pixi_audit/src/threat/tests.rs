@@ -116,26 +116,6 @@ fn risk_scores_order_totally() {
 }
 
 #[test]
-fn ransomware_use_parses_case_insensitively() {
-    assert_eq!(
-        RansomwareCampaignUse::parse("Known"),
-        RansomwareCampaignUse::Known
-    );
-    assert_eq!(
-        RansomwareCampaignUse::parse(" known "),
-        RansomwareCampaignUse::Known
-    );
-    assert_eq!(
-        RansomwareCampaignUse::parse("Unknown"),
-        RansomwareCampaignUse::Unknown
-    );
-    assert_eq!(
-        RansomwareCampaignUse::parse(""),
-        RansomwareCampaignUse::Unknown
-    );
-}
-
-#[test]
 fn status_serializes_with_a_tag() {
     let status = ThreatDataStatus {
         epss: ThreatSourceStatus::Loaded {

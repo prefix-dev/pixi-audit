@@ -2002,6 +2002,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "osv_client"
+version = "0.1.0"
+dependencies = [
+ "astral-reqwest-middleware",
+ "axum",
+ "osv_protocol",
+ "pixi_audit_test_support",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "osv_protocol"
 version = "0.1.0"
 dependencies = [
@@ -2093,14 +2109,19 @@ dependencies = [
  "axum",
  "cvss",
  "futures",
+ "jiff",
+ "osv_client",
  "osv_protocol",
+ "pixi_audit_test_support",
  "rattler_conda_types",
  "rattler_lock",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "threat_feeds",
  "tokio",
+ "toml",
  "url",
  "uv-normalize",
  "uv-pep440",
@@ -2120,6 +2141,7 @@ dependencies = [
  "jiff",
  "miette 7.6.0",
  "pixi_audit",
+ "pixi_audit_test_support",
  "rattler_conda_types",
  "reqwest",
  "serde",
@@ -2131,6 +2153,17 @@ dependencies = [
  "toml_edit",
  "url",
  "uv-pep440",
+]
+
+[[package]]
+name = "pixi_audit_test_support"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "osv_protocol",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3379,6 +3412,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "threat_feeds"
+version = "0.1.0"
+dependencies = [
+ "astral-reqwest-middleware",
+ "axum",
+ "osv_client",
+ "pixi_audit_test_support",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
 ]
 
 [[package]]

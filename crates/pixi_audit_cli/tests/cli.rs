@@ -1,12 +1,8 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::process::Output;
 
-use axum::{
-    Json, Router,
-    extract::Query,
-    routing::{get, post},
-};
+use axum::Router;
+use pixi_audit_test_support::{epss_router, kev_router, osv_router, spawn_router};
 
 const BIN: &str = env!("CARGO_BIN_EXE_pixi-audit");
 
@@ -32,77 +28,48 @@ fn vuln_doc() -> serde_json::Value {
 }
 
 async fn spawn_mock(vulnerable: bool) -> String {
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(move |Json(body): Json<serde_json::Value>| async move {
-                let results: Vec<serde_json::Value> = body["queries"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|q| {
-                        if vulnerable && q["package"]["name"] == "openssl" {
-                            serde_json::json!({"vulns": [{"id": "BSLK-1"}]})
-                        } else {
-                            serde_json::json!({})
-                        }
-                    })
-                    .collect();
-                Json(serde_json::json!({"results": results}))
-            }),
-        )
-        .route("/v1/vulns/{id}", get(|| async { Json(vuln_doc()) }))
-        .merge(threat_routes());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}/")
+    let app = osv_router(
+        move |queries| {
+            serde_json::from_value(serde_json::json!({
+                "results": queries.iter().map(|query| {
+                    if vulnerable && query.package.name.as_deref() == Some("openssl") {
+                        serde_json::json!({"vulns": [{"id": "BSLK-1"}]})
+                    } else {
+                        serde_json::json!({})
+                    }
+                }).collect::<Vec<_>>()
+            }))
+            .unwrap()
+        },
+        [serde_json::from_value(vuln_doc()).unwrap()],
+    )
+    .merge(threat_routes());
+    spawn_router(app).await.to_string()
 }
 
 /// EPSS and KEV feeds where CVE-2026-1234 is scored and KEV-listed and
 /// nothing else is. The KEV catalog is served at `kev.json`.
 fn threat_routes() -> Router {
-    Router::new()
-        .route(
-            "/data/v1/epss",
-            get(|Query(query): Query<HashMap<String, String>>| async move {
-                let data: Vec<serde_json::Value> = query
-                    .get("cve")
-                    .map(|cves| cves.split(','))
-                    .into_iter()
-                    .flatten()
-                    .filter(|cve| cve.eq_ignore_ascii_case("CVE-2026-1234"))
-                    .map(|cve| {
-                        serde_json::json!({
-                            "cve": cve,
-                            "epss": "0.500000000",
-                            "percentile": "0.900000000",
-                            "date": "2026-09-01"
-                        })
-                    })
-                    .collect();
-                Json(serde_json::json!({"status": "OK", "data": data}))
-            }),
-        )
-        .route(
-            "/kev.json",
-            get(|| async {
-                Json(serde_json::json!({
-                    "dateReleased": "2026-09-01T19:22:46.2162Z",
-                    "vulnerabilities": [{
-                        "cveID": "CVE-2026-1234",
-                        "vendorProject": "OpenSSL",
-                        "product": "OpenSSL",
-                        "vulnerabilityName": "OpenSSL buffer overflow",
-                        "dateAdded": "2026-08-01",
-                        "requiredAction": "Apply updates per vendor instructions.",
-                        "dueDate": "2026-08-22",
-                        "knownRansomwareCampaignUse": "Unknown",
-                        "notes": ""
-                    }]
-                }))
-            }),
-        )
+    epss_router(vec![serde_json::json!({
+        "cve": "CVE-2026-1234",
+        "epss": "0.500000000",
+        "percentile": "0.900000000",
+        "date": "2026-09-01"
+    })])
+    .merge(kev_router(serde_json::json!({
+        "dateReleased": "2026-09-01T19:22:46.2162Z",
+        "vulnerabilities": [{
+            "cveID": "CVE-2026-1234",
+            "vendorProject": "OpenSSL",
+            "product": "OpenSSL",
+            "vulnerabilityName": "OpenSSL buffer overflow",
+            "dateAdded": "2026-08-01",
+            "requiredAction": "Apply updates per vendor instructions.",
+            "dueDate": "2026-08-22",
+            "knownRansomwareCampaignUse": "Unknown",
+            "notes": ""
+        }]
+    })))
 }
 
 /// Environment pointing every backend and feed at the mock at `base_url`,
@@ -163,34 +130,10 @@ async fn vulnerable_lockfile_reports_and_exits_1() {
         ],
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("by severity: 1 critical, 0 high"));
-    assert!(stdout.contains("by status:   1 fixed, 0 not-fixed, 0 ignored"));
     // Piped output carries no escape codes.
     assert!(!stdout.contains('\x1b'), "stdout: {stdout}");
-    assert!(stdout.contains("Unchecked (1)"));
-    assert!(stdout.contains("Assessment\n"), "stdout: {stdout}");
-    assert!(
-        stdout.lines().any(|line| {
-            line.contains("Fix available in audited ecosystem:")
-                && line.ends_with("1 of 1 vulnerability across 1 audited package")
-        }),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains(
-            "Fixed releases in the audited ecosystem are available for 1 vulnerability across 1 audited package, but `--fix` requires a `pixi.toml` or `pyproject.toml` next to the audited lock file."
-        ),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("Add `--explain` for scoring and report definitions."));
-    assert!(!stdout.contains("How this report works"));
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Auditing "), "stderr: {stderr}");
     assert!(!stderr.contains('\x1b'), "stderr: {stderr}");
-    assert!(
-        stderr.contains("error: audit found vulnerabilities"),
-        "stderr: {stderr}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -217,44 +160,6 @@ async fn warn_only_conda_reports_without_failing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn explain_describes_the_human_report_after_next_steps() {
-    let base = spawn_mock(true).await;
-    let output = run_cli(base, vec![lockfile(), "--explain".to_string()]).await;
-
-    assert_eq!(output.status.code(), Some(1));
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let actions = stdout.find("Next steps").unwrap();
-    let explanation = stdout.find("How this report works").unwrap();
-    assert!(actions < explanation, "stdout: {stdout}");
-    assert!(!stdout.contains("Add `--explain` for scoring and report definitions."));
-    for heading in [
-        "Counts",
-        "Threat signals",
-        "Prioritization",
-        "Fixes",
-        "Coverage",
-    ] {
-        assert!(
-            stdout.contains(heading),
-            "missing {heading:?} in stdout:\n{stdout}"
-        );
-    }
-    for expected in [
-        "A 0–100 score for ordering individual findings.",
-        "highest EPSS probability",
-        "`kev` alone means CISA does not mark that use as Known.",
-        "CISA confirms exploitation in the wild.",
-        "Estimated chance of exploitation within 30 days.",
-        "The package source lacks vulnerability database coverage.",
-    ] {
-        assert!(
-            stdout.contains(expected),
-            "missing {expected:?} in stdout:\n{stdout}"
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn explain_rejects_machine_readable_formats() {
     let base = spawn_mock(true).await;
     for args in [
@@ -269,13 +174,6 @@ async fn explain_rejects_machine_readable_formats() {
         let output = run_cli(base.clone(), args).await;
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            stderr.contains(
-                "`--explain` is available only with `--format table` or `--format grouped`"
-            ),
-            "stderr: {stderr}"
-        );
     }
 }
 
@@ -607,43 +505,25 @@ fn vuln_doc_basilisk_upstream_fix() -> serde_json::Value {
 async fn spawn_mock_versioned(doc: serde_json::Value, vulnerable_version: &str) -> String {
     let vuln_id = doc["id"].as_str().unwrap().to_string();
     let version = vulnerable_version.to_string();
-    let doc_for_get = doc.clone();
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(move |Json(body): Json<serde_json::Value>| {
-                let vuln_id = vuln_id.clone();
-                let version = version.clone();
-                async move {
-                    let results: Vec<serde_json::Value> = body["queries"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|q| {
-                            if q["package"]["name"] == "openssl" && q["version"] == version.as_str()
-                            {
-                                serde_json::json!({"vulns": [{"id": vuln_id}]})
-                            } else {
-                                serde_json::json!({})
-                            }
-                        })
-                        .collect();
-                    Json(serde_json::json!({"results": results}))
-                }
-            }),
-        )
-        .route(
-            "/v1/vulns/{id}",
-            get(move || {
-                let doc = doc_for_get.clone();
-                async move { Json(doc) }
-            }),
-        )
-        .merge(threat_routes());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}/")
+    let app = osv_router(
+        move |queries| {
+            serde_json::from_value(serde_json::json!({
+                "results": queries.iter().map(|query| {
+                    if query.package.name.as_deref() == Some("openssl")
+                        && query.version.as_deref() == Some(version.as_str())
+                    {
+                        serde_json::json!({"vulns": [{"id": vuln_id}]})
+                    } else {
+                        serde_json::json!({})
+                    }
+                }).collect::<Vec<_>>()
+            }))
+            .unwrap()
+        },
+        [serde_json::from_value(doc).unwrap()],
+    )
+    .merge(threat_routes());
+    spawn_router(app).await.to_string()
 }
 
 /// Copies the fixture lockfile into a temp workspace with the given

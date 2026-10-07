@@ -195,8 +195,15 @@ Requests time out after 30 seconds. EPSS and KEV responses are cached in the Pix
 ## Rust crates
 
 - `pixi_audit_cli`: CLI and report rendering.
-- `pixi_audit`: lock file auditing and `AuditReport` types.
-- `osv_protocol`: types for OSV-compatible clients and servers.
+- `pixi_audit`: backend selection, lock file auditing, report assembly, ignore rules, risk scoring, and `AuditReport` types.
+- `osv_protocol`: serializable OSV wire types, without an HTTP client.
+- `osv_client`: OSV HTTP client with ordered batching, pagination, and document fetching.
+- `threat_feeds`: EPSS and KEV clients, catalogs, and records, independent of audit reports.
+- `pixi_audit_test_support`: shared mock services for workspace tests. Dev-only, unpublished, and never depends on `pixi_audit`.
+
+The HTTP clients take a caller-configured `reqwest_middleware::ClientWithMiddleware` and do not choose TLS, timeouts, caching, or authentication. `BasiliskClient` and `PypiAuditClient` remain distinct types in `pixi_audit`. `threat_feeds` shares the send/status/JSON path through `osv_client::http`.
+
+Use `pixi_audit::audit` to run an audit and `pixi_audit::types` for OSV wire types. The reusable `[tool.pixi-audit]` schema, including ignore entries and expiry handling, lives in `pixi_audit::config`; the CLI owns manifest I/O and warnings. `IgnoreSpec` takes one list of parsed `IgnoreRule`s plus `ignore_unfixed`. `AuditReport::fixable_package_names()` returns distinct borrowed names with an installable fix, excluding ignored and upstream-only findings.
 
 The library enables `rattler_lock` support by default. Try the example:
 
@@ -211,7 +218,7 @@ pixi install
 pixi run check
 ```
 
-`check` runs formatting, Clippy, workspace tests, and no-default-features checks. Tests use local mock servers and need no credentials.
+`check` runs formatting, Clippy, workspace tests, and no-default-features checks. Tests use shared local mock servers and need no credentials; suppression and alias-merging tests run pure report assembly without a server.
 
 Install the current checkout with `pixi run install`. See [RELEASING.md](RELEASING.md) for release instructions.
 

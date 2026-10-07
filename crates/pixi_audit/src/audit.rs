@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 
 use futures::{StreamExt, TryStreamExt};
+use threat_feeds::{EpssClient, EpssScore, KevCatalog, KevClient};
 
 use findings::FindingGroups;
 
@@ -15,13 +16,13 @@ use crate::{
         BasiliskMatch, FixedVersions, basilisk_advisory_url, basilisk_match, fixed_versions,
         pypi_advisory_url,
     },
-    client::{AuditError, BasiliskClient, EpssClient, KevCatalog, KevClient, PypiAuditClient},
+    client::{AuditError, BasiliskClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, Finding, FixStatus, IgnoreReason, IgnoreRule, IgnoreSpec,
         MatchApplicability, PackageEcosystem, PackageId, SeverityBand, SortStrategy,
         mean_cvss_base_score,
     },
-    threat::{EpssScore, RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
+    threat::{RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
 };
 
@@ -116,9 +117,9 @@ struct Backends<'a> {
 }
 
 impl Backends<'_> {
-    fn client(&self, backend: Backend) -> &BasiliskClient {
+    fn client(&self, backend: Backend) -> &osv_client::OsvClient {
         match backend {
-            Backend::Basilisk => self.basilisk,
+            Backend::Basilisk => self.basilisk.osv_client(),
             Backend::Pypi => self.pypi.osv_client(),
         }
     }
@@ -212,7 +213,7 @@ async fn fetch_documents(
         .map(|(backend, id)| async move {
             match backends.client(backend).get_vuln(&id).await {
                 Ok(doc) => Ok(((backend, id), doc)),
-                Err(AuditError::Status { status, .. })
+                Err(osv_client::Error::Status { status, .. })
                     if backend.tolerates_missing_document()
                         && status == reqwest::StatusCode::NOT_FOUND =>
                 {
@@ -222,7 +223,7 @@ async fn fetch_documents(
                     };
                     Ok(((backend, id), doc))
                 }
-                Err(err) => Err(err),
+                Err(err) => Err(err.into()),
             }
         })
         .buffer_unordered(MAX_CONCURRENT_DETAIL_FETCHES)
@@ -252,12 +253,12 @@ pub async fn audit(
         basilisk: client,
         pypi: pypi_client,
     };
-    let mut report = AuditReport::default();
+    let mut unchecked = Vec::new();
     let mut planned = Vec::with_capacity(packages.len());
     for package in &packages {
         match plan_query(package) {
             Some(query) => planned.push(query),
-            None => report.unchecked.push(package.clone()),
+            None => unchecked.push(package.clone()),
         }
     }
     // The KEV catalog does not depend on the findings, so it downloads
@@ -280,9 +281,30 @@ pub async fn audit(
         })
         .collect();
     let documents = fetch_documents(&backends, references).await?;
+    let mut report = assemble_report(&planned, &results, &documents, ignore)?;
+    report.unchecked = unchecked;
 
+    let epss_status = attach_threat_data(&mut report, threat.epss, &kev_catalog).await;
+    report.threat_data = ThreatDataStatus {
+        epss: epss_status,
+        kev: kev_status,
+    };
+    report.sort(SortStrategy::default());
+
+    report.summary.unchecked = report.unchecked.len();
+    Ok(report)
+}
+
+/// Assembles findings and suppressions after all backend documents are fetched.
+fn assemble_report(
+    planned: &[PlannedQuery<'_>],
+    results: &[BatchResult],
+    documents: &HashMap<(Backend, String), OsvVulnerability>,
+    ignore: IgnoreSpec<'_>,
+) -> Result<AuditReport, AuditError> {
+    let mut report = AuditReport::default();
     let mut suppressions = Suppressions::from_spec(ignore);
-    for (query, result) in planned.iter().zip(&results) {
+    for (query, result) in planned.iter().zip(results) {
         let mut findings = FindingGroups::with_capacity(result.vulns.len());
         let package = query.package;
         for vuln in &result.vulns {
@@ -323,18 +345,9 @@ pub async fn audit(
         }
     }
     report.unmatched_ignores = suppressions.unmatched();
-
-    let epss_status = attach_threat_data(&mut report, threat.epss, &kev_catalog).await;
-    report.threat_data = ThreatDataStatus {
-        epss: epss_status,
-        kev: kev_status,
-    };
-    report.sort(SortStrategy::default());
-
     report.summary.audited = planned.len();
     report.summary.vulnerable = report.vulnerabilities.len();
     report.summary.ignored = report.ignored.len();
-    report.summary.unchecked = report.unchecked.len();
     Ok(report)
 }
 

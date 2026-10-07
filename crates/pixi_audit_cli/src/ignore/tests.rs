@@ -38,7 +38,7 @@ fn apply_to_package(
     (document.to_string(), outcome)
 }
 
-fn entries(text: &str, list: IgnoreList) -> Vec<config::IgnoreEntry> {
+fn entries(text: &str, list: IgnoreList) -> Vec<IgnoreEntry> {
     let manifest: toml::Value = toml::from_str(text).unwrap();
     manifest["tool"]["pixi-audit"][list.key()]
         .clone()
@@ -60,13 +60,13 @@ fn package_rules_are_written_and_deduplicated_by_id_and_package() {
     assert!(outcome.existing.is_empty());
     assert_eq!(
         entries(&text, IgnoreList::Always),
-        [config::IgnoreEntry::Rule(config::IgnoreTable {
+        [IgnoreEntry::Rule(IgnoreTable {
             scope: IgnoreScope {
                 package: Some("vendored".to_string()),
                 ..IgnoreScope::default()
             },
             reason: Some("never runs".to_string()),
-            ..config::IgnoreTable::default()
+            ..IgnoreTable::default()
         })]
     );
 
@@ -82,13 +82,13 @@ fn package_rules_are_written_and_deduplicated_by_id_and_package() {
     );
     assert_eq!(
         entries(&text, IgnoreList::Always)[1],
-        config::IgnoreEntry::Rule(config::IgnoreTable {
+        IgnoreEntry::Rule(IgnoreTable {
             id: Some("CVE-1".to_string()),
             scope: IgnoreScope {
                 package: Some("Vendored".to_string()),
                 ..IgnoreScope::default()
             },
-            ..config::IgnoreTable::default()
+            ..IgnoreTable::default()
         })
     );
     let (_, outcome) = apply(&text, IgnoreList::Always, &["CVE-1"], None, None);
@@ -109,7 +109,7 @@ fn creates_the_table_and_list_in_a_bare_manifest() {
     );
     assert_eq!(
         entries(&text, IgnoreList::Always),
-        [config::IgnoreEntry::Id("CVE-1".to_string())]
+        [IgnoreEntry::Id("CVE-1".to_string())]
     );
     assert_eq!(
         outcome,
@@ -145,11 +145,11 @@ fn expiry_and_reason_round_trip() {
     let entries = entries(&text, IgnoreList::UntilFixed);
     assert_eq!(
         entries,
-        [config::IgnoreEntry::Rule(config::IgnoreTable {
+        [IgnoreEntry::Rule(IgnoreTable {
             id: Some("CVE-3".to_string()),
             reason: Some("only in tests".to_string()),
             until: Some(toml::Value::String("2026-12-01".to_string())),
-            ..config::IgnoreTable::default()
+            ..IgnoreTable::default()
         })]
     );
 }
@@ -261,7 +261,7 @@ ignore = [42, { id = "CVE-1", package = 7 }, { id = "CVE-1", reason = false }]
     assert!(
         manifest["tool"]["pixi-audit"]["ignore"]
             .clone()
-            .try_into::<Vec<config::IgnoreEntry>>()
+            .try_into::<Vec<IgnoreEntry>>()
             .is_err()
     );
 }

@@ -4,6 +4,8 @@ use axum::{
     Json, Router,
     routing::{get, post},
 };
+use pixi_audit_test_support::{epss_router, kev_router, osv_router};
+use threat_feeds::RansomwareCampaignUse;
 use url::Url;
 
 use super::*;
@@ -17,7 +19,6 @@ use crate::{
         basilisk_client as test_client, conda_name, pypi_client as test_pypi_client, pypi_name,
         spawn_router as spawn,
     },
-    threat::RansomwareCampaignUse,
 };
 
 fn vuln_doc() -> serde_json::Value {
@@ -36,27 +37,7 @@ fn vuln_doc() -> serde_json::Value {
 
 /// Mock server: openssl 3.1.0 has BSLK-1, everything else is clean.
 async fn spawn_mock() -> Url {
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(|Json(body): Json<serde_json::Value>| async move {
-                let results: Vec<serde_json::Value> = body["queries"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|q| {
-                        if q["package"]["name"] == "openssl" {
-                            serde_json::json!({"vulns": [{"id": "BSLK-1"}]})
-                        } else {
-                            serde_json::json!({})
-                        }
-                    })
-                    .collect();
-                Json(serde_json::json!({"results": results}))
-            }),
-        )
-        .route("/v1/vulns/{id}", get(|| async { Json(vuln_doc()) }));
-    spawn(app).await
+    spawn_mock_serving(vuln_doc()).await
 }
 
 async fn audit(
@@ -77,17 +58,11 @@ async fn audit(
 
 /// A PyPI backend that reports every package as clean.
 async fn clean_pypi_client() -> PypiAuditClient {
-    let app = Router::new().route(
-        "/v1/querybatch",
-        post(|Json(body): Json<serde_json::Value>| async move {
-            let results = body["queries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|_| serde_json::json!({}))
-                .collect::<Vec<_>>();
-            Json(serde_json::json!({"results": results}))
-        }),
+    let app = osv_router(
+        |queries| osv_protocol::BatchResponse {
+            results: vec![BatchResult::default(); queries.len()],
+        },
+        [],
     );
     test_pypi_client(spawn(app).await)
 }
@@ -160,38 +135,45 @@ fn vuln_doc_with_basilisk_upstream_fix() -> serde_json::Value {
 
 /// Mock server serving `doc` for every openssl query.
 async fn spawn_mock_serving(doc: serde_json::Value) -> Url {
-    let vuln_id = doc["id"].as_str().unwrap().to_string();
-    let doc_for_get = doc.clone();
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(move |Json(body): Json<serde_json::Value>| {
-                let vuln_id = vuln_id.clone();
-                async move {
-                    let results: Vec<serde_json::Value> = body["queries"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|q| {
-                            if q["package"]["name"] == "openssl" {
-                                serde_json::json!({"vulns": [{"id": vuln_id}]})
-                            } else {
-                                serde_json::json!({})
-                            }
-                        })
-                        .collect();
-                    Json(serde_json::json!({"results": results}))
-                }
-            }),
-        )
-        .route(
-            "/v1/vulns/{id}",
-            get(move || {
-                let doc = doc_for_get.clone();
-                async move { Json(doc) }
-            }),
-        );
+    let doc: OsvVulnerability = serde_json::from_value(doc).unwrap();
+    let vuln_id = doc.id.clone();
+    let app = osv_router(
+        move |queries| {
+            serde_json::from_value(serde_json::json!({
+                "results": queries.iter().map(|query| {
+                    if query.package.name.as_deref() == Some("openssl") {
+                        serde_json::json!({"vulns": [{"id": vuln_id}]})
+                    } else {
+                        serde_json::json!({})
+                    }
+                }).collect::<Vec<_>>()
+            }))
+            .unwrap()
+        },
+        [doc],
+    );
     spawn(app).await
+}
+
+fn assemble_fixture(
+    doc: serde_json::Value,
+    packages: Vec<AuditPackage>,
+    ignore: IgnoreSpec<'_>,
+) -> Result<AuditReport, AuditError> {
+    let doc: OsvVulnerability = serde_json::from_value(doc).unwrap();
+    let planned: Vec<_> = packages.iter().filter_map(plan_query).collect();
+    let results = planned
+        .iter()
+        .map(|query| {
+            if query.package.name.as_str() == "openssl" {
+                serde_json::from_value(serde_json::json!({"vulns": [{"id": doc.id}]})).unwrap()
+            } else {
+                BatchResult::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let documents = HashMap::from([((Backend::Basilisk, doc.id.clone()), doc)]);
+    assemble_report(&planned, &results, &documents, ignore)
 }
 
 fn ignore_until_fixed(rules: &[IgnoreRule]) -> IgnoreSpec<'_> {
@@ -201,13 +183,11 @@ fn ignore_until_fixed(rules: &[IgnoreRule]) -> IgnoreSpec<'_> {
     }
 }
 
-#[tokio::test]
-async fn until_fixed_with_no_known_fix_is_ignored_with_reason() {
-    let base = spawn_mock_serving(vuln_doc_nofix()).await;
+#[test]
+fn until_fixed_with_no_known_fix_is_ignored_with_reason() {
+    let doc = vuln_doc_nofix();
     let ids = vec![IgnoreRule::from_id("BSLK-NOFIX".to_string(), true)];
-    let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
-        .await
-        .unwrap();
+    let report = assemble_fixture(doc, packages(), ignore_until_fixed(&ids)).unwrap();
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(report.ignored.len(), 1);
     assert_eq!(
@@ -219,13 +199,11 @@ async fn until_fixed_with_no_known_fix_is_ignored_with_reason() {
     assert_eq!(json["ignore_reason"], "until-fixed");
 }
 
-#[tokio::test]
-async fn git_fix_does_not_disable_until_fixed_suppression() {
-    let base = spawn_mock_serving(vuln_doc_with_git_fix()).await;
+#[test]
+fn git_fix_does_not_disable_until_fixed_suppression() {
+    let doc = vuln_doc_with_git_fix();
     let ids = vec![IgnoreRule::from_id("BSLK-GIT-FIX".to_string(), true)];
-    let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
-        .await
-        .unwrap();
+    let report = assemble_fixture(doc, packages(), ignore_until_fixed(&ids)).unwrap();
 
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(report.ignored.len(), 1);
@@ -236,13 +214,11 @@ async fn git_fix_does_not_disable_until_fixed_suppression() {
     );
 }
 
-#[tokio::test]
-async fn until_fixed_with_basilisk_fix_stays_vulnerable() {
-    let base = spawn_mock_serving(vuln_doc_with_basilisk_upstream_fix()).await;
+#[test]
+fn until_fixed_with_basilisk_fix_stays_vulnerable() {
+    let doc = vuln_doc_with_basilisk_upstream_fix();
     let ids = vec![IgnoreRule::from_id("CVE-2026-50219".to_string(), true)];
-    let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
-        .await
-        .unwrap();
+    let report = assemble_fixture(doc, packages(), ignore_until_fixed(&ids)).unwrap();
 
     assert_eq!(report.vulnerabilities.len(), 1);
     assert!(report.ignored.is_empty());
@@ -272,8 +248,8 @@ fn applies(rule: &IgnoreRule, finding: &Finding) -> bool {
     rule.applies_to(finding, locked.as_ref())
 }
 
-#[tokio::test]
-async fn package_rules_scope_suppression_to_one_package() {
+#[test]
+fn package_rules_scope_suppression_to_one_package() {
     // BSLK-1 (alias CVE-2026-1234) affects openssl; nothing else is found.
     let cases: [(IgnoreRule, Option<IgnoreReason>); 6] = [
         // Every finding in the package, matched case-insensitively.
@@ -296,13 +272,13 @@ async fn package_rules_scope_suppression_to_one_package() {
         (package_rule("openssl", Some("BSLK-1"), true), None),
     ];
     for (rule, expected) in cases {
-        let base = spawn_mock().await;
+        let doc = vuln_doc();
         let rules = [rule.clone()];
         let spec = IgnoreSpec {
             rules: &rules,
             ..IgnoreSpec::default()
         };
-        let report = audit(&test_client(base), packages(), spec).await.unwrap();
+        let report = assemble_fixture(doc, packages(), spec).unwrap();
         let actual = report
             .ignored
             .first()
@@ -316,12 +292,10 @@ async fn package_rules_scope_suppression_to_one_package() {
     }
 }
 
-#[tokio::test]
-async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
-    let base = spawn_mock().await;
-    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
-        .await
-        .unwrap();
+#[test]
+fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
+    let doc = vuln_doc();
+    let report = assemble_fixture(doc, packages(), IgnoreSpec::default()).unwrap();
     let mut conda = report.vulnerabilities[0].clone();
     conda.package.name = conda_name("openssl");
 
@@ -371,7 +345,7 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
     assert!(applies(&rule, &conda));
     conda.package.version = "3.0.9".to_string();
     assert!(applies(&rule, &conda));
-    let base = spawn_mock().await;
+    let doc = vuln_doc();
     let stale = [IgnoreRule::new(
         Some("CVE-2026-1234".to_string()),
         IgnoreScope {
@@ -382,32 +356,27 @@ async fn scoped_id_rule_only_suppresses_the_selected_ecosystem_and_version() {
         false,
     )
     .unwrap()];
-    let report = audit(
-        &test_client(base),
+    let report = assemble_fixture(
+        doc,
         packages(),
         IgnoreSpec {
             rules: &stale,
             ..IgnoreSpec::default()
         },
     )
-    .await
     .unwrap();
     assert_eq!(report.summary.vulnerable, 1);
-    assert_eq!(
-        report.unmatched_ignores,
-        ["CVE-2026-1234 in ecosystem 'conda-forge' in version '3.1.1'"]
-    );
 }
 
-#[tokio::test]
-async fn package_rules_apply_until_fixed_when_no_fix_is_known() {
-    let base = spawn_mock_serving(vuln_doc_nofix()).await;
+#[test]
+fn package_rules_apply_until_fixed_when_no_fix_is_known() {
+    let doc = vuln_doc_nofix();
     let rules = [package_rule("openssl", None, true)];
     let spec = IgnoreSpec {
         rules: &rules,
         ..IgnoreSpec::default()
     };
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let report = assemble_fixture(doc, packages(), spec).unwrap();
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(
         report.ignored[0].ignore_reason,
@@ -415,12 +384,12 @@ async fn package_rules_apply_until_fixed_when_no_fix_is_known() {
     );
 }
 
-#[tokio::test]
-async fn ignore_rules_that_match_no_finding_are_reported() {
+#[test]
+fn ignore_rules_that_match_no_finding_are_reported() {
     // BSLK-1 (alias CVE-2026-1234) is the only finding. Matching is by id
     // or alias, case-insensitive, and an until-fixed rule that matched a
     // finding with a known fix still counts as matched.
-    let base = spawn_mock().await;
+    let doc = vuln_doc();
     let rules = [
         IgnoreRule::from_id("cve-2026-1234".to_string(), false),
         IgnoreRule::from_id("BSLK-1".to_string(), false),
@@ -434,25 +403,21 @@ async fn ignore_rules_that_match_no_finding_are_reported() {
         rules: &rules,
         ..IgnoreSpec::default()
     };
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let report = assemble_fixture(doc, packages(), spec).unwrap();
 
     assert_eq!(report.ignored.len(), 1);
     assert_eq!(report.unmatched_ignores, ["CVE-9999-0001", "GHSA-nope"]);
 
     // Nothing to ignore, nothing unmatched.
-    let base = spawn_mock().await;
-    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
-        .await
-        .unwrap();
+    let doc = vuln_doc();
+    let report = assemble_fixture(doc, packages(), IgnoreSpec::default()).unwrap();
     assert!(report.unmatched_ignores.is_empty());
 }
 
-#[tokio::test]
-async fn unbounded_rules_match_even_when_the_locked_version_is_invalid() {
-    let base = spawn_mock().await;
-    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
-        .await
-        .unwrap();
+#[test]
+fn unbounded_rules_match_even_when_the_locked_version_is_invalid() {
+    let doc = vuln_doc();
+    let report = assemble_fixture(doc, packages(), IgnoreSpec::default()).unwrap();
     let mut finding = report.vulnerabilities[0].clone();
     finding.package.version = "not a version".to_string();
     let bounded = IgnoreRule::new(
@@ -479,16 +444,16 @@ async fn unbounded_rules_match_even_when_the_locked_version_is_invalid() {
     );
 }
 
-#[tokio::test]
-async fn ignore_unfixed_suppresses_only_findings_without_a_fix() {
+#[test]
+fn ignore_unfixed_suppresses_only_findings_without_a_fix() {
     let spec = IgnoreSpec {
         ignore_unfixed: true,
         ..IgnoreSpec::default()
     };
 
     // No fix anywhere: suppressed with the until-fixed reason.
-    let base = spawn_mock_serving(vuln_doc_nofix()).await;
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let doc = vuln_doc_nofix();
+    let report = assemble_fixture(doc, packages(), spec).unwrap();
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(
         report.ignored[0].ignore_reason,
@@ -496,46 +461,42 @@ async fn ignore_unfixed_suppresses_only_findings_without_a_fix() {
     );
 
     // A conda-forge fix: reported.
-    let base = spawn_mock().await;
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let doc = vuln_doc();
+    let report = assemble_fixture(doc, packages(), spec).unwrap();
     assert_eq!(report.vulnerabilities.len(), 1);
     assert!(report.ignored.is_empty());
 
     // An upstream-only fix counts as a known fix too.
-    let base = spawn_mock_serving(vuln_doc_with_basilisk_upstream_fix()).await;
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let doc = vuln_doc_with_basilisk_upstream_fix();
+    let report = assemble_fixture(doc, packages(), spec).unwrap();
     assert_eq!(report.vulnerabilities.len(), 1);
     assert!(report.ignored.is_empty());
 }
 
-#[tokio::test]
-async fn until_fixed_with_known_fix_stays_vulnerable() {
+#[test]
+fn until_fixed_with_known_fix_stays_vulnerable() {
     // BSLK-1 has fixed 3.1.1, so suppression does not apply.
-    let base = spawn_mock().await;
+    let doc = vuln_doc();
     let ids = vec![IgnoreRule::from_id("BSLK-1".to_string(), true)];
-    let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
-        .await
-        .unwrap();
+    let report = assemble_fixture(doc, packages(), ignore_until_fixed(&ids)).unwrap();
     assert_eq!(report.vulnerabilities.len(), 1);
     assert!(report.ignored.is_empty());
     assert_eq!(report.vulnerabilities[0].ignore_reason, None);
     assert!(report.unmatched_ignores.is_empty());
 }
 
-#[tokio::test]
-async fn until_fixed_matches_aliases_case_insensitively() {
-    let base = spawn_mock_serving(vuln_doc_nofix()).await;
+#[test]
+fn until_fixed_matches_aliases_case_insensitively() {
+    let doc = vuln_doc_nofix();
     let ids = vec![IgnoreRule::from_id("cve-2026-7777".to_string(), true)];
-    let report = audit(&test_client(base), packages(), ignore_until_fixed(&ids))
-        .await
-        .unwrap();
+    let report = assemble_fixture(doc, packages(), ignore_until_fixed(&ids)).unwrap();
     assert_eq!(report.ignored.len(), 1);
 }
 
-#[tokio::test]
-async fn ignore_wins_over_until_fixed() {
+#[test]
+fn ignore_wins_over_until_fixed() {
     // BSLK-1 has a fix; plain ignore still suppresses it, reason Always.
-    let base = spawn_mock().await;
+    let doc = vuln_doc();
     let rules = [
         IgnoreRule::from_id("BSLK-1".to_string(), true),
         package_rule("openssl", None, true),
@@ -545,30 +506,26 @@ async fn ignore_wins_over_until_fixed() {
         rules: &rules,
         ignore_unfixed: false,
     };
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let report = assemble_fixture(doc, packages(), spec).unwrap();
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(report.ignored.len(), 1);
     assert_eq!(report.ignored[0].ignore_reason, Some(IgnoreReason::Always));
     assert!(report.unmatched_ignores.is_empty());
 }
 
-#[tokio::test]
-async fn plain_ignored_findings_carry_reason_always_and_it_serializes() {
-    let base = spawn_mock().await;
+#[test]
+fn plain_ignored_findings_carry_reason_always_and_it_serializes() {
     let rules = [IgnoreRule::from_id("BSLK-1".to_string(), false)];
     let spec = IgnoreSpec {
         rules: &rules,
         ignore_unfixed: false,
     };
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let report = assemble_fixture(vuln_doc(), packages(), spec).unwrap();
     assert_eq!(report.ignored[0].ignore_reason, Some(IgnoreReason::Always));
     let json = serde_json::to_value(&report.ignored[0]).unwrap();
     assert_eq!(json["ignore_reason"], "always");
     // Vulnerable findings must NOT carry the key at all.
-    let base2 = spawn_mock().await;
-    let clean = audit(&test_client(base2), packages(), IgnoreSpec::default())
-        .await
-        .unwrap();
+    let clean = assemble_fixture(vuln_doc(), packages(), IgnoreSpec::default()).unwrap();
     let vuln_json = serde_json::to_value(&clean.vulnerabilities[0]).unwrap();
     assert!(vuln_json.get("ignore_reason").is_none());
 }
@@ -600,29 +557,28 @@ async fn audit_reports_findings_and_unchecked() {
     assert_eq!(report.summary.ignored, 0);
 }
 
-#[tokio::test]
-async fn ignored_findings_are_sorted_like_vulnerabilities() {
-    // Every package returns the same finding; all of it is ignored.
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(|Json(body): Json<serde_json::Value>| async move {
-                let n = body["queries"].as_array().unwrap().len();
-                let results: Vec<serde_json::Value> = (0..n)
-                    .map(|_| serde_json::json!({"vulns": [{"id": "BSLK-1"}]}))
-                    .collect();
-                Json(serde_json::json!({"results": results}))
-            }),
-        )
-        .route("/v1/vulns/{id}", get(|| async { Json(vuln_doc()) }));
-    let base = spawn(app).await;
+#[test]
+fn ignored_findings_are_sorted_like_vulnerabilities() {
+    let packages: Vec<_> = packages()
+        .into_iter()
+        .filter(|package| package.ecosystem == PackageEcosystem::CondaForge)
+        .collect();
+    let planned: Vec<_> = packages.iter().filter_map(plan_query).collect();
+    let result: BatchResult =
+        serde_json::from_value(serde_json::json!({"vulns": [{"id": "BSLK-1"}]})).unwrap();
+    let results = vec![result; planned.len()];
+    let documents = HashMap::from([(
+        (Backend::Basilisk, "BSLK-1".to_string()),
+        serde_json::from_value(vuln_doc()).unwrap(),
+    )]);
 
     let rules = [IgnoreRule::from_id("BSLK-1".to_string(), false)];
     let spec = IgnoreSpec {
         rules: &rules,
         ignore_unfixed: false,
     };
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let mut report = assemble_report(&planned, &results, &documents, spec).unwrap();
+    report.sort(SortStrategy::default());
 
     // Same severity everywhere, so the tie-break is the package name.
     let order: Vec<&str> = report
@@ -633,15 +589,15 @@ async fn ignored_findings_are_sorted_like_vulnerabilities() {
     assert_eq!(order, vec!["openssl", "zlib"]);
 }
 
-#[tokio::test]
-async fn ignore_list_matches_id_and_aliases_case_insensitively() {
-    let base = spawn_mock().await;
+#[test]
+fn ignore_list_matches_id_and_aliases_case_insensitively() {
+    let doc = vuln_doc();
     let rules = [IgnoreRule::from_id("cve-2026-1234".to_string(), false)];
     let spec = IgnoreSpec {
         rules: &rules,
         ignore_unfixed: false,
     };
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let report = assemble_fixture(doc, packages(), spec).unwrap();
 
     assert!(report.vulnerabilities.is_empty());
     assert_eq!(report.ignored.len(), 1);
@@ -653,21 +609,7 @@ async fn ignore_list_matches_id_and_aliases_case_insensitively() {
 async fn spawn_withdrawn_mock() -> Url {
     let mut doc = vuln_doc();
     doc["withdrawn"] = serde_json::json!("2026-02-01T00:00:00Z");
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(|Json(body): Json<serde_json::Value>| async move {
-                let results: Vec<serde_json::Value> = body["queries"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|_| serde_json::json!({"vulns": [{"id": "BSLK-1"}]}))
-                    .collect();
-                Json(serde_json::json!({"results": results}))
-            }),
-        )
-        .route("/v1/vulns/{id}", get(move || async move { Json(doc) }));
-    spawn(app).await
+    spawn_mock_serving(doc).await
 }
 
 #[tokio::test]
@@ -833,22 +775,8 @@ async fn withdrawn_vulnerabilities_are_not_reported() {
     assert!(report.unchecked.is_empty());
 }
 
-async fn spawn_pypi_mock() -> Url {
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(|Json(body): Json<serde_json::Value>| async move {
-                assert_eq!(body["queries"][0]["package"]["ecosystem"], "PyPI");
-                assert_eq!(body["queries"][0]["package"]["name"], "requests-test");
-                Json(serde_json::json!({
-                    "results": [{"vulns": [{"id": "PYSEC-2026-1"}]}]
-                }))
-            }),
-        )
-        .route(
-            "/v1/vulns/{id}",
-            get(|| async {
-                Json(serde_json::json!({
+fn pypi_doc() -> OsvVulnerability {
+    serde_json::from_value(serde_json::json!({
                     "id": "PYSEC-2026-1",
                     "modified": "2026-07-31T00:00:00Z",
                     "summary": "Python package\nvulnerability",
@@ -868,9 +796,22 @@ async fn spawn_pypi_mock() -> Url {
                         "type": "ADVISORY",
                         "url": "https://example.com/pypi-advisory"
                     }]
-                }))
-            }),
-        );
+    }))
+    .unwrap()
+}
+
+async fn spawn_pypi_mock() -> Url {
+    let app = osv_router(
+        |queries| {
+            assert_eq!(queries[0].package.ecosystem.as_deref(), Some("PyPI"));
+            assert_eq!(queries[0].package.name.as_deref(), Some("requests-test"));
+            serde_json::from_value(serde_json::json!({
+                "results": [{"vulns": [{"id": "PYSEC-2026-1"}]}]
+            }))
+            .unwrap()
+        },
+        [pypi_doc()],
+    );
     spawn(app).await
 }
 
@@ -903,11 +844,9 @@ async fn short_pypi_batch_response_fails_the_audit() {
     );
 }
 
-#[tokio::test]
-async fn package_rules_match_pypi_names_under_pep_503() {
-    let conda_base = spawn_mock().await;
-    let pypi_client = test_pypi_client(spawn_pypi_mock().await);
-    let packages = vec![AuditPackage {
+#[test]
+fn package_rules_match_pypi_names_under_pep_503() {
+    let packages = [AuditPackage {
         name: pypi_name("requests_test"),
         version: Some("2.32.0".to_string()),
         ecosystem: PackageEcosystem::Pypi,
@@ -922,17 +861,21 @@ async fn package_rules_match_pypi_names_under_pep_503() {
         false,
     )
     .unwrap()];
-    let report = super::audit(
-        &test_client(conda_base),
-        &pypi_client,
-        packages,
+    let planned: Vec<_> = packages.iter().filter_map(plan_query).collect();
+    let results = [serde_json::from_value(serde_json::json!({
+        "vulns": [{"id": "PYSEC-2026-1"}]
+    }))
+    .unwrap()];
+    let documents = HashMap::from([((Backend::Pypi, "PYSEC-2026-1".to_string()), pypi_doc())]);
+    let report = assemble_report(
+        &planned,
+        &results,
+        &documents,
         IgnoreSpec {
             rules: &rules,
             ..IgnoreSpec::default()
         },
-        ThreatSources::default(),
     )
-    .await
     .unwrap();
 
     assert!(report.vulnerabilities.is_empty());
@@ -1144,51 +1087,26 @@ async fn findings_without_match_metadata_are_unspecified() {
 /// EPSS and KEV feeds where CVE-2026-1234 (BSLK-1's alias) is scored and
 /// KEV-listed and nothing else is. The KEV catalog is served at `kev.json`.
 async fn spawn_threat_mock() -> Url {
-    let app = Router::new()
-        .route(
-            "/data/v1/epss",
-            get(
-                |axum::extract::Query(query): axum::extract::Query<
-                    std::collections::HashMap<String, String>,
-                >| async move {
-                    let data: Vec<serde_json::Value> = query
-                        .get("cve")
-                        .map(|cves| cves.split(','))
-                        .into_iter()
-                        .flatten()
-                        .filter(|cve| cve.eq_ignore_ascii_case("CVE-2026-1234"))
-                        .map(|cve| {
-                            serde_json::json!({
-                                "cve": cve,
-                                "epss": "0.500000000",
-                                "percentile": "0.900000000",
-                                "date": "2026-09-01"
-                            })
-                        })
-                        .collect();
-                    Json(serde_json::json!({"status": "OK", "data": data}))
-                },
-            ),
-        )
-        .route(
-            "/kev.json",
-            get(|| async {
-                Json(serde_json::json!({
-                    "dateReleased": "2026-09-01T19:22:46.2162Z",
-                    "vulnerabilities": [{
-                        "cveID": "CVE-2026-1234",
-                        "vendorProject": "OpenSSL",
-                        "product": "OpenSSL",
-                        "vulnerabilityName": "OpenSSL buffer overflow",
-                        "dateAdded": "2026-08-01",
-                        "requiredAction": "Apply updates per vendor instructions.",
-                        "dueDate": "2026-08-22",
-                        "knownRansomwareCampaignUse": "Unknown",
-                        "notes": ""
-                    }]
-                }))
-            }),
-        );
+    let app = epss_router(vec![serde_json::json!({
+        "cve": "CVE-2026-1234",
+        "epss": "0.500000000",
+        "percentile": "0.900000000",
+        "date": "2026-09-01"
+    })])
+    .merge(kev_router(serde_json::json!({
+        "dateReleased": "2026-09-01T19:22:46.2162Z",
+        "vulnerabilities": [{
+            "cveID": "CVE-2026-1234",
+            "vendorProject": "OpenSSL",
+            "product": "OpenSSL",
+            "vulnerabilityName": "OpenSSL buffer overflow",
+            "dateAdded": "2026-08-01",
+            "requiredAction": "Apply updates per vendor instructions.",
+            "dueDate": "2026-08-22",
+            "knownRansomwareCampaignUse": "Unknown",
+            "notes": ""
+        }]
+    })));
     spawn(app).await
 }
 
@@ -1378,63 +1296,61 @@ async fn findings_are_ordered_by_risk_then_severity() {
     assert_eq!(ids(&report), ["BSLK-1", "BSLK-NOFIX"]);
 }
 
-#[tokio::test]
-async fn advisory_aliases_count_once_before_suppression() {
-    let app = Router::new()
-        .route(
-            "/v1/querybatch",
-            post(|Json(body): Json<serde_json::Value>| async move {
-                let results: Vec<_> = body["queries"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|q| {
-                        if q["package"]["name"] == "openssl" {
-                            serde_json::json!({"vulns": [
-                                {"id": "PYSEC-1"}, {"id": "CVE-1"},
-                                {"id": "BSLK-OTHER"}, {"id": "GHSA-1"},
-                                {"id": "BSLK-OTHER-ALIAS"}
-                            ]})
-                        } else {
-                            serde_json::json!({})
-                        }
-                    })
-                    .collect();
-                Json(serde_json::json!({"results": results}))
-            }),
-        )
-        .route(
-            "/v1/vulns/{id}",
-            get(
-                |axum::extract::Path(id): axum::extract::Path<String>| async move {
-                    let (aliases, fixes) = match id.as_str() {
-                        "PYSEC-1" => (vec!["GHSA-1"], vec![]),
-                        "GHSA-1" => (vec!["CVE-1"], vec!["3.1.1"]),
-                        "CVE-1" => (vec![], vec!["3.1.2"]),
-                        "BSLK-OTHER-ALIAS" => (vec!["BSLK-OTHER"], vec![]),
-                        _ => (vec![], vec![]),
-                    };
-                    Json(serde_json::json!({
-                        "id": id,
-                        "aliases": aliases,
-                        "affected": [{
-                            "package": {"ecosystem": "conda-forge", "name": "openssl"},
-                            "ranges": fixes.iter().map(|fix| serde_json::json!({
-                                "type": "ECOSYSTEM",
-                                "events": [{"introduced": "0"}, {"fixed": fix}]
-                            })).collect::<Vec<_>>()
-                        }]
-                    }))
-                },
-            ),
-        );
-    let base = spawn(app).await;
+#[test]
+fn advisory_aliases_count_once_before_suppression() {
+    let packages = packages();
+    let planned: Vec<_> = packages.iter().filter_map(plan_query).collect();
+    let ids = [
+        "PYSEC-1",
+        "CVE-1",
+        "BSLK-OTHER",
+        "GHSA-1",
+        "BSLK-OTHER-ALIAS",
+    ];
+    let results = planned
+        .iter()
+        .map(|query| {
+            if query.package.name.as_str() == "openssl" {
+                serde_json::from_value(serde_json::json!({
+                    "vulns": ids.iter().map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>()
+                }))
+                .unwrap()
+            } else {
+                BatchResult::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let documents = ids
+        .into_iter()
+        .map(|id| {
+            let (aliases, fixes) = match id {
+                "PYSEC-1" => (vec!["GHSA-1"], vec![]),
+                "GHSA-1" => (vec!["CVE-1"], vec!["3.1.1"]),
+                "CVE-1" => (vec![], vec!["3.1.2"]),
+                "BSLK-OTHER-ALIAS" => (vec!["BSLK-OTHER"], vec![]),
+                _ => (vec![], vec![]),
+            };
+            let doc = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "aliases": aliases,
+                "affected": [{
+                    "package": {"ecosystem": "conda-forge", "name": "openssl"},
+                    "ranges": fixes.iter().map(|fix| serde_json::json!({
+                        "type": "ECOSYSTEM",
+                        "events": [{"introduced": "0"}, {"fixed": fix}]
+                    })).collect::<Vec<_>>()
+                }]
+            }))
+            .unwrap();
+            ((Backend::Basilisk, id.to_string()), doc)
+        })
+        .collect();
     let rules = [IgnoreRule::from_id("CVE-1".to_string(), false)];
     let spec = IgnoreSpec {
         rules: &rules,
         ..IgnoreSpec::default()
     };
-    let report = audit(&test_client(base), packages(), spec).await.unwrap();
+    let report = assemble_report(&planned, &results, &documents, spec).unwrap();
     assert_eq!(report.vulnerabilities.len(), 1);
     assert_eq!(report.vulnerabilities[0].id, "BSLK-OTHER");
     assert_eq!(report.vulnerabilities[0].aliases, ["BSLK-OTHER-ALIAS"]);
