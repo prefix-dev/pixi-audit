@@ -6,9 +6,8 @@ use std::process::Command;
 
 use miette::{IntoDiagnostic, WrapErr, miette};
 use pixi_audit::{AuditReport, FixStatus};
-use toml_edit::{DocumentMut, Item, TableLike};
 
-use crate::workspace::ResolvedTargets;
+use crate::workspace::{Manifest, ResolvedTargets};
 
 mod constraint;
 
@@ -88,31 +87,10 @@ fn bump_manifest_constraints(manifest: &Path, report: &AuditReport) -> miette::R
         return Ok(0);
     }
 
-    let content = std::fs::read_to_string(manifest)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read manifest '{}'", manifest.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("'{}' is not valid TOML", manifest.display()))?;
-
-    let root: &mut dyn TableLike =
-        if manifest.file_name().and_then(|name| name.to_str()) == Some("pyproject.toml") {
-            document
-                .get_mut("tool")
-                .and_then(Item::as_table_like_mut)
-                .and_then(|tool| tool.get_mut("pixi"))
-                .and_then(Item::as_table_like_mut)
-                .ok_or_else(|| miette!("'{}' has no [tool.pixi] table", manifest.display()))?
-        } else {
-            document.as_table_mut()
-        };
-
-    let changed = fixes.apply_to_manifest(root);
+    let mut manifest = Manifest::load(manifest)?;
+    let changed = fixes.apply_to_manifest(manifest.pixi_table_mut()?);
     if changed > 0 {
-        std::fs::write(manifest, document.to_string())
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to update manifest '{}'", manifest.display()))?;
+        manifest.save()?;
     }
     Ok(changed)
 }

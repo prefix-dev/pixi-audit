@@ -1,12 +1,15 @@
-//! Workspace manifest discovery and `[tool.pixi-audit]` configuration.
+//! `[tool.pixi-audit]` configuration.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use jiff::civil::Date;
 use miette::{Context, IntoDiagnostic, miette};
 use pixi_audit::{IgnoreRule, IgnoreScope, SeverityBand};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::IntoDeserializer};
+use toml_edit::Item;
+
+use crate::workspace::Manifest;
 
 /// Persistent audit configuration from `[tool.pixi-audit]`, with expired
 /// ignore rules already dropped.
@@ -129,75 +132,33 @@ pub fn today() -> Date {
         .date()
 }
 
-/// Reads and parses `path` as TOML, naming the file in either error.
-fn read_toml(path: &Path) -> miette::Result<toml::Value> {
-    let content = std::fs::read_to_string(path)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read '{}'", path.display()))?;
-    toml::from_str(&content)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("'{}' is not valid TOML", path.display()))
-}
-
-/// The workspace manifest in `dir`: `pixi.toml`, or `pyproject.toml` that
-/// contains a `[tool.pixi]` table.
-///
-/// A `pyproject.toml` that exists but cannot be read or parsed as TOML is
-/// an error naming the file — silently skipping it as "not a manifest"
-/// could let discovery walk past the intended workspace to an ancestor,
-/// or drop an explicit lockfile's sibling config. A `pyproject.toml`
-/// that parses fine but has no `[tool.pixi]` table is `Ok(None)`.
-pub fn find_manifest_in(dir: &Path) -> miette::Result<Option<PathBuf>> {
-    let pixi = dir.join("pixi.toml");
-    if pixi.is_file() {
-        return Ok(Some(pixi));
-    }
-    let pyproject = dir.join("pyproject.toml");
-    if pyproject.is_file() {
-        let value = read_toml(&pyproject)?;
-        if value.get("tool").and_then(|t| t.get("pixi")).is_some() {
-            return Ok(Some(pyproject));
-        }
-    }
-    Ok(None)
-}
-
-/// Walks up from `start` to the first directory containing a workspace
-/// manifest and returns the manifest path.
-pub fn discover_workspace(start: &Path) -> miette::Result<Option<PathBuf>> {
-    let mut dir = Some(start);
-    while let Some(current) = dir {
-        if let Some(manifest) = find_manifest_in(current)? {
-            return Ok(Some(manifest));
-        }
-        dir = current.parent();
-    }
-    Ok(None)
-}
-
 /// Parses `[tool.pixi-audit]` from `manifest`. A missing table is an empty
 /// config; a present-but-invalid table is an error — a security tool must
 /// not silently drop configured suppressions. Unknown keys warn on stderr.
 pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
-    let mut value = read_toml(manifest)?;
-    let table = value
+    let mut manifest = Manifest::load(manifest)?;
+    let table = manifest
+        .document
         .get_mut("tool")
-        .and_then(toml::Value::as_table_mut)
+        .and_then(Item::as_table_like_mut)
         .and_then(|tool| tool.remove("pixi-audit"));
     let Some(table) = table else {
         return Ok(AuditConfig::default());
     };
-    let raw: RawConfig = table.try_into().into_diagnostic().wrap_err_with(|| {
-        format!(
-            "invalid [tool.pixi-audit] table in '{}'",
-            manifest.display()
-        )
-    })?;
+    let table = table.into_value().expect("parsed TOML items have a value");
+    let raw = RawConfig::deserialize(table.into_deserializer())
+        .into_diagnostic()
+        .wrap_err_with(|| {
+            format!(
+                "invalid [tool.pixi-audit] table in '{}'",
+                manifest.path.display()
+            )
+        })?;
 
     for key in raw.unknown.keys() {
         eprintln!(
             "warning: unrecognized key '{key}' in [tool.pixi-audit] of '{}'",
-            manifest.display()
+            manifest.path.display()
         );
     }
 
@@ -209,7 +170,7 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
         .map_err(|err| {
             miette!(
                 "invalid severity in [tool.pixi-audit] of '{}': {err}",
-                manifest.display()
+                manifest.path.display()
             )
         })?;
 
@@ -226,14 +187,14 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
         let (active, expired) = effective_ignores(entries, today, until_fixed).map_err(|err| {
             miette!(
                 "invalid '{key}' entry in [tool.pixi-audit] of '{}': {err}",
-                manifest.display()
+                manifest.path.display()
             )
         })?;
         for expired in expired {
             eprintln!(
                 "warning: ignore rule {} in [tool.pixi-audit] of '{}' expired on {} and no longer applies",
                 expired.rule,
-                manifest.display(),
+                manifest.path.display(),
                 expired.until
             );
         }

@@ -11,7 +11,10 @@ use pixi_audit::{IgnoreRule, IgnoreScope};
 use serde::{Deserialize, Serialize, de::IntoDeserializer};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::config;
+use crate::{
+    config,
+    workspace::{self, Manifest},
+};
 
 #[derive(Debug, Args)]
 pub struct IgnoreArgs {
@@ -65,25 +68,18 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
     {
         return Err(miette!("--until {until} is in the past"));
     }
-    let manifest = match args.manifest {
-        Some(path) => path,
+    let mut manifest = match args.manifest {
+        Some(path) => Manifest::load(&path)?,
         None => {
             let cwd = std::env::current_dir()
                 .into_diagnostic()
                 .wrap_err("cannot determine the current directory")?;
-            config::discover_workspace(&cwd)?.ok_or_else(|| {
+            let path = workspace::discover_workspace(&cwd)?.ok_or_else(|| {
                 miette!("no pixi workspace found; pass --manifest or run inside a pixi workspace")
-            })?
+            })?;
+            Manifest::load(&path)?
         }
     };
-
-    let content = std::fs::read_to_string(&manifest)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read manifest '{}'", manifest.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("'{}' is not valid TOML", manifest.display()))?;
 
     let list = if args.until_fixed {
         IgnoreList::UntilFixed
@@ -97,7 +93,7 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
         max_affected_version: args.max_affected_version,
     };
     let outcome = add_rules(
-        &mut document,
+        &mut manifest.document,
         list,
         &args.ids,
         &scope,
@@ -105,9 +101,7 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
         args.until,
     )?;
     if !outcome.added.is_empty() {
-        std::fs::write(&manifest, document.to_string())
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to update manifest '{}'", manifest.display()))?;
+        manifest.save()?;
     }
 
     for rule in &outcome.added {
@@ -117,14 +111,14 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
                 IgnoreList::Always => "",
                 IgnoreList::UntilFixed => " until a fix is released",
             },
-            manifest.display()
+            manifest.path.display()
         );
     }
     for rule in &outcome.existing {
         eprintln!(
             "note: {rule} is already listed under '{}' in [tool.pixi-audit] of '{}'",
             list.key(),
-            manifest.display()
+            manifest.path.display()
         );
     }
     Ok(())
