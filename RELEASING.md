@@ -9,6 +9,8 @@
 
 `release-plz.yaml` runs [release-plz](https://release-plz.dev) on every merge to `main`. It keeps a release PR open that bumps the version and updates `CHANGELOG.md` from the conventional commit messages since the last `v*` tag. To release, merge that PR. release-plz then tags the merge commit with `v<version>` and creates a GitHub release, and the tag starts `release.yaml`. The merge commit of a release PR gets no dev build, because it changes the version.
 
+Tagging and release-PR updates run in separate jobs. Every push runs the tagging job; only PR updates share a concurrency group, so a newer push cannot cancel a pending release. The PR updater waits for tagging to finish and checks out the repository with the new tags.
+
 `release-plz.toml` puts `pixi_audit_cli`, `pixi_audit`, `osv_protocol`, `osv_client`, and `threat_feeds` in one version group, so a change in any crate bumps all of them. Only `pixi_audit_cli` gets the GitHub release and the changelog. Nothing is published to crates.io.
 
 release-plz compares each crate against the source at its latest release tag. `pixi_audit_cli`, `pixi_audit`, and `osv_protocol` share the `v<version>` tag. `osv_client` and `threat_feeds` didn't exist at `v0.1.2`, so they get their own `osv_client-v<version>` and `threat_feeds-v<version>` tags, which don't start `release.yaml`. `pixi_audit_test_support` is test-only and `publish = false`, so release-plz skips it.
@@ -48,7 +50,7 @@ git push origin v0.1.3 osv_client-v0.1.3 threat_feeds-v0.1.3
 
 ## Attestations
 
-`pixi upload prefix` generates one CEP-27 Sigstore attestation for each `.conda` package. The attestations are uploaded alongside the packages, recorded in Sigstore's transparency log, and stored in GitHub's attestation API.
+The release workflow pins Pixi to `0.81.0`. `pixi upload prefix --generate-attestation --store-github-attestation` generates one CEP-27 Sigstore attestation for each `.conda` package. The attestations are uploaded alongside the packages, recorded in Sigstore's transparency log, and stored in GitHub's attestation API. GitHub storage still requires `--store-github-attestation` in this Pixi version.
 
 After downloading a package, verify its GitHub attestation with:
 
