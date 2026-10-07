@@ -1,8 +1,8 @@
-use axum::{Json, Router, routing::get};
+use axum::{Router, routing::get};
 use url::Url;
 
 use super::*;
-use crate::test_support::spawn_router;
+use pixi_audit_test_support::{kev_router, spawn_router};
 
 fn client(url: Url) -> KevClient {
     let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
@@ -47,7 +47,7 @@ fn feed() -> serde_json::Value {
 
 #[tokio::test]
 async fn catalog_is_indexed_by_cve_case_insensitively() {
-    let app = Router::new().route("/kev.json", get(|| async { Json(feed()) }));
+    let app = kev_router(feed());
     let url = spawn_router(app).await.join("kev.json").unwrap();
 
     let catalog = client(url).catalog().await.unwrap();
@@ -77,7 +77,7 @@ async fn catalog_is_indexed_by_cve_case_insensitively() {
 
 #[tokio::test]
 async fn entries_serialize_with_snake_case_fields() {
-    let app = Router::new().route("/kev.json", get(|| async { Json(feed()) }));
+    let app = kev_router(feed());
     let url = spawn_router(app).await.join("kev.json").unwrap();
     let catalog = client(url).catalog().await.unwrap();
 
@@ -96,15 +96,18 @@ async fn server_errors_are_reported() {
     );
     let url = spawn_router(app).await.join("kev.json").unwrap();
     let err = client(url).catalog().await.unwrap_err();
-    assert!(err.to_string().contains("404"), "unexpected error: {err}");
+    assert!(matches!(
+        err,
+        ThreatFeedError::Status {
+            status: reqwest::StatusCode::NOT_FOUND,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
 async fn malformed_feed_is_an_invalid_response() {
-    let app = Router::new().route(
-        "/kev.json",
-        get(|| async { Json(serde_json::json!({"vulnerabilities": [{"product": "x"}]})) }),
-    );
+    let app = kev_router(serde_json::json!({"vulnerabilities": [{"product": "x"}]}));
     let url = spawn_router(app).await.join("kev.json").unwrap();
     let err = client(url).catalog().await.unwrap_err();
     assert!(

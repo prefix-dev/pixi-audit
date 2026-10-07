@@ -60,12 +60,12 @@ fn fixable_package_names_dedupes_and_skips_ignored_and_unfixed() {
         summary: AuditSummary::default(),
         ..Default::default()
     };
-    assert_eq!(fixable_package_names(&report), vec!["openssl", "zlib"]);
+    assert_eq!(report.fixable_package_names(), vec!["openssl", "zlib"]);
 }
 
 #[test]
 fn empty_report_yields_no_names() {
-    assert!(fixable_package_names(&AuditReport::default()).is_empty());
+    assert!(AuditReport::default().fixable_package_names().is_empty());
 }
 
 #[test]

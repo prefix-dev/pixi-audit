@@ -6,10 +6,10 @@ use rattler_lock::{LockFile, LockedPackage};
 use thiserror::Error;
 
 use crate::{
+    audit::audit,
     client::{AuditError, BasiliskClient, PypiAuditClient},
     report::{
         AuditPackage, AuditReport, IgnoreSpec, InvalidPackageName, PackageEcosystem, PackageName,
-        audit,
     },
     threat::ThreatSources,
 };

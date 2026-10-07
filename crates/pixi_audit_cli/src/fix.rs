@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use miette::{IntoDiagnostic, WrapErr, miette};
-use pixi_audit::{AuditReport, FixStatus};
+use pixi_audit::AuditReport;
 
 use crate::workspace::{Manifest, ResolvedTargets};
 
@@ -21,7 +21,7 @@ pub async fn apply(
     before: AuditReport,
     reaudit: impl AsyncFn() -> miette::Result<AuditReport>,
 ) -> miette::Result<AuditReport> {
-    let names = fixable_package_names(&before);
+    let names = before.fixable_package_names();
     if names.is_empty() {
         if !before.vulnerabilities.is_empty() {
             eprintln!(
@@ -56,23 +56,6 @@ pub async fn apply(
     Ok(after)
 }
 
-/// Distinct names of packages that have a fixed release in their own
-/// ecosystem among the report's non-ignored findings, in first-appearance
-/// order. Upstream-only fixes cannot be installed, so they do not count.
-pub(crate) fn fixable_package_names(report: &AuditReport) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for finding in &report.vulnerabilities {
-        if finding.fix_status() != FixStatus::Available {
-            continue;
-        }
-        let name = finding.package.name.to_string();
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
-}
-
 /// Raise matching direct dependency constraints in a Pixi manifest to the
 /// lowest fixed version newer than each vulnerable locked version.
 ///
@@ -97,7 +80,7 @@ fn bump_manifest_constraints(manifest: &Path, report: &AuditReport) -> miette::R
 
 /// Runs `pixi update --manifest-path <manifest> <names...>`. pixi's output
 /// is relayed to our stderr so stdout stays reserved for the report.
-fn run_pixi_update(manifest: &Path, names: &[String]) -> miette::Result<()> {
+fn run_pixi_update(manifest: &Path, names: &[&str]) -> miette::Result<()> {
     let output = Command::new("pixi")
         .arg("update")
         .arg("--manifest-path")

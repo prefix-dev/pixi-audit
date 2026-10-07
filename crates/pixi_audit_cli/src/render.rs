@@ -282,7 +282,7 @@ impl Guidance {
             severe,
             fixable_findings,
             audited_packages_with_fixes,
-            update_targets: crate::fix::fixable_package_names(report).len(),
+            update_targets: report.fixable_package_names().len(),
             upstream_only,
             unfixed,
             ignored: report.ignored.len(),

@@ -6,14 +6,12 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
+use threat_feeds::{EpssScore, KnownExploited};
+
 use crate::{
-    threat::{EpssScore, KnownExploited, RiskScore, ThreatDataStatus},
+    threat::{RiskScore, ThreatDataStatus},
     types::OsvSeverity,
 };
-
-// Keep the established `pixi_audit::report::audit` path while the engine
-// lives in its own module.
-pub use crate::audit::audit;
 
 /// Where a locked package comes from, for vulnerability-query purposes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -837,6 +835,21 @@ pub struct AuditReport {
 }
 
 impl AuditReport {
+    /// Distinct package names with an installable fix among non-ignored
+    /// findings, in first-appearance order. Upstream-only fixes do not count.
+    pub fn fixable_package_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        for finding in &self.vulnerabilities {
+            if finding.fix_status() == FixStatus::Available {
+                let name = finding.package.name.as_str();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
     /// Orders the vulnerable and ignored findings by `strategy`.
     pub fn sort(&mut self, strategy: SortStrategy) {
         self.vulnerabilities.sort_by(|a, b| strategy.compare(a, b));
