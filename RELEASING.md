@@ -47,14 +47,8 @@ The CLI, `pixi_audit`, and `osv_protocol` share `v<version>`. `osv_client` and `
 
 Tagging runs before release-PR updates. Only PR updates share a concurrency group, so newer pushes cannot cancel pending tagging jobs. `release_always = false` prevents ordinary merges from being tagged.
 
-## Verify attestations
+## Attestations
 
-Pixi `0.81.0` publishes CEP-27 Sigstore attestations alongside packages, in the transparency log, and in GitHub. GitHub storage requires `--store-github-attestation` in addition to `--generate-attestation`.
+`pixi upload prefix --generate-attestation` signs each `.conda` package with a CEP-27 Sigstore attestation. prefix.dev stores it with the package and shows it on the package page, and Sigstore's transparency log records it. Search [search.sigstore.dev](https://search.sigstore.dev) for the package's SHA-256.
 
-After downloading a package:
-
-```console
-gh attestation verify pixi-audit-*.conda \
-  --repo prefix-dev/pixi_audit \
-  --predicate-type https://schemas.conda.org/attestations-publish-1.schema.json
-```
+GitHub's attestation API is not used. It rejects private repositories on the current plan, so `--store-github-attestation` fails the upload, and `gh attestation verify` finds nothing.
