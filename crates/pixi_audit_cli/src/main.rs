@@ -69,10 +69,6 @@ struct Cli {
     /// current directory and its parents for a pixi workspace.
     lockfile: Option<PathBuf>,
 
-    /// Explicitly obtain a Basilisk-specific prefix.dev token (interactive only).
-    #[arg(long)]
-    login: bool,
-
     /// Disable network access. Auditing requires online vulnerability data.
     #[arg(long)]
     offline: bool,
@@ -415,7 +411,7 @@ fn base_url_from_env(var: &str, default: &str) -> miette::Result<Url> {
 }
 
 async fn run(cli: Cli) -> miette::Result<RunOutcome> {
-    // Stop before login, refresh, threat feeds, or `--fix` can access the network.
+    // Stop before credential refresh, threat feeds, or `--fix` can access the network.
     if cli.offline {
         miette::bail!(
             "Auditing requires online vulnerability data; network access is disabled by --offline"
@@ -446,7 +442,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let pypi_base_url = base_url_from_env(PYPI_BASE_URL_ENV_VAR, DEFAULT_PYPI_BASE_URL)?;
     let epss_base_url = base_url_from_env(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?;
     let kev_url = base_url_from_env(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?;
-    let basilisk_http = auth::build(cli.offline, &base_url, cli.login).await?;
+    let basilisk_http = auth::build(cli.offline, &base_url)?;
     let audit_message = format!(
         "Auditing {} against {base_url} and {pypi_base_url} ...",
         targets.lockfile.display()

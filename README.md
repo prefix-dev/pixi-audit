@@ -33,6 +33,21 @@ Limit the audit to an environment or platform:
 pixi audit --environment production --platform linux-64
 ```
 
+### Optional Basilisk authentication
+
+Public audits do not require login. To use your prefix.dev identity with Basilisk:
+
+```console
+pixi auth login prefix.dev
+pixi audit
+```
+
+Use a Pixi version that requests the Basilisk audience (`https://api.basilisk.prefix.dev`). Older logins need a fresh login; refreshing an existing token cannot add the audience. `pixi-audit` reuses and refreshes the credential stored under `prefix.dev`—it never opens a browser or runs a separate login, including in CI.
+
+Only matching OAuth credentials are sent to the production Basilisk origin. Custom API URLs and OSV/EPSS/KEV requests remain anonymous, and the Basilisk client does not follow redirects. Missing or unsuitable credentials leave the audit anonymous. If refresh cannot provide a usable token, the request proceeds anonymously; if the API rejects a token with HTTP 401, the client retries once without it. A failing anonymous request is still an error.
+
+`--offline` stops the audit before credential refresh, vulnerability queries, threat feeds, or `--fix` can access the network. An online audit is required for current vulnerability data.
+
 ### Ignore known findings
 
 Ignore an advisory by ID or alias for one run:

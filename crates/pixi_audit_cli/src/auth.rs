@@ -1,20 +1,22 @@
-//! Audit transport is separate from package downloads: no channel credentials,
-//! mirror rewriting, or automatic challenge-driven login.
+//! Reuse Pixi's login only for the production Basilisk origin. Other audit
+//! services and custom endpoints never receive the shared credentials.
 
-use std::{io::IsTerminal, time::Duration};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use miette::IntoDiagnostic;
-use rattler::cli::auth::oauth::{
-    CallbackPageTemplate, OAuthConfig, OAuthFlow, callback_page_renderer, perform_oauth_login,
+use rattler_networking::{
+    Authentication, AuthenticationMiddleware, AuthenticationStorage, OfflineMiddleware,
 };
-use rattler_networking::{AuthenticationMiddleware, AuthenticationStorage, OfflineMiddleware};
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest::{Request, Response, StatusCode, header::AUTHORIZATION};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use url::Url;
 
 use pixi_audit::DEFAULT_BASE_URL;
 
-const ISSUER: &str = "https://prefix.dev";
-const CLIENT_ID: &str = "rattler";
+const CREDENTIAL_KEY: &str = "prefix.dev";
 
 fn production_origin(base_url: &Url) -> bool {
     base_url.origin()
@@ -38,22 +40,14 @@ fn validate_base_url(base_url: &Url) -> miette::Result<()> {
     Ok(())
 }
 
-fn interactive_login_allowed(offline: bool, in_ci: bool, terminal: bool) -> bool {
-    !offline && !in_ci && terminal
-}
-
-/// Build the audit client, optionally performing an explicitly requested login.
-/// Credential failures never prevent an otherwise public audit.
-pub(super) async fn build(
-    offline: bool,
-    base_url: &Url,
-    login: bool,
-) -> miette::Result<ClientWithMiddleware> {
+/// Build a dedicated client without ever initiating an interactive login.
+/// Missing or unsuitable credentials leave public auditing anonymous.
+pub(super) fn build(offline: bool, base_url: &Url) -> miette::Result<ClientWithMiddleware> {
     validate_base_url(base_url)?;
     let storage = if production_origin(base_url) && !offline {
         match AuthenticationStorage::from_env_and_defaults() {
             Ok(storage) => Some(storage),
-            Err(_error) => {
+            Err(_) => {
                 eprintln!("Warning: Could not load audit credentials; continuing anonymously");
                 None
             }
@@ -61,59 +55,41 @@ pub(super) async fn build(
     } else {
         None
     };
+    Ok(client_builder(offline, base_url, storage)?.build())
+}
 
-    if login {
-        if !production_origin(base_url) {
-            eprintln!(
-                "Audit login is only supported for the default Basilisk origin; continuing anonymously"
-            );
-        } else if !interactive_login_allowed(
-            offline,
-            std::env::var_os("CI").is_some(),
-            std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
-        ) {
-            eprintln!("Warning: Skipping audit login in offline, CI, or noninteractive mode");
-        } else if let Some(storage) = &storage {
-            let oauth = OAuthConfig {
-                audience: Some(DEFAULT_BASE_URL.into()),
-                issuer_url: ISSUER.into(),
-                client_id: CLIENT_ID.into(),
-                client_secret: None,
-                flow: OAuthFlow::Auto,
-                scopes: Default::default(),
-                redirect_uri: None,
-                user_agent: Some(format!("pixi-audit/{}", env!("CARGO_PKG_VERSION"))),
-                callback_page: Some(callback_page_renderer(
-                    CallbackPageTemplate {
-                        application_name: "pixi-audit".into(),
-                        ..Default::default()
-                    },
-                    ISSUER,
-                )),
-            };
-            match tokio::time::timeout(Duration::from_secs(300), perform_oauth_login(oauth)).await {
-                Ok(Ok(auth)) => {
-                    let key = AuthenticationStorage::oauth_audience_key(
-                        ISSUER,
-                        CLIENT_ID,
-                        DEFAULT_BASE_URL,
-                    );
-                    if storage.store(&key, &auth).is_err() {
-                        eprintln!(
-                            "Could not save audit credentials; continuing with cached credentials if available"
-                        );
-                    }
-                }
-                Ok(Err(_)) | Err(_) => {
+fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) -> bool {
+    match storage.get(CREDENTIAL_KEY) {
+        Ok(Some(Authentication::OAuth {
+            audience,
+            access_token,
+            ..
+        })) => {
+            if audience.as_deref() == Some(DEFAULT_BASE_URL)
+                && !access_token.is_empty()
+                && reqwest::header::HeaderValue::from_str(&format!("Bearer {access_token}")).is_ok()
+            {
+                true
+            } else {
+                if !warned.swap(true, Ordering::Relaxed) {
                     eprintln!(
-                        "Audit login did not complete; continuing with cached credentials if available"
+                        "Warning: Saved prefix.dev login has no Basilisk audience or has an invalid token; \
+                         continuing anonymously. Run `pixi auth login prefix.dev` with a compatible Pixi version to log in again."
                     );
                 }
+                false
             }
         }
+        // In particular, do not forward a channel API token just because it
+        // shares the host key. Explicit API-token support is separate.
+        Ok(_) => false,
+        Err(_) => {
+            if !warned.swap(true, Ordering::Relaxed) {
+                eprintln!("Warning: Could not read prefix.dev credentials; continuing anonymously");
+            }
+            false
+        }
     }
-
-    Ok(client_builder(offline, base_url, storage)?.build())
 }
 
 fn client_builder(
@@ -122,7 +98,6 @@ fn client_builder(
     storage: Option<AuthenticationStorage>,
 ) -> miette::Result<ClientBuilder> {
     validate_base_url(base_url)?;
-    // Dedicated API transport: never redirect a bearer to another service.
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
@@ -131,276 +106,85 @@ fn client_builder(
     let mut builder = ClientBuilder::new(http);
     if offline {
         builder = builder.with(OfflineMiddleware);
-    }
-    if production_origin(base_url)
-        && !offline
+    } else if production_origin(base_url)
         && let Some(storage) = storage
     {
-        builder = builder.with(
-            AuthenticationMiddleware::from_auth_storage(storage).with_oauth_audience(
-                ISSUER,
-                CLIENT_ID,
-                DEFAULT_BASE_URL,
-                base_url.origin(),
-            ),
-        );
+        builder = builder
+            .with(SharedLogin {
+                authentication: AuthenticationMiddleware::from_auth_storage(storage.clone())
+                    .with_credential_key(CREDENTIAL_KEY, base_url.origin()),
+                storage,
+                origin: base_url.origin(),
+                warned: AtomicBool::new(false),
+            })
+            // After authentication so the anonymous retry cannot reattach it.
+            .with(AnonymousRetry::default());
     }
     Ok(builder)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{Json, Router, extract::Form, http::StatusCode, routing::post};
-    use rattler_networking::{
-        Authentication, authentication_storage::backends::memory::MemoryStorage,
-    };
-    use serde_json::json;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+/// Check the current entry before each request, not just at construction: a
+/// later login can replace the shared entry with a channel-only credential.
+struct SharedLogin {
+    authentication: AuthenticationMiddleware,
+    storage: AuthenticationStorage,
+    origin: url::Origin,
+    warned: AtomicBool,
+}
 
-    type Seen = Arc<Mutex<Vec<Option<String>>>>;
-    struct Capture(Seen);
-    #[async_trait::async_trait]
-    impl reqwest_middleware::Middleware for Capture {
-        async fn handle(
-            &self,
-            req: reqwest::Request,
-            _extensions: &mut http::Extensions,
-            _next: reqwest_middleware::Next<'_>,
-        ) -> reqwest_middleware::Result<reqwest::Response> {
-            self.0.lock().unwrap().push(
-                req.headers()
-                    .get("authorization")
-                    .map(|v| v.to_str().unwrap().to_owned()),
-            );
-            Ok(http::Response::builder()
-                .status(200)
-                .body("{}")
-                .unwrap()
-                .into())
+#[async_trait::async_trait]
+impl Middleware for SharedLogin {
+    async fn handle(
+        &self,
+        request: Request,
+        extensions: &mut http::Extensions,
+        next: Next<'_>,
+    ) -> reqwest_middleware::Result<Response> {
+        if request.url().origin() != self.origin
+            || !shared_login_available(&self.storage, &self.warned)
+        {
+            return next.run(request, extensions).await;
         }
-    }
-    fn key() -> String {
-        AuthenticationStorage::oauth_audience_key(ISSUER, CLIENT_ID, DEFAULT_BASE_URL)
-    }
-    fn storage() -> AuthenticationStorage {
-        let mut store = AuthenticationStorage::empty();
-        store.add_backend(Arc::new(MemoryStorage::new()));
-        store
-    }
-    fn grant(endpoint: String, expiry: i64) -> Authentication {
-        Authentication::OAuth {
-            audience: Some(DEFAULT_BASE_URL.into()),
-            access_token: "fixture-audience".into(),
-            refresh_token: Some("fixture-refresh".into()),
-            expires_at: Some(expiry),
-            token_endpoint: endpoint,
-            revocation_endpoint: None,
-            client_id: CLIENT_ID.into(),
-        }
-    }
-    fn capture_client(
-        offline: bool,
-        url: &Url,
-        store: Option<AuthenticationStorage>,
-    ) -> (ClientWithMiddleware, Seen) {
-        let seen = Seen::default();
-        let http = client_builder(offline, url, store)
-            .unwrap()
-            .with(Capture(seen.clone()))
-            .build();
-        (http, seen)
-    }
-
-    #[test]
-    fn login_requires_online_interactive_non_ci_execution() {
-        for offline in [false, true] {
-            for ci in [false, true] {
-                for terminal in [false, true] {
-                    assert_eq!(
-                        interactive_login_allowed(offline, ci, terminal),
-                        !offline && !ci && terminal
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn rejects_secret_bearing_and_non_http_base_urls() {
-        for value in [
-            "https://user:fixture-secret@api.example",
-            "https://api.example/?token=fixture-secret",
-            "https://api.example/#fixture-secret",
-            "file:///tmp/api",
-        ] {
-            let error = validate_base_url(&Url::parse(value).unwrap()).unwrap_err();
-            assert!(!error.to_string().contains("fixture-secret"));
-        }
-        assert!(production_origin(
-            &Url::parse("https://API.BASILISK.PREFIX.DEV:443/").unwrap()
-        ));
-        assert!(!production_origin(
-            &Url::parse("http://api.basilisk.prefix.dev").unwrap()
-        ));
-        assert!(!production_origin(
-            &Url::parse("https://api.basilisk.prefix.dev:444").unwrap()
-        ));
-    }
-
-    #[tokio::test]
-    async fn public_audit_does_not_use_channel_credentials() {
-        let url = Url::parse(DEFAULT_BASE_URL).unwrap();
-        let store = storage();
-        store
-            .store(
-                "api.basilisk.prefix.dev",
-                &Authentication::BearerToken("fixture-channel".into()),
-            )
-            .unwrap();
-        for store in [None, Some(store)] {
-            let (http, seen) = capture_client(false, &url, store);
-            assert_eq!(
-                http.post(url.clone()).send().await.unwrap().status(),
-                StatusCode::OK
-            );
-            assert_eq!(*seen.lock().unwrap(), vec![None]);
-        }
-    }
-
-    #[tokio::test]
-    async fn cached_audience_is_sent_only_to_production_origin() {
-        let store = storage();
-        let auth = grant("http://127.0.0.1:1/token".into(), i64::MAX);
-        store.store(&key(), &auth).unwrap();
-        let production = Url::parse(DEFAULT_BASE_URL).unwrap();
-        let (http, seen) = capture_client(false, &production, Some(store.clone()));
-        http.post(production.clone()).send().await.unwrap();
-        http.post(production.clone()).send().await.unwrap();
-        http.post("https://custom.example/api")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            *seen.lock().unwrap(),
-            vec![
-                Some("Bearer fixture-audience".into()),
-                Some("Bearer fixture-audience".into()),
-                None
-            ]
-        );
-        assert_eq!(store.get(&key()).unwrap(), Some(auth));
-        for service in [
-            pixi_audit::DEFAULT_PYPI_BASE_URL,
-            pixi_audit::DEFAULT_EPSS_BASE_URL,
-            pixi_audit::DEFAULT_KEV_URL,
-        ] {
-            let (http, seen) = capture_client(false, &production, Some(store.clone()));
-            http.get(service).send().await.unwrap();
-            assert_eq!(*seen.lock().unwrap(), vec![None]);
-        }
-        for url in [
-            "https://custom.example/",
-            "http://api.basilisk.prefix.dev/",
-            "https://api.basilisk.prefix.dev:444/",
-        ] {
-            let url = Url::parse(url).unwrap();
-            let (http, seen) = capture_client(false, &url, Some(store.clone()));
-            http.post(url).send().await.unwrap();
-            assert_eq!(*seen.lock().unwrap(), vec![None]);
-        }
-    }
-
-    #[tokio::test]
-    async fn expired_audience_refreshes_or_falls_back_to_public_audit() {
-        for success in [true, false] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
-            let calls = Arc::new(AtomicUsize::new(0));
-            let count = calls.clone();
-            let app = Router::new().route("/token", post(move |Form(form): Form<std::collections::HashMap<String,String>>| {
-                assert_eq!(form["audience"], DEFAULT_BASE_URL);
-                assert_eq!(form["client_id"], CLIENT_ID);
-                assert_eq!(form["refresh_token"], "fixture-refresh");
-                count.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    if success { (StatusCode::OK, Json(json!({"access_token":"fixture-new", "refresh_token":"fixture-rotated", "expires_in":3600,"token_type":"Bearer"}))) }
-                    else { (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"temporarily_unavailable"}))) }
-                }
-            }));
-            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let store = storage();
-            let old = grant(endpoint, 0);
-            store.store(&key(), &old).unwrap();
-            let url = Url::parse(DEFAULT_BASE_URL).unwrap();
-            let (http, seen) = capture_client(false, &url, Some(store.clone()));
-            assert_eq!(
-                http.post(url).send().await.unwrap().status(),
-                StatusCode::OK
-            );
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            let expected = success.then(|| "Bearer fixture-new".to_owned());
-            assert_eq!(*seen.lock().unwrap(), vec![expected]);
-            if success {
-                assert!(
-                    matches!(store.get(&key()).unwrap(), Some(Authentication::OAuth { refresh_token: Some(refresh), .. }) if refresh == "fixture-rotated")
-                );
-            } else {
-                assert_eq!(store.get(&key()).unwrap(), Some(old));
-            }
-            server.abort();
-        }
-    }
-
-    #[tokio::test]
-    async fn offline_blocks_before_authentication_and_transport() {
-        let store = storage();
-        store
-            .store(&key(), &grant("http://127.0.0.1:1/token".into(), 0))
-            .unwrap();
-        let url = Url::parse(DEFAULT_BASE_URL).unwrap();
-        let (http, seen) = capture_client(true, &url, Some(store));
-        assert!(http.post(url).send().await.is_err());
-        assert!(seen.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn api_client_does_not_follow_redirects() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let count = calls.clone();
-        let app = Router::new()
-            .route(
-                "/redirect",
-                post(|| async {
-                    (
-                        StatusCode::TEMPORARY_REDIRECT,
-                        [("location", "/destination")],
-                    )
-                }),
-            )
-            .route(
-                "/destination",
-                post(move || {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    async { "unexpected" }
-                }),
-            );
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let http = client_builder(false, &url, None).unwrap().build();
-        assert_eq!(
-            http.post(url.join("redirect").unwrap())
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::TEMPORARY_REDIRECT
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        server.abort();
+        self.authentication.handle(request, extensions, next).await
     }
 }
+
+/// A revoked or server-rejected login must not break a public audit. Retry a
+/// replayable authenticated request once, without credentials, on HTTP 401.
+#[derive(Default)]
+struct AnonymousRetry {
+    warned: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Middleware for AnonymousRetry {
+    async fn handle(
+        &self,
+        request: Request,
+        extensions: &mut http::Extensions,
+        next: Next<'_>,
+    ) -> reqwest_middleware::Result<Response> {
+        let retry = request
+            .headers()
+            .contains_key(AUTHORIZATION)
+            .then(|| request.try_clone())
+            .flatten();
+        let response = next.clone().run(request, extensions).await?;
+        if response.status() == StatusCode::UNAUTHORIZED
+            && let Some(mut retry) = retry
+        {
+            if !self.warned.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "Warning: Basilisk rejected the saved login; retrying anonymously. \
+                     Run `pixi auth login prefix.dev` to log in again."
+                );
+            }
+            retry.headers_mut().remove(AUTHORIZATION);
+            return next.run(retry, extensions).await;
+        }
+        Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests;
