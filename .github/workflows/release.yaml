@@ -214,7 +214,6 @@ jobs:
     needs: [metadata, build]
     runs-on: ubuntu-latest
     permissions:
-      attestations: write
       contents: read
       id-token: write
     steps:
@@ -231,7 +230,6 @@ jobs:
       - name: Publish packages with attestations
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           PREFIX_CHANNEL: ${{ needs.metadata.outputs.channel }}
         run: |
           set -euo pipefail
@@ -242,11 +240,13 @@ jobs:
             exit 1
           fi
 
+          # --generate-attestation signs each package with Sigstore and uploads
+          # the bundle to prefix.dev. Do not add --store-github-attestation:
+          # GitHub's attestation API rejects private repositories on our plan.
           for package in "${packages[@]}"; do
             pixi upload prefix \
               --channel "$PREFIX_CHANNEL" \
               --generate-attestation \
-              --store-github-attestation \
               --skip-existing \
               "$package"
           done
