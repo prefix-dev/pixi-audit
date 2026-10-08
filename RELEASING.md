@@ -1,45 +1,30 @@
 # Releasing
 
-`release.yaml` builds `linux-64`, `osx-64`, `osx-arm64`, and `win-64`, and uploads the packages only after all four builds succeed. It publishes two kinds of packages to the same channel:
+Dev builds and releases publish to `PREFIX_CHANNEL` (for example, `prefix-dev/prefix-labs`). Uploads start only after builds pass for `linux-64`, `osx-64`, `osx-arm64`, and `win-64`. Nothing goes to crates.io.
 
-- **Dev builds**: every merge to `main` publishes `<next>.dev<N>`, where `<next>` is the current version with the patch number bumped and `<N>` is the first-parent commit count. With `0.1.2` released, a merge publishes `0.1.3.dev52`, and `pixi-audit --version` reports `0.1.3-dev.52` because Cargo needs a semver pre-release. Conda sorts dev builds after the last release and before the next one (`0.1.2 < 0.1.3.dev52 < 0.1.3`), so unpinned installs get the latest merge. Merges that only touch Markdown, `LICENSE`, `release-plz.toml`, the octo-sts policy, or the other workflows are skipped; see `paths-ignore` in `release.yaml`.
-- **Releases**: a `v<version>` tag on a commit in `main` publishes `<version>`.
+## Publish a release
 
-## Release PRs
+1. Merge changes into `main`. [release-plz](https://release-plz.dev) opens or updates a PR with version bumps and a changelog from conventional commits.
+2. Review that PR and its CI results, then merge it when ready to ship.
+3. The **Tag release** job creates the tags and GitHub release. The `v<version>` tag starts the **Release** workflow, which publishes the packages.
 
-`release-plz.yaml` runs [release-plz](https://release-plz.dev) on every merge to `main`. It keeps a release PR open that bumps the version and updates `CHANGELOG.md` from the conventional commit messages since the last `v*` tag. To release, merge that PR. release-plz then tags the merge commit with `v<version>` and creates a GitHub release, and the tag starts `release.yaml`. The merge commit of a release PR gets no dev build, because it changes the version.
+No local commands are needed. If the PR or tags are missing, check the **Update release PR** or **Tag release** job. Release-plz runs on pushes to `main`, with no **Run workflow** button.
 
-Tagging and release-PR updates run in separate jobs. Every push runs the tagging job; only PR updates share a concurrency group, so a newer push cannot cancel a pending release. The PR updater waits for tagging to finish and checks out the repository with the new tags.
+## Dev builds
 
-`release-plz.toml` puts `pixi_audit_cli`, `pixi_audit`, `osv_protocol`, `osv_client`, and `threat_feeds` in one version group, so a change in any crate bumps all of them. Only `pixi_audit_cli` gets the GitHub release and the changelog. Nothing is published to crates.io.
+Merges to `main` publish `<next patch>.dev<N>`, where `<N>` is the first-parent commit count. For example, `0.1.3.dev52` reports `pixi-audit 0.1.3-dev.52` in the CLI. Conda sorts it as `0.1.2 < 0.1.3.dev52 < 0.1.3`, so unpinned installs can pick up dev builds.
 
-release-plz compares each crate against the source at its latest release tag. `pixi_audit_cli`, `pixi_audit`, and `osv_protocol` share the `v<version>` tag. `osv_client` and `threat_feeds` didn't exist at `v0.1.2`, so they get their own `osv_client-v<version>` and `threat_feeds-v<version>` tags, which don't start `release.yaml`. `pixi_audit_test_support` is test-only and `publish = false`, so release-plz skips it.
+Commits that change the CLI version skip the dev build and rely on the release tag instead. Documentation/config-only pushes listed in `release.yaml`'s `paths-ignore` are also skipped.
 
-release-plz needs a token that can start workflows, so tags and PRs created with `GITHUB_TOKEN` won't work. It gets one from [octo-sts](https://github.com/octo-sts/app) using the trust policy in `.github/chainguard/write.sts.yaml`. The octo-sts GitHub App must be installed for this repository.
+## Manual publishing
 
-## Configure prefix.dev
+Use **Release → Run workflow** with `main` for a dev build or an existing `v<version>` tag for a release. This only builds and uploads; it doesn't bump versions or create tags. The CLI-version-change check still applies on `main`. Leave `channel` empty for `PREFIX_CHANNEL`, or select another channel with trusted-publisher access.
 
-Create the target channel, then add a trusted publisher in the channel settings with:
+Release tags must match the CLI version and point to a commit on `main`. The workflow verifies package and binary versions before uploading. Retries keep the same version and build number and skip existing packages.
 
-- GitHub owner: `prefix-dev`
-- Repository: `pixi_audit`
-- Workflow file: `release.yaml`
+### Without a release PR
 
-Do this for every channel that the workflow may publish to. Authentication uses GitHub's OIDC token; do not add a `PREFIX_API_KEY` secret.
-
-## Configure GitHub
-
-Create an Actions repository variable named `PREFIX_CHANNEL` containing the default prefix.dev channel path, for example `tdejager/prefix-labs`. The release workflow fails before building if the variable is missing or invalid.
-
-A manual run can override the default with the `channel` workflow input. Select `main` to publish a dev build, or a release tag to publish that release. The selected channel must grant the same repository and workflow trusted-publisher access on prefix.dev.
-
-## Checks
-
-For a tag, the workflow checks that the tag matches the `pixi_audit_cli` version and points to a commit in `main`. For every build it checks that the Conda package version and `pixi-audit --version` match the expected version.
-
-The Conda build number is the first-parent commit count. Retrying the workflow for the same commit uses the same version and build number. Existing packages are skipped so an interrupted upload can finish without overwriting packages.
-
-To release without the release PR, run `pixi exec release-plz update` to bump the versions and changelog, merge that change into `main`, and tag the merge commit for every tagged crate:
+Run `pixi exec release-plz update` in a Git checkout, review the version bumps and changelog, and merge them into `main`. Check out the merged commit and create all three tags, using the version from its manifests:
 
 ```console
 git tag v0.1.3
@@ -48,11 +33,25 @@ git tag threat_feeds-v0.1.3
 git push origin v0.1.3 osv_client-v0.1.3 threat_feeds-v0.1.3
 ```
 
-## Attestations
+## Setup
 
-The release workflow pins Pixi to `0.81.0`. `pixi upload prefix --generate-attestation --store-github-attestation` generates one CEP-27 Sigstore attestation for each `.conda` package. The attestations are uploaded alongside the packages, recorded in Sigstore's transparency log, and stored in GitHub's attestation API. GitHub storage still requires `--store-github-attestation` in this Pixi version.
+- Set the GitHub Actions repository variable `PREFIX_CHANNEL` to the target channel path. A missing or invalid path fails before building.
+- On each prefix.dev channel, add a trusted publisher for owner `prefix-dev`, repository `pixi_audit`, workflow `release.yaml`. Publishing uses OIDC, not a `PREFIX_API_KEY` secret.
+- Install the [octo-sts GitHub App](https://github.com/octo-sts/app) for this repository. release-plz uses `.github/chainguard/write.sts.yaml` to obtain a token whose tags and PRs trigger workflows; the ordinary `GITHUB_TOKEN` cannot do that.
 
-After downloading a package, verify its GitHub attestation with:
+## Version tracking
+
+`release-plz.toml` groups the CLI and four libraries into one version, so library-only changes also trigger releases. Only the CLI gets a GitHub release and changelog.
+
+The CLI, `pixi_audit`, and `osv_protocol` share `v<version>`. `osv_client` and `threat_feeds` need separate tags because they don't exist at `v0.1.2`. Only `v*` tags trigger publishing. Test support is excluded with `publish = false` and `git_only = false`.
+
+Tagging runs before release-PR updates. Only PR updates share a concurrency group, so newer pushes cannot cancel pending tagging jobs. `release_always = false` prevents ordinary merges from being tagged.
+
+## Verify attestations
+
+Pixi `0.81.0` publishes CEP-27 Sigstore attestations alongside packages, in the transparency log, and in GitHub. GitHub storage requires `--store-github-attestation` in addition to `--generate-attestation`.
+
+After downloading a package:
 
 ```console
 gh attestation verify pixi-audit-*.conda \
