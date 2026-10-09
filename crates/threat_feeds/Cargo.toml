@@ -1,6 +1,6 @@
 [package]
 authors.workspace = true
-description = "Clients and records for FIRST EPSS and CISA KEV threat feeds"
+description = "Clients and records for FIRST EPSS and CISA KEV threat data"
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true

@@ -8,13 +8,13 @@ use http_cache_reqwest::{CACacheManager, Cache, CacheMode, HttpCache, HttpCacheO
 use iocraft::prelude::*;
 use miette::{Context, IntoDiagnostic};
 use pixi_audit::{
-    AuditReport, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_EPSS_BASE_URL,
-    DEFAULT_KEV_URL, DEFAULT_PYPI_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, Finding, IgnoreRule,
-    IgnoreSpec, KEV_URL_ENV_VAR, KevClient, PYPI_BASE_URL_ENV_VAR, PackageEcosystem,
-    PypiAuditClient, SeverityBand, ThreatDataStatus, ThreatSourceStatus, ThreatSources,
-    audit_lock_file, rattler_lock::LockFile,
+    AuditReport, BASILISK_URL_ENV_VAR, BasiliskClient, DEFAULT_BASILISK_URL, DEFAULT_EPSS_BASE_URL,
+    DEFAULT_KEV_URL, DEFAULT_OSV_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, IgnoreRule, IgnoreSpec,
+    KEV_URL_ENV_VAR, KevClient, Match, OSV_URL_ENV_VAR, OsvDevClient, PackageEcosystem,
+    SeverityRating, ThreatDataStatus, ThreatSourceStatus, ThreatSources, audit_lock_file,
+    rattler_lock::LockFile,
 };
-use render::table::{DEFAULT_FIELDS, Field, OutputStyle, TableLayout};
+use render::table::{Column, DEFAULT_COLUMNS, OutputStyle, TableLayout};
 use reqwest_middleware::ClientWithMiddleware;
 use url::Url;
 
@@ -56,8 +56,8 @@ fn AuditSpinner(mut hooks: Hooks, props: &AuditSpinnerProps) -> impl Into<AnyEle
 
 /// Audit a pixi.lock file for known vulnerabilities.
 ///
-/// Exit codes: 0 = no vulnerabilities, 1 = vulnerabilities found,
-/// 2 = execution error.
+/// Exit codes: 0 = no vulnerability match fails the audit, 1 = at least
+/// one does, 2 = execution error.
 #[derive(Debug, Parser)]
 #[command(name = "pixi-audit", version)]
 struct Cli {
@@ -66,7 +66,7 @@ struct Cli {
 
     /// Path to the pixi.lock file to audit. When omitted, searches the
     /// current directory and its parents for a pixi workspace.
-    lockfile: Option<PathBuf>,
+    lock_file: Option<PathBuf>,
 
     /// Audit only this environment (repeatable)
     #[arg(long = "environment", value_name = "ENV")]
@@ -77,7 +77,7 @@ struct Cli {
     platforms: Vec<String>,
 
     /// Vulnerability id or alias to ignore, case-insensitive (repeatable).
-    /// Ignored findings still appear in the report's ignored section.
+    /// Ignored vulnerability matches still appear in the report's ignored section.
     #[arg(long = "ignore", value_name = "ID")]
     ignore: Vec<String>,
 
@@ -86,20 +86,20 @@ struct Cli {
     #[arg(long = "ignore-until-fixed", value_name = "ID")]
     ignore_until_fixed: Vec<String>,
 
-    /// Ignore every finding that has no fixed release yet. Each returns
+    /// Ignore every vulnerability match that has no fixed release yet. Each returns
     /// once a fix is published. Same as the config file's `ignore-unfixed`.
     #[arg(long)]
     ignore_unfixed: bool,
 
-    /// Fail (exit 1) only for findings at or above this severity band.
-    /// Unknown severity still fails. Overrides the manifest setting.
-    #[arg(long, value_name = "BAND", value_parser = config::parse_band)]
-    severity: Option<SeverityBand>,
+    /// Fail (exit 1) only for vulnerability matches at or above this severity
+    /// rating. Unknown severity still fails. Overrides the manifest setting.
+    #[arg(long, value_name = "SEVERITY", value_parser = config::parse_rating)]
+    fail_on: Option<SeverityRating>,
 
-    /// Report findings from these ecosystems without failing the audit (repeatable).
+    /// Report vulnerability matches from these ecosystems without failing the audit (repeatable).
     /// All ecosystems can fail the audit when omitted.
     #[arg(long, value_enum, value_name = "ECOSYSTEM")]
-    warn_only: Vec<WarnOnlyEcosystem>,
+    warn_only_ecosystem: Vec<WarnOnlyEcosystem>,
 
     /// Raise direct dependency constraints to known fixed versions, run
     /// `pixi update`, then re-audit
@@ -121,13 +121,13 @@ struct Cli {
 
     /// Column to sort table rows by. Risk, severity, EPSS, and KEV sort
     /// highest first; other columns ascend. Only affects `--format table`.
-    #[arg(long, value_enum, default_value = "risk", value_name = "FIELD")]
-    sort_by: Field,
+    #[arg(long, value_enum, default_value = "risk", value_name = "COLUMN")]
+    sort_by: Column,
 
     /// Columns to show in the table, and their order (comma-separated).
     /// Only affects `--format table`.
-    #[arg(long, value_enum, value_delimiter = ',', default_values_t = DEFAULT_FIELDS, value_name = "FIELDS")]
-    fields: Vec<Field>,
+    #[arg(long, value_enum, value_delimiter = ',', default_values_t = DEFAULT_COLUMNS, value_name = "COLUMNS")]
+    columns: Vec<Column>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -138,12 +138,12 @@ enum Command {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 enum Format {
-    /// A status summary and one row per finding. Colors and hyperlinks
+    /// A status summary and one row per vulnerability match. Colors and hyperlinks
     /// only on a terminal; plain, unclipped text when piped or in CI.
     #[default]
     Table,
-    /// Findings grouped per package, one line each
-    Grouped,
+    /// Vulnerability matches grouped per package, one line each
+    ByPackage,
     /// Pretty-printed JSON
     Json,
     /// SARIF 2.1.0, for GitHub code scanning and similar dashboards
@@ -180,21 +180,21 @@ async fn main() -> ExitCode {
     let format = if cli.json { Format::Json } else { cli.format };
     if cli.explain && matches!(format, Format::Json | Format::Sarif) {
         eprintln!(
-            "error: `--explain` is available only with `--format table` or `--format grouped`"
+            "error: `--explain` is available only with `--format table` or `--format by-package`"
         );
         return ExitCode::from(EXIT_ERROR);
     }
     let explain = cli.explain;
     let fix_attempted = cli.fix;
     let layout = TableLayout {
-        fields: cli.fields.clone(),
+        columns: cli.columns.clone(),
         sort_by: cli.sort_by,
     };
     let RunOutcome {
         report,
         threshold,
         warn_only,
-        lockfile,
+        lock_file,
         manifest_available,
     } = match run(cli).await {
         Ok(outcome) => outcome,
@@ -212,11 +212,11 @@ async fn main() -> ExitCode {
         Format::Sarif => {
             // Only the package lines are looked up in the text; a lock
             // file that cannot be re-read just loses those.
-            let contents = std::fs::read_to_string(&lockfile).unwrap_or_default();
+            let contents = std::fs::read_to_string(&lock_file).unwrap_or_default();
             let log = render::sarif::SarifLog::from_report(
                 &report,
-                &render::sarif::LockfileSource {
-                    path: &lockfile,
+                &render::sarif::LockFileSource {
+                    path: &lock_file,
                     contents: &contents,
                 },
             );
@@ -225,7 +225,7 @@ async fn main() -> ExitCode {
                 serde_json::to_string_pretty(&log).expect("SARIF log serializes")
             );
         }
-        Format::Grouped => print!(
+        Format::ByPackage => print!(
             "{}",
             render::render_human(
                 &report,
@@ -239,7 +239,7 @@ async fn main() -> ExitCode {
         ),
         Format::Table => render::table::write_table(
             &report,
-            &lockfile.display().to_string(),
+            &lock_file.display().to_string(),
             OutputStyle::detect_stdout(),
             &layout,
             render::GuidanceOptions {
@@ -252,16 +252,18 @@ async fn main() -> ExitCode {
         .expect("write report to stdout"),
     }
 
-    for id in &report.unmatched_ignores {
-        eprintln!("warning: ignore rule '{id}' matched no finding");
+    for id in &report.unused_ignores {
+        eprintln!("warning: ignore rule '{id}' matched no vulnerability");
     }
 
-    let gate = gate(&report, threshold, &warn_only);
+    let exit = exit_status(&report, threshold, &warn_only);
     if annotations::on_github_actions() {
         eprint!(
             "{}",
-            annotations::github_annotations(&report, |finding| {
-                if eligible(finding, &warn_only) && meets_severity_threshold(finding, threshold) {
+            annotations::github_annotations(&report, |vuln_match| {
+                if eligible(vuln_match, &warn_only)
+                    && meets_severity_threshold(vuln_match, threshold)
+                {
                     annotations::Level::Error
                 } else {
                     annotations::Level::Warning
@@ -270,70 +272,76 @@ async fn main() -> ExitCode {
         );
     }
 
-    match gate {
-        Gate::Fail => {
+    match exit {
+        ExitStatus::Fail => {
             eprintln!("error: audit found vulnerabilities");
             ExitCode::from(EXIT_VULNERABLE)
         }
-        Gate::BelowThreshold { band, count } => {
-            eprintln!("note: {count} vulnerabilities found below the '{band}' severity threshold");
+        ExitStatus::BelowThreshold { rating, count } => {
+            eprintln!(
+                "note: {count} vulnerability matches found below the '{rating}' severity threshold"
+            );
             ExitCode::SUCCESS
         }
-        Gate::Clean => ExitCode::SUCCESS,
+        ExitStatus::Clean => ExitCode::SUCCESS,
     }
 }
 
 /// What the report means for the exit code.
 #[derive(Debug, PartialEq, Eq)]
-enum Gate {
-    /// At least one non-warning-only finding at or above the threshold,
+enum ExitStatus {
+    /// At least one non-warning-only vulnerability match at or above the threshold,
     /// or with unknown severity: unscored advisories never slip under a threshold.
     Fail,
-    /// Non-warning-only findings exist, but every one sits below `band`.
-    BelowThreshold { band: SeverityBand, count: usize },
-    /// No findings eligible to fail the audit; warning-only findings may exist.
+    /// Non-warning-only vulnerability matches exist, but every one sits below `rating`.
+    BelowThreshold {
+        rating: SeverityRating,
+        count: usize,
+    },
+    /// No vulnerability matches eligible to fail the audit; warning-only matches may exist.
     Clean,
 }
 
-fn eligible(finding: &Finding, warn_only: &[WarnOnlyEcosystem]) -> bool {
+fn eligible(vuln_match: &Match, warn_only: &[WarnOnlyEcosystem]) -> bool {
     !warn_only
         .iter()
-        .any(|ecosystem| ecosystem.matches(&finding.package.ecosystem))
+        .any(|ecosystem| ecosystem.matches(&vuln_match.package.ecosystem))
 }
 
-fn meets_severity_threshold(finding: &Finding, threshold: Option<SeverityBand>) -> bool {
-    threshold
-        .is_none_or(|band| finding.severity == SeverityBand::Unknown || finding.severity >= band)
+fn meets_severity_threshold(vuln_match: &Match, threshold: Option<SeverityRating>) -> bool {
+    threshold.is_none_or(|rating| {
+        vuln_match.severity == SeverityRating::Unknown || vuln_match.severity >= rating
+    })
 }
 
-fn gate(
+fn exit_status(
     report: &AuditReport,
-    threshold: Option<SeverityBand>,
+    threshold: Option<SeverityRating>,
     warn_only: &[WarnOnlyEcosystem],
-) -> Gate {
+) -> ExitStatus {
     let mut count = 0;
-    for finding in report
-        .vulnerabilities
+    for vuln_match in report
+        .matches
         .iter()
-        .filter(|finding| eligible(finding, warn_only))
+        .filter(|vuln_match| eligible(vuln_match, warn_only))
     {
         count += 1;
-        if meets_severity_threshold(finding, threshold) {
-            return Gate::Fail;
+        if meets_severity_threshold(vuln_match, threshold) {
+            return ExitStatus::Fail;
         }
     }
-    if let Some(band) = threshold.filter(|_| count > 0) {
-        Gate::BelowThreshold { band, count }
+    if let Some(rating) = threshold.filter(|_| count > 0) {
+        ExitStatus::BelowThreshold { rating, count }
     } else {
-        Gate::Clean
+        ExitStatus::Clean
     }
 }
 
 struct RunOutcome {
     report: AuditReport,
-    threshold: Option<SeverityBand>,
+    threshold: Option<SeverityRating>,
     warn_only: Vec<WarnOnlyEcosystem>,
-    lockfile: PathBuf,
+    lock_file: PathBuf,
     manifest_available: bool,
 }
 
@@ -341,10 +349,10 @@ struct RunOutcome {
 /// run re-reads and re-audits it with identical settings.
 struct Auditor<'a> {
     client: BasiliskClient,
-    pypi_client: PypiAuditClient,
+    osv_client: OsvDevClient,
     epss_client: EpssClient,
     kev_client: KevClient,
-    lockfile: &'a Path,
+    lock_file: &'a Path,
     environments: &'a [String],
     platforms: &'a [String],
     ignore: IgnoreSpec<'a>,
@@ -352,12 +360,12 @@ struct Auditor<'a> {
 
 impl Auditor<'_> {
     async fn audit(&self) -> miette::Result<AuditReport> {
-        let lock_file = LockFile::from_path(self.lockfile)
+        let lock_file = LockFile::from_path(self.lock_file)
             .into_diagnostic()
-            .wrap_err_with(|| format!("failed to read lock file '{}'", self.lockfile.display()))?;
+            .wrap_err_with(|| format!("failed to read lock file '{}'", self.lock_file.display()))?;
         audit_lock_file(
             &self.client,
-            &self.pypi_client,
+            &self.osv_client,
             &lock_file,
             self.environments,
             self.platforms,
@@ -406,7 +414,7 @@ fn base_url_from_env(var: &str, default: &str) -> miette::Result<Url> {
 }
 
 async fn run(cli: Cli) -> miette::Result<RunOutcome> {
-    let targets = workspace::resolve_targets(cli.lockfile.clone())?;
+    let targets = workspace::resolve_targets(cli.lock_file.clone())?;
     let config = match &targets.manifest {
         Some(manifest) => config::load_config(manifest)?,
         None => config::AuditConfig::default(),
@@ -424,16 +432,16 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
             .into_iter()
             .map(|id| IgnoreRule::from_id(id, true)),
     );
-    let threshold = cli.severity.or(config.severity);
+    let threshold = cli.fail_on.or(config.fail_on);
     let ignore_unfixed = cli.ignore_unfixed || config.ignore_unfixed;
 
-    let base_url = base_url_from_env(BASE_URL_ENV_VAR, DEFAULT_BASE_URL)?;
-    let pypi_base_url = base_url_from_env(PYPI_BASE_URL_ENV_VAR, DEFAULT_PYPI_BASE_URL)?;
+    let base_url = base_url_from_env(BASILISK_URL_ENV_VAR, DEFAULT_BASILISK_URL)?;
+    let osv_url = base_url_from_env(OSV_URL_ENV_VAR, DEFAULT_OSV_URL)?;
     let epss_base_url = base_url_from_env(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?;
     let kev_url = base_url_from_env(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?;
     let audit_message = format!(
-        "Auditing {} against {base_url} and {pypi_base_url} ...",
-        targets.lockfile.display()
+        "Auditing {} against {base_url} and {osv_url} ...",
+        targets.lock_file.display()
     );
 
     let http_client = reqwest::Client::builder()
@@ -445,10 +453,10 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let threat_http = threat_http_client(http_client);
     let auditor = Auditor {
         client: BasiliskClient::new(http.clone(), base_url),
-        pypi_client: PypiAuditClient::new(http, pypi_base_url),
+        osv_client: OsvDevClient::new(http, osv_url),
         epss_client: EpssClient::new(threat_http.clone(), epss_base_url),
         kev_client: KevClient::new(threat_http, kev_url),
-        lockfile: &targets.lockfile,
+        lock_file: &targets.lock_file,
         environments: &cli.environments,
         platforms: &cli.platforms,
         ignore: IgnoreSpec {
@@ -467,9 +475,9 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     Ok(RunOutcome {
         report,
         threshold,
-        warn_only: cli.warn_only,
+        warn_only: cli.warn_only_ecosystem,
         manifest_available: targets.manifest.is_some(),
-        lockfile: targets.lockfile,
+        lock_file: targets.lock_file,
     })
 }
 
@@ -502,7 +510,9 @@ fn warn_unavailable_threat_data(status: &ThreatDataStatus) {
     for (name, source) in [("EPSS scores", &status.epss), ("KEV catalog", &status.kev)] {
         match source {
             ThreatSourceStatus::Failed { error } => {
-                eprintln!("warning: {name} unavailable, findings are ranked without them: {error}");
+                eprintln!(
+                    "warning: {name} unavailable, vulnerability matches are ranked without them: {error}"
+                );
             }
             ThreatSourceStatus::Disabled | ThreatSourceStatus::Loaded { .. } => {}
         }

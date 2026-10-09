@@ -5,7 +5,7 @@ use std::path::Path;
 use jiff::civil::Date;
 use miette::{Context, IntoDiagnostic, miette};
 use pixi_audit::{
-    IgnoreRule, SeverityBand,
+    IgnoreRule, SeverityRating,
     config::{AuditConfig as ManifestConfig, effective_ignores},
 };
 use serde::{Deserialize, de::IntoDeserializer};
@@ -19,9 +19,9 @@ use crate::workspace::Manifest;
 pub struct AuditConfig {
     /// Active rules from both ignore lists, in their original spelling.
     pub rules: Vec<IgnoreRule>,
-    /// Suppress every finding without a known fix until one is published.
+    /// Ignore every vulnerability match without a known fix until one is published.
     pub ignore_unfixed: bool,
-    pub severity: Option<SeverityBand>,
+    pub fail_on: Option<SeverityRating>,
 }
 
 /// Today's date in UTC, the reference for ignore rule expiry.
@@ -33,7 +33,7 @@ pub fn today() -> Date {
 
 /// Parses `[tool.pixi-audit]` from `manifest`. A missing table is an empty
 /// config; a present-but-invalid table is an error — a security tool must
-/// not silently drop configured suppressions. Unknown keys warn on stderr.
+/// not silently drop configured ignore rules. Unknown keys warn on stderr.
 pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
     let mut manifest = Manifest::load(manifest)?;
     let table = manifest
@@ -61,21 +61,21 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
         );
     }
 
-    let severity = raw
-        .severity
+    let fail_on = raw
+        .fail_on
         .as_deref()
-        .map(parse_band)
+        .map(parse_rating)
         .transpose()
         .map_err(|err| {
             miette!(
-                "invalid severity in [tool.pixi-audit] of '{}': {err}",
+                "invalid fail-on in [tool.pixi-audit] of '{}': {err}",
                 manifest.path.display()
             )
         })?;
 
     let today = today();
     let mut config = AuditConfig {
-        severity,
+        fail_on,
         ignore_unfixed: raw.ignore_unfixed,
         ..AuditConfig::default()
     };
@@ -93,7 +93,7 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
                 "warning: ignore rule {} in [tool.pixi-audit] of '{}' expired on {} and no longer applies",
                 expired.rule,
                 manifest.path.display(),
-                expired.until
+                expired.expired_at
             );
         }
         config.rules.extend(active);
@@ -103,22 +103,22 @@ pub fn load_config(manifest: &Path) -> miette::Result<AuditConfig> {
 
 /// Parses a severity threshold. Shared by clap's value parser and the
 /// config file, so both accept exactly the same values.
-pub fn parse_band(s: &str) -> Result<SeverityBand, String> {
-    match s.parse::<SeverityBand>() {
-        // "unknown" is a valid band but never a threshold: it must always
+pub fn parse_rating(s: &str) -> Result<SeverityRating, String> {
+    match s.parse::<SeverityRating>() {
+        // "unknown" is a valid rating but never a threshold: it must always
         // fail the audit, so it cannot be opted into.
-        Ok(SeverityBand::Unknown) | Err(_) => {
-            let expected: Vec<&str> = SeverityBand::ALL
+        Ok(SeverityRating::Unknown) | Err(_) => {
+            let expected: Vec<&str> = SeverityRating::ALL
                 .iter()
-                .filter(|band| **band != SeverityBand::Unknown)
-                .map(|band| band.name())
+                .filter(|rating| **rating != SeverityRating::Unknown)
+                .map(|rating| rating.name())
                 .collect();
             Err(format!(
-                "'{s}' is not a severity band (expected one of {})",
+                "'{s}' is not a severity rating (expected one of {})",
                 expected.join(", ")
             ))
         }
-        Ok(band) => Ok(band),
+        Ok(rating) => Ok(rating),
     }
 }
 

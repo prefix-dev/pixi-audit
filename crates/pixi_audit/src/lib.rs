@@ -15,8 +15,8 @@ pub mod threat;
 
 pub use audit::audit;
 pub use client::{
-    AuditError, BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL, DEFAULT_PYPI_BASE_URL,
-    PYPI_BASE_URL_ENV_VAR, PypiAuditClient,
+    AuditError, BASILISK_URL_ENV_VAR, BasiliskClient, DEFAULT_BASILISK_URL, DEFAULT_OSV_URL,
+    OSV_URL_ENV_VAR, OsvDevClient,
 };
 #[cfg(feature = "lock")]
 pub use lock::{LockFileAuditError, audit_lock_file, collect_packages};
@@ -25,14 +25,14 @@ pub use osv_protocol as types;
 #[cfg(feature = "lock")]
 pub use rattler_lock;
 pub use report::{
-    AuditPackage, AuditReport, AuditSummary, CondaPublication, Finding, FixStatus, IgnoreReason,
-    IgnoreRule, IgnoreScope, IgnoreSpec, InvalidIgnoreScope, InvalidPackageName,
-    MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageId,
-    PackageName, PackageVersion, ParsePackageVersionError, ParseSeverityBandError, SeverityBand,
-    SortStrategy, UpstreamFix, UpstreamOrigin,
+    AuditPackage, AuditReport, AuditSummary, CondaForgeBuild, FixAvailability, IgnoreMode,
+    IgnoreRule, IgnoreScope, IgnoreSpec, InvalidIgnoreScope, InvalidPackageName, Match,
+    MatchConfidence, MatchedIdentity, MatchedIdentityKind, OtherEcosystemFix, PackageEcosystem,
+    PackageId, PackageName, PackageVersion, ParsePackageVersionError, ParseSeverityRatingError,
+    SeverityRating, SortKey, UpstreamRelease,
 };
 pub use threat::{RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources};
 pub use threat_feeds::{
     DEFAULT_EPSS_BASE_URL, DEFAULT_KEV_URL, EPSS_BASE_URL_ENV_VAR, EpssClient, EpssScore,
-    KEV_URL_ENV_VAR, KevCatalog, KevClient, KnownExploited, RansomwareCampaignUse, ThreatFeedError,
+    KEV_URL_ENV_VAR, KevCatalog, KevClient, KevEntry, RansomwareCampaignUse, ThreatFeedError,
 };

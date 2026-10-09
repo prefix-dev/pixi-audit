@@ -14,7 +14,7 @@ mod constraint;
 /// Runs the whole `--fix` flow on top of `before`, the report of the
 /// current lock file: raises manifest constraints, runs `pixi update` for
 /// the fixable packages, then calls `reaudit` for the report of the
-/// updated lock file. Returns `before` untouched when no finding has a
+/// updated lock file. Returns `before` untouched when no vulnerability match has a
 /// fixed release to move to.
 pub async fn apply(
     targets: &ResolvedTargets,
@@ -23,10 +23,10 @@ pub async fn apply(
 ) -> miette::Result<AuditReport> {
     let names = before.fixable_package_names();
     if names.is_empty() {
-        if !before.vulnerabilities.is_empty() {
+        if !before.matches.is_empty() {
             eprintln!(
                 "fixed: no fixed release is known for the vulnerable packages \
-                 (fixes may exist only upstream); skipping `pixi update`"
+                 (fixes may exist only elsewhere); skipping `pixi update`"
             );
         }
         return Ok(before);
@@ -34,7 +34,7 @@ pub async fn apply(
     let manifest = targets.manifest.as_deref().ok_or_else(|| {
         miette!(
             "--fix requires a pixi workspace (no pixi.toml/pyproject.toml next to '{}')",
-            targets.lockfile.display()
+            targets.lock_file.display()
         )
     })?;
 

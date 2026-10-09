@@ -1,52 +1,77 @@
 use pixi_audit::{
-    AuditPackage, AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
-    PackageEcosystem, PackageId, PackageName, RansomwareCampaignUse, RiskScore, SeverityBand,
+    AuditPackage, AuditReport, AuditSummary, EpssScore, IgnoreMode, KevEntry, Match,
+    PackageEcosystem, PackageId, PackageName, RansomwareCampaignUse, RiskScore, SeverityRating,
     ThreatDataStatus, ThreatSourceStatus,
 };
 
-use pixi_audit::{CondaPublication, UpstreamFix, UpstreamOrigin};
+use pixi_audit::{CondaForgeBuild, OtherEcosystemFix, UpstreamRelease};
 
 use super::*;
 
-fn on_pypi(version: &str) -> UpstreamFix {
-    UpstreamFix {
+fn on_pypi(version: &str) -> OtherEcosystemFix {
+    OtherEcosystemFix {
         version: version.to_string(),
-        origin: UpstreamOrigin::Ecosystem {
-            ecosystem: "PyPI".to_string(),
-        },
+        ecosystem: "PyPI".to_string(),
     }
 }
 
-fn project_release(version: &str, conda_publication: CondaPublication) -> UpstreamFix {
-    UpstreamFix {
+fn upstream_release(version: &str, conda_forge_build: CondaForgeBuild) -> UpstreamRelease {
+    UpstreamRelease {
         version: version.to_string(),
-        origin: UpstreamOrigin::Project { conda_publication },
+        conda_forge_build,
     }
 }
 
 #[test]
-fn upstream_fixes_say_where_they_exist() {
+fn other_ecosystem_fixes_say_where_they_exist() {
+    let fix = on_pypi("3.2.0");
+    assert_eq!(other_ecosystem_fix_label(&fix), "PyPI: 3.2.0");
+    assert_eq!(describe_other_ecosystem_fix(&fix), "3.2.0 on PyPI");
+}
+
+#[test]
+fn upstream_releases_say_whether_conda_forge_has_a_build() {
     let cases = [
-        (on_pypi("3.2.0"), "PyPI: 3.2.0", "3.2.0 on PyPI"),
         (
-            project_release("2.8.2", CondaPublication::NotPublished),
+            upstream_release("2.8.2", CondaForgeBuild::Missing),
             "upstream: 2.8.2",
             "2.8.2 released upstream, no conda-forge build",
         ),
         (
-            project_release("2.8.2", CondaPublication::Unknown),
+            upstream_release("2.8.2", CondaForgeBuild::Unknown),
             "upstream: 2.8.2 (unconfirmed)",
             "2.8.2 released upstream, conda-forge build unconfirmed",
         ),
+        (
+            upstream_release("2.8.2", CondaForgeBuild::Available),
+            "upstream: 2.8.2",
+            "2.8.2 released upstream",
+        ),
     ];
-    for (fix, label, sentence) in cases {
-        assert_eq!(upstream_fix_label(&fix), label);
-        assert_eq!(describe_upstream_fix(&fix), sentence);
+    for (release, label, sentence) in cases {
+        assert_eq!(upstream_release_label(&release), label);
+        assert_eq!(describe_upstream_release(&release), sentence);
     }
 }
 
-fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
-    Finding {
+#[test]
+fn fixes_elsewhere_list_other_ecosystems_before_upstream_releases() {
+    let mut vuln_match = vuln_match("openssl", "CVE-2026-0002", SeverityRating::Medium);
+    vuln_match.fixed_versions = vec![];
+    vuln_match.other_ecosystem_fixes = vec![on_pypi("3.2.0")];
+    vuln_match.upstream_releases = vec![upstream_release("3.2.1", CondaForgeBuild::Missing)];
+    assert_eq!(
+        fix_elsewhere_labels(&vuln_match),
+        vec!["PyPI: 3.2.0".to_string(), "upstream: 3.2.1".to_string()]
+    );
+    assert_eq!(
+        describe_fixes_elsewhere(&vuln_match),
+        "3.2.0 on PyPI; 3.2.1 released upstream, no conda-forge build"
+    );
+}
+
+fn vuln_match(package: &str, id: &str, severity: SeverityRating) -> Match {
+    Match {
         package: PackageId {
             name: PackageName::conda(package).unwrap(),
             version: "3.1.0".to_string(),
@@ -58,15 +83,16 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
         severity,
         cvss_base_score: None,
         fixed_versions: vec!["3.1.4".to_string()],
-        upstream_fixes: vec![],
-        applicability: MatchApplicability::Unspecified,
+        other_ecosystem_fixes: vec![],
+        upstream_releases: vec![],
+        match_confidence: MatchConfidence::Unspecified,
         matched_identity: None,
         summary: None,
         url: Some(format!("https://osv.dev/{id}")),
         epss: vec![],
-        known_exploited: vec![],
+        kev: vec![],
         risk: RiskScore::NONE,
-        ignore_reason: None,
+        ignore_mode: None,
     }
 }
 
@@ -81,8 +107,8 @@ fn loaded_threat_data() -> ThreatDataStatus {
     }
 }
 
-fn kev_entry(cve: &str, ransomware: RansomwareCampaignUse) -> KnownExploited {
-    KnownExploited {
+fn kev_entry(cve: &str, ransomware: RansomwareCampaignUse) -> KevEntry {
+    KevEntry {
         cve: cve.to_string(),
         vendor_project: "OpenSSL".to_string(),
         product: "OpenSSL".to_string(),
@@ -97,7 +123,7 @@ fn kev_entry(cve: &str, ransomware: RansomwareCampaignUse) -> KnownExploited {
 
 #[test]
 fn threat_cells_render_risk_epss_and_kev() {
-    let mut scored = finding("openssl", "CVE-2026-0001", SeverityBand::Critical);
+    let mut scored = vuln_match("openssl", "CVE-2026-0001", SeverityRating::Critical);
     scored.epss = vec![
         EpssScore {
             cve: "CVE-2026-0000".to_string(),
@@ -112,9 +138,9 @@ fn threat_cells_render_risk_epss_and_kev() {
             date: "2026-09-01".to_string(),
         },
     ];
-    scored.known_exploited = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Known)];
-    scored.risk = RiskScore::compute(scored.severity, None, &scored.epss, &scored.known_exploited);
-    let mut tiny = finding("openssl", "CVE-2026-0002", SeverityBand::Low);
+    scored.kev = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Known)];
+    scored.risk = RiskScore::compute(scored.severity, None, &scored.epss, &scored.kev);
+    let mut tiny = vuln_match("openssl", "CVE-2026-0002", SeverityRating::Low);
     tiny.epss = vec![EpssScore {
         cve: "CVE-2026-0002".to_string(),
         epss: 0.0004,
@@ -122,9 +148,9 @@ fn threat_cells_render_risk_epss_and_kev() {
         date: "2026-09-01".to_string(),
     }];
     tiny.risk = RiskScore::compute(tiny.severity, None, &tiny.epss, &[]);
-    let unscored = finding("openssl", "CVE-2026-0003", SeverityBand::Medium);
+    let unscored = vuln_match("openssl", "CVE-2026-0003", SeverityRating::Medium);
     let report = AuditReport {
-        vulnerabilities: vec![scored, tiny, unscored],
+        matches: vec![scored, tiny, unscored],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 3,
@@ -147,9 +173,8 @@ fn threat_cells_render_risk_epss_and_kev() {
         "{text}"
     );
     assert!(
-        text.lines().any(|line| {
-            line.contains("Highest finding prioritization score:") && line.ends_with("99.0 / 100")
-        }),
+        text.lines()
+            .any(|line| { line.contains("Highest risk score:") && line.ends_with("99.0 / 100") }),
         "{text}"
     );
     assert!(
@@ -174,7 +199,7 @@ fn threat_cells_render_risk_epss_and_kev() {
 #[test]
 fn threat_cells_are_omitted_when_no_source_is_configured() {
     let report = AuditReport {
-        vulnerabilities: vec![finding("openssl", "CVE-2026-0001", SeverityBand::High)],
+        matches: vec![vuln_match("openssl", "CVE-2026-0001", SeverityRating::High)],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -190,7 +215,7 @@ fn threat_cells_are_omitted_when_no_source_is_configured() {
 #[test]
 fn unavailable_kev_catalog_is_not_reported_as_zero() {
     let report = AuditReport {
-        vulnerabilities: vec![finding("openssl", "CVE-2026-0001", SeverityBand::High)],
+        matches: vec![vuln_match("openssl", "CVE-2026-0001", SeverityRating::High)],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -214,11 +239,11 @@ fn unavailable_kev_catalog_is_not_reported_as_zero() {
 
 #[test]
 fn kev_is_marked_on_the_risk_cell() {
-    let mut listed = finding("openssl", "CVE-2026-0001", SeverityBand::High);
-    listed.known_exploited = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Unknown)];
-    listed.risk = RiskScore::compute(listed.severity, None, &[], &listed.known_exploited);
+    let mut listed = vuln_match("openssl", "CVE-2026-0001", SeverityRating::High);
+    listed.kev = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Unknown)];
+    listed.risk = RiskScore::compute(listed.severity, None, &[], &listed.kev);
     let report = AuditReport {
-        vulnerabilities: vec![listed],
+        matches: vec![listed],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -241,23 +266,23 @@ fn kev_is_marked_on_the_risk_cell() {
 
 #[test]
 fn explain_adds_contextual_definitions_after_actions() {
-    let mut listed = finding("openssl", "CVE-2026-0001", SeverityBand::High);
+    let mut listed = vuln_match("openssl", "CVE-2026-0001", SeverityRating::High);
     listed.epss = vec![EpssScore {
         cve: "CVE-2026-0001".to_string(),
         epss: 0.5,
         percentile: 0.9,
         date: "2026-09-01".to_string(),
     }];
-    listed.known_exploited = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Unknown)];
-    listed.applicability = MatchApplicability::VersionUnbounded;
-    listed.risk = RiskScore::compute(listed.severity, None, &listed.epss, &listed.known_exploited);
+    listed.kev = vec![kev_entry("CVE-2026-0001", RansomwareCampaignUse::Unknown)];
+    listed.match_confidence = MatchConfidence::VersionUnbounded;
+    listed.risk = RiskScore::compute(listed.severity, None, &listed.epss, &listed.kev);
 
-    let mut ignored = finding("libxml2", "CVE-2026-0002", SeverityBand::Low);
-    ignored.ignore_reason = Some(IgnoreReason::Always);
+    let mut ignored = vuln_match("libxml2", "CVE-2026-0002", SeverityRating::Low);
+    ignored.ignore_mode = Some(IgnoreMode::Permanent);
     let report = AuditReport {
-        vulnerabilities: vec![listed],
+        matches: vec![listed],
         ignored: vec![ignored],
-        unchecked: vec![AuditPackage {
+        not_audited: vec![AuditPackage {
             name: PackageName::conda("samtools").unwrap(),
             version: Some("1.2".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
@@ -267,7 +292,7 @@ fn explain_adds_contextual_definitions_after_actions() {
             audited: 3,
             vulnerable: 1,
             ignored: 1,
-            unchecked: 1,
+            not_audited: 1,
         },
         threat_data: loaded_threat_data(),
         ..Default::default()
@@ -279,35 +304,35 @@ fn explain_adds_contextual_definitions_after_actions() {
             ..Default::default()
         },
     );
-    let actions = text.find("Next steps").unwrap();
-    let explanation = text.find("How this report works").unwrap();
+    let actions = text.find("Recommendations").unwrap();
+    let explanation = text.find("Definitions").unwrap();
     assert!(actions < explanation, "{text}");
     assert!(
         text.contains(
-            "How this report works\n\n  Counts\n    Package  One locked name, version, and source.\n"
+            "Definitions\n\n  Counts\n    Package              One locked name, version, and source.\n"
         ),
         "{text}"
     );
-    let threat = text.find("\n  Threat signals\n").unwrap();
-    let prioritization = text.find("\n  Prioritization\n").unwrap();
-    assert!(threat < prioritization, "{text}");
+    let threat = text.find("\n  Threat data\n").unwrap();
+    let risk = text.find("\n  Risk\n").unwrap();
+    assert!(threat < risk, "{text}");
     assert!(
         text.contains(
-            "\n    Risk      A 0–100 score for ordering individual findings.\n      Formula   min(threat × severity × boost, 1) × 100.\n    Threat"
+            "\n    Risk      A 0–100 score for ordering individual vulnerability matches.\n      Formula   min(threat × severity × boost, 1) × 100.\n    Threat"
         ),
         "{text}"
     );
     assert!(text.contains("\n  Fixes\n"), "{text}");
-    assert!(text.contains("\n  Coverage\n"), "{text}");
+    assert!(text.contains("\n  Ignored and not audited\n"), "{text}");
     for expected in [
-        "A 0–100 score for ordering individual findings.",
+        "A 0–100 score for ordering individual vulnerability matches.",
         "highest EPSS probability",
         "Critical .90, high .75, medium/unknown .50, low .30.",
         "CISA confirms exploitation in the wild.",
         "Estimated chance of exploitation within 30 days.",
         "`kev` alone means CISA does not mark that use as Known.",
         "A fixed release exists for the audited package source.",
-        "Fix only upstream",
+        "Fix only elsewhere",
         "Audit sources list no fixed release.",
         "Excluded from active totals and the failure decision.",
         "The package source lacks vulnerability database coverage.",
@@ -320,7 +345,7 @@ fn explain_adds_contextual_definitions_after_actions() {
 
 #[test]
 fn unknown_severity_keeps_threat_cells() {
-    let mut unknown = finding("requests", "PYSEC-2026-1", SeverityBand::Unknown);
+    let mut unknown = vuln_match("requests", "PYSEC-2026-1", SeverityRating::Unknown);
     unknown.package.ecosystem = PackageEcosystem::Pypi;
     unknown.epss = vec![EpssScore {
         cve: "CVE-2026-9999".to_string(),
@@ -330,7 +355,7 @@ fn unknown_severity_keeps_threat_cells() {
     }];
     unknown.risk = RiskScore::compute(unknown.severity, None, &unknown.epss, &[]);
     let report = AuditReport {
-        vulnerabilities: vec![unknown],
+        matches: vec![unknown],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -362,19 +387,19 @@ fn empty_report_renders_clean_summary() {
     let text = render_human(&report, RenderOptions::default());
     assert_eq!(
         text,
-        "No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)\n\nNext steps\n  • None. No vulnerabilities were found in checked packages.\n\nAdd `--explain` for scoring and report definitions.\n"
+        "No vulnerabilities found (5 audited, 0 ignored, 0 not audited)\n\nRecommendations\n  • None. No vulnerabilities were found in audited packages.\n\nAdd `--explain` for scoring and report definitions.\n"
     );
 }
 
 #[test]
-fn findings_are_grouped_per_package_with_fix_and_url() {
-    let mut second = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
+fn matches_are_grouped_per_package_with_fix_and_url() {
+    let mut second = vuln_match("openssl", "CVE-2026-0002", SeverityRating::Medium);
     second.fixed_versions = vec![];
-    second.upstream_fixes = vec![on_pypi("3.2.0")];
+    second.other_ecosystem_fixes = vec![on_pypi("3.2.0")];
     second.url = None;
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding("openssl", "CVE-2026-0001", SeverityBand::High),
+        matches: vec![
+            vuln_match("openssl", "CVE-2026-0001", SeverityRating::High),
             second,
         ],
         summary: AuditSummary {
@@ -394,7 +419,7 @@ fn findings_are_grouped_per_package_with_fix_and_url() {
     assert!(text.contains("https://osv.dev/CVE-2026-0001"));
     assert!(text.contains("CVE-2026-0002  MEDIUM    fix released elsewhere: 3.2.0 on PyPI"));
     assert!(
-        text.contains("2 vulnerabilities in 1 package(s) (10 audited, 0 ignored, 0 unchecked)")
+        text.contains("2 vulnerabilities in 1 package(s) (10 audited, 0 ignored, 0 not audited)")
     );
     assert!(text.lines().any(|line| {
         line.contains("Fix available in audited ecosystem:")
@@ -402,7 +427,7 @@ fn findings_are_grouped_per_package_with_fix_and_url() {
     }));
     assert!(
         text.lines()
-            .any(|line| line.contains("Fix only upstream:") && line.ends_with("1 vulnerability"))
+            .any(|line| line.contains("Fix only elsewhere:") && line.ends_with("1 vulnerability"))
     );
     assert!(
         text.lines()
@@ -411,16 +436,16 @@ fn findings_are_grouped_per_package_with_fix_and_url() {
     assert!(text.contains(
         "Re-run this audit with `--fix` to ask pixi to update 1 package name. Fixed releases in the audited ecosystem are available for 1 vulnerability."
     ));
-    assert!(text.contains("1 vulnerability has a fix only upstream. `--fix` cannot install it."));
+    assert!(text.contains("1 vulnerability has a fix only elsewhere. `--fix` cannot install it."));
 }
 
 #[test]
 fn hyperlinks_wrap_the_id_and_replace_the_url_line() {
-    let mut without_url = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
+    let mut without_url = vuln_match("openssl", "CVE-2026-0002", SeverityRating::Medium);
     without_url.url = None;
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding("openssl", "CVE-2026-0001", SeverityBand::High),
+        matches: vec![
+            vuln_match("openssl", "CVE-2026-0001", SeverityRating::High),
             without_url,
         ],
         summary: AuditSummary {
@@ -445,14 +470,14 @@ fn hyperlinks_wrap_the_id_and_replace_the_url_line() {
 }
 
 #[test]
-fn findings_from_different_ecosystems_are_separate_packages() {
-    let conda = finding("openssl", "CVE-2026-0001", SeverityBand::High);
-    let mut pypi = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
+fn matches_from_different_ecosystems_are_separate_packages() {
+    let conda = vuln_match("openssl", "CVE-2026-0001", SeverityRating::High);
+    let mut pypi = vuln_match("openssl", "CVE-2026-0002", SeverityRating::Medium);
     pypi.package.name = PackageName::pypi("openssl").unwrap();
     pypi.package.ecosystem = PackageEcosystem::Pypi;
     pypi.environments = vec!["docs".to_string()];
     let report = AuditReport {
-        vulnerabilities: vec![conda, pypi],
+        matches: vec![conda, pypi],
         summary: AuditSummary {
             audited: 2,
             vulnerable: 2,
@@ -473,11 +498,11 @@ fn findings_from_different_ecosystems_are_separate_packages() {
 }
 
 #[test]
-fn finding_without_any_fix_says_so() {
-    let mut f = finding("openssl", "CVE-2026-0003", SeverityBand::Unknown);
-    f.fixed_versions = vec![];
+fn match_without_any_fix_says_so() {
+    let mut no_fix = vuln_match("openssl", "CVE-2026-0003", SeverityRating::Unknown);
+    no_fix.fixed_versions = vec![];
     let report = AuditReport {
-        vulnerabilities: vec![f],
+        matches: vec![no_fix],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -496,7 +521,11 @@ fn finding_without_any_fix_says_so() {
 #[test]
 fn grouped_report_after_fix_recommends_review_instead_of_retry() {
     let report = AuditReport {
-        vulnerabilities: vec![finding("openssl", "CVE-2026-0001", SeverityBand::Critical)],
+        matches: vec![vuln_match(
+            "openssl",
+            "CVE-2026-0001",
+            SeverityRating::Critical,
+        )],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -520,7 +549,11 @@ fn grouped_report_after_fix_recommends_review_instead_of_retry() {
 #[test]
 fn grouped_report_without_manifest_does_not_offer_fix() {
     let report = AuditReport {
-        vulnerabilities: vec![finding("openssl", "CVE-2026-0001", SeverityBand::Critical)],
+        matches: vec![vuln_match(
+            "openssl",
+            "CVE-2026-0001",
+            SeverityRating::Critical,
+        )],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -542,10 +575,10 @@ fn grouped_report_without_manifest_does_not_offer_fix() {
 }
 
 #[test]
-fn ignored_and_unchecked_sections_render() {
+fn ignored_and_not_audited_sections_render() {
     let report = AuditReport {
-        ignored: vec![finding("openssl", "CVE-2026-0001", SeverityBand::High)],
-        unchecked: vec![AuditPackage {
+        ignored: vec![vuln_match("openssl", "CVE-2026-0001", SeverityRating::High)],
+        not_audited: vec![AuditPackage {
             name: PackageName::conda("samtools").unwrap(),
             version: Some("1.19".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
@@ -555,35 +588,35 @@ fn ignored_and_unchecked_sections_render() {
             audited: 3,
             vulnerable: 0,
             ignored: 1,
-            unchecked: 1,
+            not_audited: 1,
         },
         ..Default::default()
     };
     let text = render_human(&report, RenderOptions::default());
     assert!(
-        text.starts_with("1 package(s) could not be checked:"),
+        text.starts_with("1 package(s) could not be audited:"),
         "{text}"
     );
-    assert!(text.contains("Ignored 1 finding(s):"));
+    assert!(text.contains("Ignored 1 vulnerability match(es):"));
     assert!(text.contains("  CVE-2026-0001 (openssl 3.1.0)"));
-    assert!(text.contains("1 package(s) could not be checked:"));
+    assert!(text.contains("1 package(s) could not be audited:"));
     assert!(text.contains("  samtools 1.19 (bioconda) — default"));
-    assert!(text.contains("No vulnerabilities found (3 audited, 1 ignored, 1 unchecked)"));
-    assert!(text.contains("No active vulnerabilities were found in checked packages."));
-    assert!(text.contains("Review 1 ignored finding periodically."));
+    assert!(text.contains("No vulnerabilities found (3 audited, 1 ignored, 1 not audited)"));
+    assert!(text.contains("No active vulnerabilities were found in audited packages."));
+    assert!(text.contains("Review 1 ignored vulnerability match periodically."));
     assert!(text.contains(
-        "Review 1 unchecked package. Its source is not covered by the configured vulnerability databases."
+        "Review 1 package that was not audited. Its source is not covered by the configured vulnerability databases."
     ));
 }
 
 #[test]
 fn until_fixed_ignores_are_marked() {
-    let mut always = finding("openssl", "CVE-2026-0001", SeverityBand::High);
-    always.ignore_reason = Some(pixi_audit::IgnoreReason::Always);
-    let mut until = finding("openssl", "CVE-2026-0002", SeverityBand::High);
-    until.ignore_reason = Some(pixi_audit::IgnoreReason::UntilFixed);
+    let mut permanent = vuln_match("openssl", "CVE-2026-0001", SeverityRating::High);
+    permanent.ignore_mode = Some(pixi_audit::IgnoreMode::Permanent);
+    let mut until = vuln_match("openssl", "CVE-2026-0002", SeverityRating::High);
+    until.ignore_mode = Some(pixi_audit::IgnoreMode::UntilFixed);
     let report = AuditReport {
-        ignored: vec![always, until],
+        ignored: vec![permanent, until],
         summary: AuditSummary {
             ignored: 2,
             ..Default::default()
@@ -596,16 +629,16 @@ fn until_fixed_ignores_are_marked() {
 }
 
 #[test]
-fn unchecked_package_without_version_renders_question_mark() {
+fn not_audited_package_without_version_renders_question_mark() {
     let report = AuditReport {
-        unchecked: vec![AuditPackage {
+        not_audited: vec![AuditPackage {
             name: PackageName::conda("mypkg").unwrap(),
             version: None,
             ecosystem: PackageEcosystem::Other("unknown".to_string()),
             environments: vec!["default".to_string()],
         }],
         summary: AuditSummary {
-            unchecked: 1,
+            not_audited: 1,
             ..Default::default()
         },
         ..Default::default()
@@ -617,15 +650,15 @@ fn unchecked_package_without_version_renders_question_mark() {
 
 #[test]
 fn weak_matches_carry_a_note() {
-    let mut unbounded = finding("libpq", "CVE-2022-25852", SeverityBand::High);
+    let mut unbounded = vuln_match("libpq", "CVE-2022-25852", SeverityRating::High);
     unbounded.fixed_versions = vec![];
-    unbounded.applicability = MatchApplicability::VersionUnbounded;
-    let mut unevaluated = finding("libpq", "CVE-2026-0009", SeverityBand::Medium);
-    unevaluated.applicability = MatchApplicability::Unevaluated;
-    let mut evaluated = finding("libpq", "CVE-2026-0010", SeverityBand::Low);
-    evaluated.applicability = MatchApplicability::Evaluated;
+    unbounded.match_confidence = MatchConfidence::VersionUnbounded;
+    let mut unevaluated = vuln_match("libpq", "CVE-2026-0009", SeverityRating::Medium);
+    unevaluated.match_confidence = MatchConfidence::Unevaluated;
+    let mut evaluated = vuln_match("libpq", "CVE-2026-0010", SeverityRating::Low);
+    evaluated.match_confidence = MatchConfidence::Evaluated;
     let report = AuditReport {
-        vulnerabilities: vec![unbounded, unevaluated, evaluated],
+        matches: vec![unbounded, unevaluated, evaluated],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 3,
@@ -636,12 +669,14 @@ fn weak_matches_carry_a_note() {
     let text = render_human(&report, RenderOptions::default());
     assert!(
         text.contains(
-            "CVE-2022-25852  HIGH      no known fixed version  match: no version limits\n"
+            "CVE-2022-25852  HIGH      no known fixed version  confidence: no version limits\n"
         ),
         "{text}"
     );
     assert!(
-        text.contains("CVE-2026-0009  MEDIUM    fixed in: 3.1.4  match: version not checked\n"),
+        text.contains(
+            "CVE-2026-0009  MEDIUM    fixed in: 3.1.4  confidence: version not checked\n"
+        ),
         "{text}"
     );
 }

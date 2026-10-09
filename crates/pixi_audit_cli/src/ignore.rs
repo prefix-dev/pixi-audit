@@ -1,5 +1,5 @@
 //! `pixi audit ignore`: records ignore rules in the workspace manifest's
-//! `[tool.pixi-audit]` table, so a suppression lives next to the code it
+//! `[tool.pixi-audit]` table, so an ignore rule lives next to the code it
 //! covers instead of in a CI script.
 
 use std::path::PathBuf;
@@ -26,10 +26,10 @@ pub struct IgnoreArgs {
     #[arg(required_unless_present = "package", value_name = "ID")]
     pub ids: Vec<String>,
 
-    /// Limit the rule to this package, or ignore every finding in it
+    /// Limit the rule to this package, or ignore every vulnerability match in it
     #[arg(long, value_name = "NAME")]
     pub package: Option<String>,
-    /// Match findings from this ecosystem (conda-forge or PyPI)
+    /// Match vulnerabilities from this ecosystem (conda-forge or PyPI)
     #[arg(long, value_name = "ECOSYSTEM")]
     pub ecosystem: Option<String>,
 
@@ -39,20 +39,20 @@ pub struct IgnoreArgs {
 
     /// Match installed versions no newer than this one
     #[arg(long, value_name = "VERSION")]
-    pub max_affected_version: Option<String>,
+    pub up_to_version: Option<String>,
 
     /// Ignore only while no fixed release is known
     #[arg(long)]
     pub until_fixed: bool,
 
-    /// Why the finding is ignored; recorded next to the id
+    /// Why the vulnerability is ignored; recorded next to the id
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
     /// Last day the rule applies (YYYY-MM-DD). After it the audit reports
-    /// the finding again and warns about the expired rule.
+    /// the vulnerability match again and warns about the expired rule.
     #[arg(long, value_name = "DATE", value_parser = parse_date)]
-    pub until: Option<Date>,
+    pub expired_at: Option<Date>,
 
     /// Manifest to edit. Discovered from the current directory when
     /// omitted.
@@ -66,10 +66,10 @@ fn parse_date(text: &str) -> Result<Date, String> {
 }
 
 pub fn run(args: IgnoreArgs) -> miette::Result<()> {
-    if let Some(until) = args.until
-        && until < config::today()
+    if let Some(expired_at) = args.expired_at
+        && expired_at < config::today()
     {
-        return Err(miette!("--until {until} is in the past"));
+        return Err(miette!("--expired-at {expired_at} is in the past"));
     }
     let mut manifest = match args.manifest {
         Some(path) => Manifest::load(&path)?,
@@ -87,13 +87,13 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
     let list = if args.until_fixed {
         IgnoreList::UntilFixed
     } else {
-        IgnoreList::Always
+        IgnoreList::Permanent
     };
     let scope = IgnoreScope {
         package: args.package,
         ecosystem: args.ecosystem,
         version: args.version,
-        max_affected_version: args.max_affected_version,
+        up_to_version: args.up_to_version,
     };
     let outcome = add_rules(
         &mut manifest.document,
@@ -101,7 +101,7 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
         &args.ids,
         &scope,
         args.reason.as_deref(),
-        args.until,
+        args.expired_at,
     )?;
     if !outcome.added.is_empty() {
         manifest.save()?;
@@ -111,7 +111,7 @@ pub fn run(args: IgnoreArgs) -> miette::Result<()> {
         eprintln!(
             "Ignoring {rule}{} in '{}'",
             match list {
-                IgnoreList::Always => "",
+                IgnoreList::Permanent => "",
                 IgnoreList::UntilFixed => " until a fix is released",
             },
             manifest.path.display()
@@ -135,7 +135,7 @@ pub struct Outcome {
     pub existing: Vec<String>,
 }
 
-/// What one rule suppresses, with identifiers lowercased for comparison.
+/// What one rule ignores, with identifiers lowercased for comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuleKey {
     id: Option<String>,
@@ -167,7 +167,7 @@ pub fn add_rules(
     ids: &[String],
     scope: &IgnoreScope,
     reason: Option<&str>,
-    until: Option<Date>,
+    expired_at: Option<Date>,
 ) -> miette::Result<Outcome> {
     scope.validate().map_err(|error| miette!("{error}"))?;
     if ids.is_empty() && scope.package.is_none() {
@@ -199,7 +199,7 @@ pub fn add_rules(
             outcome.existing.push(label);
             continue;
         }
-        array.push(rule_value(id, scope, reason, until)?);
+        array.push(rule_value(id, scope, reason, expired_at)?);
         added_keys.push(key);
         outcome.added.push(label);
     }
@@ -224,7 +224,7 @@ fn audit_table(document: &mut DocumentMut) -> miette::Result<&mut Table> {
         .ok_or_else(|| miette!("[tool.pixi-audit] in the manifest is not a table"))
 }
 
-/// What an ignore list entry suppresses, for both the bare and table
+/// What an ignore list entry ignores, for both the bare and table
 /// forms. Entries of another shape are skipped here; the config loader
 /// reports them.
 fn entry_key(entry: &Value) -> Option<RuleKey> {
@@ -239,12 +239,12 @@ fn rule_value(
     id: Option<&str>,
     scope: &IgnoreScope,
     reason: Option<&str>,
-    until: Option<Date>,
+    expired_at: Option<Date>,
 ) -> miette::Result<Value> {
     let entry = if let Some(id) = id
         && scope.is_empty()
         && reason.is_none()
-        && until.is_none()
+        && expired_at.is_none()
     {
         IgnoreEntry::Id(id.to_string())
     } else {
@@ -252,7 +252,7 @@ fn rule_value(
             id: id.map(str::to_string),
             scope: scope.clone(),
             reason: reason.map(str::to_string),
-            until: until.map(|until| toml::Value::String(until.to_string())),
+            expired_at: expired_at.map(|date| toml::Value::String(date.to_string())),
         })
     };
     entry
