@@ -7,7 +7,7 @@ license.workspace = true
 name = "pixi_audit"
 readme.workspace = true
 repository.workspace = true
-version = "0.1.2"
+version = "0.2.0"
 
 [features]
 default = ["lock"]
