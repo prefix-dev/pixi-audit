@@ -112,7 +112,10 @@ fn client_builder(
         builder = builder
             .with(SharedLogin {
                 authentication: AuthenticationMiddleware::from_auth_storage(storage.clone())
-                    .with_credential_key(CREDENTIAL_KEY, base_url.origin()),
+                    .with_credentials_from(
+                        url::Host::Domain(CREDENTIAL_KEY.to_owned()),
+                        [base_url.origin()],
+                    ),
                 storage,
                 origin: base_url.origin(),
                 warned: AtomicBool::new(false),

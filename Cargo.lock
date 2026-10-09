@@ -2864,7 +2864,7 @@ dependencies = [
 [[package]]
 name = "rattler_networking"
 version = "0.33.1"
-source = "git+https://github.com/conda/rattler?rev=6a6e5774601bfe5d6b4508e689e6a55912a9ba06#6a6e5774601bfe5d6b4508e689e6a55912a9ba06"
+source = "git+https://github.com/conda/rattler?rev=4c8fe3359b6ac03df7faa04f23e3ddbb1ec7cd0f#4c8fe3359b6ac03df7faa04f23e3ddbb1ec7cd0f"
 dependencies = [
  "ambient-id",
  "apple-native-keyring-store",

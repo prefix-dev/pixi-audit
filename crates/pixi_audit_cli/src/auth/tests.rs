@@ -129,14 +129,6 @@ async fn missing_unrelated_and_old_credentials_stay_anonymous() {
         )),
         Some(("*.prefix.dev".into(), cached_grant())),
         Some(("api.basilisk.prefix.dev".into(), cached_grant())),
-        Some((
-            AuthenticationStorage::oauth_audience_key(
-                "https://prefix.dev",
-                CLIENT_ID,
-                DEFAULT_BASE_URL,
-            ),
-            cached_grant(),
-        )),
     ] {
         let store = storage();
         if let Some((key, auth)) = entry {
@@ -287,12 +279,7 @@ async fn expired_login_refreshes_same_host_entry_or_audits_anonymously() {
         } else {
             assert_eq!(store.get(CREDENTIAL_KEY).unwrap(), Some(old));
         }
-        let old_key = AuthenticationStorage::oauth_audience_key(
-            "https://prefix.dev",
-            CLIENT_ID,
-            DEFAULT_BASE_URL,
-        );
-        assert_eq!(store.get(&old_key).unwrap(), None);
+        assert_eq!(store.list().unwrap().len(), 1);
         server.abort();
     }
 }
