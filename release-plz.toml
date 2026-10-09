@@ -45,8 +45,10 @@ version_group = "pixi-audit"
 git_tag_name = "{{ package }}-v{{ version }}"
 git_tag_enable = true
 
-# Test-only and `publish = false`. Outside git-only mode release-plz skips
-# unpublishable packages; in git-only mode it would tag and release it.
+# Test-only: skip tag-baseline discovery as well as version updates and releases.
+# Disabling git-only mode also requires disabling its default registry publishing.
 [[package]]
 name = "pixi_audit_test_support"
+release = false
 git_only = false
+publish = false
