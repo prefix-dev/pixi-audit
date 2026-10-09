@@ -13,7 +13,7 @@ mod types;
 
 pub use epss::{DEFAULT_EPSS_BASE_URL, EPSS_BASE_URL_ENV_VAR, EpssClient};
 pub use kev::{DEFAULT_KEV_URL, KEV_URL_ENV_VAR, KevCatalog, KevClient};
-pub use types::{EpssScore, KnownExploited, RansomwareCampaignUse};
+pub use types::{EpssScore, KevEntry, RansomwareCampaignUse};
 
 /// A failed request to a threat-data feed (EPSS or KEV).
 #[derive(Debug, Error)]
@@ -40,7 +40,7 @@ pub enum ThreatFeedError {
         #[source]
         source: reqwest::Error,
     },
-    #[error("invalid threat feed base URL")]
+    #[error("invalid threat data base URL")]
     InvalidBaseUrl(#[source] url::ParseError),
 }
 

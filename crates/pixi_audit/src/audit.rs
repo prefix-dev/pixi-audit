@@ -1,7 +1,7 @@
-//! Audit orchestration across the Basilisk and PyPI backends, plus the
-//! threat-data enrichment of the resulting findings.
+//! Audit orchestration across the Basilisk and PyPI databases, plus the
+//! threat-data enrichment of the resulting vulnerability matches.
 
-mod findings;
+mod matches;
 
 use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
@@ -9,17 +9,17 @@ use std::str::FromStr;
 use futures::{StreamExt, TryStreamExt};
 use threat_feeds::{EpssClient, EpssScore, KevCatalog, KevClient};
 
-use findings::FindingGroups;
+use matches::MatchGroups;
 
 use crate::{
     advisory::{
         BasiliskMatch, FixedVersions, basilisk_advisory_url, basilisk_match, fixed_versions,
         pypi_advisory_url,
     },
-    client::{AuditError, BasiliskClient, PypiAuditClient},
+    client::{AuditError, BasiliskClient, OsvDevClient},
     report::{
-        AuditPackage, AuditReport, Finding, FixStatus, IgnoreReason, IgnoreRule, IgnoreSpec,
-        MatchApplicability, PackageEcosystem, PackageId, SeverityBand, SortStrategy,
+        AuditPackage, AuditReport, FixAvailability, IgnoreMode, IgnoreRule, IgnoreSpec, Match,
+        MatchConfidence, PackageEcosystem, PackageId, SeverityRating, SortKey,
         mean_cvss_base_score,
     },
     threat::{RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
@@ -32,42 +32,42 @@ const MAX_CONCURRENT_DETAIL_FETCHES: usize = 16;
 /// The vulnerability database a package is checked against, together with
 /// the policy for interpreting what that database returns.
 ///
-/// The discriminants index [`Backend::ALL`] and the per-backend tables in
-/// [`query_backends`].
+/// The discriminants index [`Database::ALL`] and the per-database tables in
+/// [`query_databases`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Backend {
+enum Database {
     /// Basilisk, which answers for conda-forge packages.
     Basilisk = 0,
     /// OSV.dev, which answers for PyPI packages.
     Pypi = 1,
 }
 
-impl Backend {
-    const ALL: [Backend; 2] = [Backend::Basilisk, Backend::Pypi];
+impl Database {
+    const ALL: [Database; 2] = [Database::Basilisk, Database::Pypi];
 
-    /// The backend that answers for `ecosystem`, if any.
+    /// The database that answers for `ecosystem`, if any.
     fn for_ecosystem(ecosystem: &PackageEcosystem) -> Option<Self> {
         match ecosystem {
-            PackageEcosystem::CondaForge => Some(Backend::Basilisk),
-            PackageEcosystem::Pypi => Some(Backend::Pypi),
-            // No backend answers for other channels or source packages.
+            PackageEcosystem::CondaForge => Some(Database::Basilisk),
+            PackageEcosystem::Pypi => Some(Database::Pypi),
+            // No database answers for other channels or source packages.
             PackageEcosystem::Other(_) => None,
         }
     }
 
     /// Basilisk's batch index can briefly reference an id whose document
-    /// is not served yet, so a 404 degrades to an id-only finding with
+    /// is not served yet, so a 404 degrades to an id-only vulnerability match with
     /// unknown severity. Any other failure, and any PyPI failure, aborts
-    /// the audit: a security audit must never silently drop findings.
+    /// the audit: a security audit must never silently drop vulnerability matches.
     fn tolerates_missing_document(self) -> bool {
-        matches!(self, Backend::Basilisk)
+        matches!(self, Database::Basilisk)
     }
 
     fn summary(self, doc: &OsvVulnerability) -> Option<String> {
         match self {
-            Backend::Basilisk => doc.summary.clone(),
+            Database::Basilisk => doc.summary.clone(),
             // OSV.dev summaries are hard-wrapped; fold them onto one line.
-            Backend::Pypi => doc
+            Database::Pypi => doc
                 .summary
                 .as_ref()
                 .map(|summary| summary.split_whitespace().collect::<Vec<_>>().join(" ")),
@@ -76,20 +76,21 @@ impl Backend {
 
     fn url(self, doc: &OsvVulnerability) -> Option<String> {
         Some(match self {
-            Backend::Basilisk => basilisk_advisory_url(doc),
-            Backend::Pypi => pypi_advisory_url(doc),
+            Database::Basilisk => basilisk_advisory_url(doc),
+            Database::Pypi => pypi_advisory_url(doc),
         })
     }
 
     fn fixed_versions(self, doc: &OsvVulnerability, package: &AuditPackage) -> FixedVersions {
         let mut fixes = fixed_versions(doc, &package.name, package.ecosystem.osv_ecosystem());
-        if self == Backend::Pypi {
-            // Only PEP 440 versions are actionable for a PyPI package, and
-            // there is no "upstream" of PyPI to report.
+        if self == Database::Pypi {
+            // Only PEP 440 versions are installable for a PyPI package, and
+            // fixes outside PyPI are not reported for it.
             fixes
                 .same_ecosystem
                 .retain(|version| uv_pep440::Version::from_str(version).is_ok());
-            fixes.upstream.clear();
+            fixes.other_ecosystem.clear();
+            fixes.upstream_releases.clear();
         }
         fixes
     }
@@ -102,38 +103,38 @@ impl Backend {
         package: &AuditPackage,
     ) -> Option<BasiliskMatch> {
         match self {
-            Backend::Basilisk => {
+            Database::Basilisk => {
                 basilisk_match(doc, &package.name, package.ecosystem.osv_ecosystem())
             }
-            Backend::Pypi => None,
+            Database::Pypi => None,
         }
     }
 }
 
-/// The clients behind each [`Backend`].
-struct Backends<'a> {
+/// The clients behind each [`Database`].
+struct Databases<'a> {
     basilisk: &'a BasiliskClient,
-    pypi: &'a PypiAuditClient,
+    pypi: &'a OsvDevClient,
 }
 
-impl Backends<'_> {
-    fn client(&self, backend: Backend) -> &osv_client::OsvClient {
-        match backend {
-            Backend::Basilisk => self.basilisk.osv_client(),
-            Backend::Pypi => self.pypi.osv_client(),
+impl Databases<'_> {
+    fn client(&self, database: Database) -> &osv_client::OsvClient {
+        match database {
+            Database::Basilisk => self.basilisk.osv_client(),
+            Database::Pypi => self.pypi.osv_client(),
         }
     }
 }
 
 /// A package that will be queried, with the exact identity sent to its
-/// backend. Only packages with a version in a supported ecosystem are
-/// planned; everything else is reported as unchecked.
+/// database. Only packages with a version in a supported ecosystem are
+/// planned; everything else is reported as not audited.
 struct PlannedQuery<'a> {
     package: &'a AuditPackage,
-    backend: Backend,
-    /// The version as sent to the backend.
+    database: Database,
+    /// The version as sent to the database.
     query_version: String,
-    /// The package as locked, reported on findings.
+    /// The package as locked, reported on vulnerability matches.
     id: PackageId,
 }
 
@@ -156,16 +157,16 @@ impl PlannedQuery<'_> {
 /// affected.
 fn plan_query(package: &AuditPackage) -> Option<PlannedQuery<'_>> {
     let version = package.version.clone()?;
-    let backend = Backend::for_ecosystem(&package.ecosystem)?;
-    let query_version = match backend {
-        Backend::Basilisk => version.clone(),
+    let database = Database::for_ecosystem(&package.ecosystem)?;
+    let query_version = match database {
+        Database::Basilisk => version.clone(),
         // Only PEP 440 versions are safe to send to OSV; a PyPI entry whose
-        // version does not parse remains explicitly unchecked.
-        Backend::Pypi => uv_pep440::Version::from_str(&version).ok()?.to_string(),
+        // version does not parse remains explicitly not audited.
+        Database::Pypi => uv_pep440::Version::from_str(&version).ok()?.to_string(),
     };
     Some(PlannedQuery {
         package,
-        backend,
+        database,
         query_version,
         id: PackageId {
             name: package.name.clone(),
@@ -175,22 +176,22 @@ fn plan_query(package: &AuditPackage) -> Option<PlannedQuery<'_>> {
     })
 }
 
-/// Runs every planned query against its backend, both backends in
+/// Runs every planned query against its database, both databases in
 /// parallel. The result at position `i` belongs to `planned[i]`.
-async fn query_backends(
-    backends: &Backends<'_>,
+async fn query_databases(
+    databases: &Databases<'_>,
     planned: &[PlannedQuery<'_>],
 ) -> Result<Vec<BatchResult>, AuditError> {
-    let mut positions: [Vec<usize>; Backend::ALL.len()] = Default::default();
-    let mut queries: [Vec<OsvQuery>; Backend::ALL.len()] = Default::default();
+    let mut positions: [Vec<usize>; Database::ALL.len()] = Default::default();
+    let mut queries: [Vec<OsvQuery>; Database::ALL.len()] = Default::default();
     for (position, query) in planned.iter().enumerate() {
-        positions[query.backend as usize].push(position);
-        queries[query.backend as usize].push(query.osv_query());
+        positions[query.database as usize].push(position);
+        queries[query.database as usize].push(query.osv_query());
     }
-    let batches = futures::future::try_join_all(Backend::ALL.iter().map(|&backend| {
-        backends
-            .client(backend)
-            .query_batch(&queries[backend as usize])
+    let batches = futures::future::try_join_all(Database::ALL.iter().map(|&database| {
+        databases
+            .client(database)
+            .query_batch(&queries[database as usize])
     }))
     .await?;
 
@@ -204,24 +205,24 @@ async fn query_backends(
 }
 
 /// Fetches each distinct referenced vulnerability document once, keyed by
-/// backend because the two databases have independent id spaces.
+/// database because the two databases have independent id spaces.
 async fn fetch_documents(
-    backends: &Backends<'_>,
-    references: BTreeSet<(Backend, String)>,
-) -> Result<HashMap<(Backend, String), OsvVulnerability>, AuditError> {
+    databases: &Databases<'_>,
+    references: BTreeSet<(Database, String)>,
+) -> Result<HashMap<(Database, String), OsvVulnerability>, AuditError> {
     futures::stream::iter(references)
-        .map(|(backend, id)| async move {
-            match backends.client(backend).get_vuln(&id).await {
-                Ok(doc) => Ok(((backend, id), doc)),
+        .map(|(database, id)| async move {
+            match databases.client(database).get_vuln(&id).await {
+                Ok(doc) => Ok(((database, id), doc)),
                 Err(osv_client::Error::Status { status, .. })
-                    if backend.tolerates_missing_document()
+                    if database.tolerates_missing_document()
                         && status == reqwest::StatusCode::NOT_FOUND =>
                 {
                     let doc = OsvVulnerability {
                         id: id.clone(),
                         ..Default::default()
                     };
-                    Ok(((backend, id), doc))
+                    Ok(((database, id), doc))
                 }
                 Err(err) => Err(err.into()),
             }
@@ -233,120 +234,121 @@ async fn fetch_documents(
 
 /// Audits `packages` against the vulnerability databases, applying `ignore`
 /// (vulnerability ids or aliases, case-insensitive), and attaches EPSS and
-/// KEV data from `threat` to every finding.
+/// KEV data from `threat` to every vulnerability match.
 ///
 /// There is deliberately no partial-report mode: any request failure aborts
-/// the audit as a whole. See [`Backend::tolerates_missing_document`] for the
+/// the audit as a whole. See [`Database::tolerates_missing_document`] for the
 /// one exception.
 ///
-/// Threat data only ranks findings, so it degrades instead: a source that
+/// Threat data only ranks vulnerability matches, so it degrades instead: a source that
 /// cannot be fetched is recorded in the report's [`ThreatDataStatus`] and
-/// the findings are reported without it.
+/// the vulnerability matches are reported without it.
 pub async fn audit(
     client: &BasiliskClient,
-    pypi_client: &PypiAuditClient,
+    osv_client: &OsvDevClient,
     packages: Vec<AuditPackage>,
     ignore: IgnoreSpec<'_>,
     threat: ThreatSources<'_>,
 ) -> Result<AuditReport, AuditError> {
-    let backends = Backends {
+    let databases = Databases {
         basilisk: client,
-        pypi: pypi_client,
+        pypi: osv_client,
     };
-    let mut unchecked = Vec::new();
+    let mut not_audited = Vec::new();
     let mut planned = Vec::with_capacity(packages.len());
     for package in &packages {
         match plan_query(package) {
             Some(query) => planned.push(query),
-            None => unchecked.push(package.clone()),
+            None => not_audited.push(package.clone()),
         }
     }
-    // The KEV catalog does not depend on the findings, so it downloads
-    // while the vulnerability backends are queried.
+    // The KEV catalog does not depend on the vulnerability matches, so it downloads
+    // while the vulnerability databases are queried.
     let (results, (kev_status, kev_catalog)) = futures::future::join(
-        query_backends(&backends, &planned),
+        query_databases(&databases, &planned),
         load_kev_catalog(threat.kev),
     )
     .await;
     let results = results?;
 
-    let references: BTreeSet<(Backend, String)> = planned
+    let references: BTreeSet<(Database, String)> = planned
         .iter()
         .zip(&results)
         .flat_map(|(query, result)| {
             result
                 .vulns
                 .iter()
-                .map(move |vuln| (query.backend, vuln.id.clone()))
+                .map(move |vuln| (query.database, vuln.id.clone()))
         })
         .collect();
-    let documents = fetch_documents(&backends, references).await?;
+    let documents = fetch_documents(&databases, references).await?;
     let mut report = assemble_report(&planned, &results, &documents, ignore)?;
-    report.unchecked = unchecked;
+    report.not_audited = not_audited;
 
     let epss_status = attach_threat_data(&mut report, threat.epss, &kev_catalog).await;
     report.threat_data = ThreatDataStatus {
         epss: epss_status,
         kev: kev_status,
     };
-    report.sort(SortStrategy::default());
+    report.sort(SortKey::default());
 
-    report.summary.unchecked = report.unchecked.len();
+    report.summary.not_audited = report.not_audited.len();
     Ok(report)
 }
 
-/// Assembles findings and suppressions after all backend documents are fetched.
+/// Assembles vulnerability matches and ignores after all database documents are fetched.
 fn assemble_report(
     planned: &[PlannedQuery<'_>],
     results: &[BatchResult],
-    documents: &HashMap<(Backend, String), OsvVulnerability>,
+    documents: &HashMap<(Database, String), OsvVulnerability>,
     ignore: IgnoreSpec<'_>,
 ) -> Result<AuditReport, AuditError> {
     let mut report = AuditReport::default();
-    let mut suppressions = Suppressions::from_spec(ignore);
+    let mut ignores = Ignores::from_spec(ignore);
     for (query, result) in planned.iter().zip(results) {
-        let mut findings = FindingGroups::with_capacity(result.vulns.len());
+        let mut matches = MatchGroups::with_capacity(result.vulns.len());
         let package = query.package;
         for vuln in &result.vulns {
             let doc = documents
-                .get(&(query.backend, vuln.id.clone()))
+                .get(&(query.database, vuln.id.clone()))
                 .ok_or_else(|| AuditError::MissingDocument {
                     id: vuln.id.clone(),
                 })?;
             if doc.withdrawn.is_some() {
                 continue;
             }
-            let fixes = query.backend.fixed_versions(doc, package);
-            let basilisk_match = query.backend.basilisk_match(doc, package);
-            let finding = Finding {
+            let fixes = query.database.fixed_versions(doc, package);
+            let basilisk_match = query.database.basilisk_match(doc, package);
+            let vuln_match = Match {
                 package: query.id.clone(),
                 environments: package.environments.clone(),
                 id: doc.id.clone(),
                 aliases: doc.aliases.clone(),
-                severity: SeverityBand::from_severities(&doc.severity),
+                severity: SeverityRating::from_severities(&doc.severity),
                 cvss_base_score: mean_cvss_base_score(&doc.severity),
                 fixed_versions: fixes.same_ecosystem,
-                upstream_fixes: fixes.upstream,
-                applicability: basilisk_match
+                other_ecosystem_fixes: fixes.other_ecosystem,
+                upstream_releases: fixes.upstream_releases,
+                match_confidence: basilisk_match
                     .as_ref()
-                    .map_or(MatchApplicability::Unspecified, |m| m.applicability),
+                    .map_or(MatchConfidence::Unspecified, |m| m.match_confidence),
                 matched_identity: basilisk_match.and_then(|m| m.matched_identity),
-                summary: query.backend.summary(doc),
-                url: query.backend.url(doc),
+                summary: query.database.summary(doc),
+                url: query.database.url(doc),
                 epss: Vec::new(),
-                known_exploited: Vec::new(),
+                kev: Vec::new(),
                 risk: RiskScore::NONE,
-                ignore_reason: None,
+                ignore_mode: None,
             };
-            findings.push(finding);
+            matches.push(vuln_match);
         }
-        for finding in findings.into_findings() {
-            record_finding(&mut report, finding, &mut suppressions);
+        for vuln_match in matches.into_matches() {
+            record_match(&mut report, vuln_match, &mut ignores);
         }
     }
-    report.unmatched_ignores = suppressions.unmatched();
+    report.unused_ignores = ignores.unmatched();
     report.summary.audited = planned.len();
-    report.summary.vulnerable = report.vulnerabilities.len();
+    report.summary.vulnerable = report.matches.len();
     report.summary.ignored = report.ignored.len();
     Ok(report)
 }
@@ -369,19 +371,19 @@ async fn load_kev_catalog(client: Option<&KevClient>) -> (ThreatSourceStatus, Ke
     }
 }
 
-/// Looks up EPSS scores for every CVE across the report's findings, attaches
+/// Looks up EPSS scores for every CVE across the report's vulnerability matches, attaches
 /// them together with the KEV entries from `kev`, and computes each
-/// finding's risk. Returns the EPSS source's status.
+/// vulnerability match's risk. Returns the EPSS source's status.
 async fn attach_threat_data(
     report: &mut AuditReport,
     epss_client: Option<&EpssClient>,
     kev: &KevCatalog,
 ) -> ThreatSourceStatus {
     let cves: Vec<String> = report
-        .vulnerabilities
+        .matches
         .iter()
         .chain(&report.ignored)
-        .flat_map(Finding::cve_ids)
+        .flat_map(Match::cve_ids)
         .collect::<BTreeSet<String>>()
         .into_iter()
         .collect();
@@ -406,25 +408,21 @@ async fn attach_threat_data(
             },
         };
 
-    for finding in report
-        .vulnerabilities
-        .iter_mut()
-        .chain(report.ignored.iter_mut())
-    {
-        let cves = finding.cve_ids();
-        finding.epss = cves
+    for vuln_match in report.matches.iter_mut().chain(report.ignored.iter_mut()) {
+        let cves = vuln_match.cve_ids();
+        vuln_match.epss = cves
             .iter()
             .filter_map(|cve| epss_scores.get(cve).cloned())
             .collect();
-        finding.known_exploited = cves
+        vuln_match.kev = cves
             .iter()
             .filter_map(|cve| kev.get(cve).cloned())
             .collect();
-        finding.risk = RiskScore::compute(
-            finding.severity,
-            finding.cvss_base_score,
-            &finding.epss,
-            &finding.known_exploited,
+        vuln_match.risk = RiskScore::compute(
+            vuln_match.severity,
+            vuln_match.cvss_base_score,
+            &vuln_match.epss,
+            &vuln_match.kev,
         );
     }
     epss_status
@@ -443,7 +441,7 @@ fn error_chain(error: &dyn std::error::Error) -> String {
 }
 
 /// A single rule list and an indexed record of every rule that matched.
-struct Suppressions<'a> {
+struct Ignores<'a> {
     rules: &'a [IgnoreRule],
     ignore_unfixed: bool,
     needs_locked_version: bool,
@@ -451,7 +449,7 @@ struct Suppressions<'a> {
     matched: Vec<bool>,
 }
 
-impl<'a> Suppressions<'a> {
+impl<'a> Ignores<'a> {
     fn from_spec(spec: IgnoreSpec<'a>) -> Self {
         Self {
             rules: spec.rules,
@@ -461,39 +459,39 @@ impl<'a> Suppressions<'a> {
         }
     }
 
-    /// Why `finding` is suppressed, if it is. Unconditional rules win over
+    /// Why `vuln_match` is ignored, if it is. Unconditional rules win over
     /// until-fixed ones, which lapse once any release fix is known.
-    fn reason_for(&mut self, finding: &Finding) -> Option<IgnoreReason> {
-        let mut always = false;
+    fn reason_for(&mut self, vuln_match: &Match) -> Option<IgnoreMode> {
+        let mut permanent = false;
         let mut until_fixed = false;
-        // Parse once per finding, and only when a rule has version bounds.
+        // Parse once per vulnerability match, and only when a rule has version bounds.
         let locked = if self.needs_locked_version {
-            finding.package.parsed_version().ok()
+            vuln_match.package.parsed_version().ok()
         } else {
             None
         };
         for (index, rule) in self.rules.iter().enumerate() {
-            if rule.applies_to(finding, locked.as_ref()) {
+            if rule.applies_to(vuln_match, locked.as_ref()) {
                 self.matched[index] = true;
                 if rule.until_fixed() {
                     until_fixed = true;
                 } else {
-                    always = true;
+                    permanent = true;
                 }
             }
         }
-        let has_known_fix = finding.fix_status() != FixStatus::Unfixed;
-        if always {
-            Some(IgnoreReason::Always)
+        let has_known_fix = vuln_match.fix_availability() != FixAvailability::None;
+        if permanent {
+            Some(IgnoreMode::Permanent)
         } else if (self.ignore_unfixed || until_fixed) && !has_known_fix {
-            Some(IgnoreReason::UntilFixed)
+            Some(IgnoreMode::UntilFixed)
         } else {
             None
         }
     }
 
     /// Unmatched rules in their original spelling and order. Unscoped ids
-    /// are deduplicated case-insensitively across both suppression modes.
+    /// are deduplicated case-insensitively across both ignore modes.
     fn unmatched(&self) -> Vec<String> {
         let mut seen = BTreeSet::new();
         self.rules
@@ -509,13 +507,13 @@ impl<'a> Suppressions<'a> {
     }
 }
 
-fn record_finding(report: &mut AuditReport, mut finding: Finding, suppressions: &mut Suppressions) {
-    match suppressions.reason_for(&finding) {
+fn record_match(report: &mut AuditReport, mut vuln_match: Match, ignores: &mut Ignores) {
+    match ignores.reason_for(&vuln_match) {
         Some(reason) => {
-            finding.ignore_reason = Some(reason);
-            report.ignored.push(finding);
+            vuln_match.ignore_mode = Some(reason);
+            report.ignored.push(vuln_match);
         }
-        None => report.vulnerabilities.push(finding),
+        None => report.matches.push(vuln_match),
     }
 }
 

@@ -31,7 +31,7 @@ name = "demo"
 [tool.pixi-audit]
 ignore = ["CVE-1"]
 ignore-until-fixed = ["CVE-2"]
-severity = "high"
+fail-on = "high"
 "#,
     );
     let config = load_config(&manifest).unwrap();
@@ -42,7 +42,7 @@ severity = "high"
             IgnoreRule::from_id("CVE-2".into(), true),
         ]
     );
-    assert_eq!(config.severity, Some(SeverityBand::High));
+    assert_eq!(config.fail_on, Some(SeverityRating::High));
 }
 
 #[test]
@@ -62,15 +62,15 @@ insta-review = {
 }
 
 [tool.pixi-audit]
-severity = "high"
+fail-on = "high"
 "#,
     );
     let config = load_config(&manifest).unwrap();
-    assert_eq!(config.severity, Some(SeverityBand::High));
+    assert_eq!(config.fail_on, Some(SeverityRating::High));
 }
 
 #[test]
-fn ignore_entries_accept_tables_with_reason_and_until() {
+fn ignore_entries_accept_tables_with_reason_and_expired_at() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(
         dir.path(),
@@ -79,8 +79,8 @@ fn ignore_entries_accept_tables_with_reason_and_until() {
 [tool.pixi-audit]
 ignore = [
     "CVE-1",
-    { id = "CVE-2", reason = "test only", until = 2999-01-01 },
-    { id = "CVE-3", until = "2999-06-01" },
+    { id = "CVE-2", reason = "test only", expired-at = 2999-01-01 },
+    { id = "CVE-3", expired-at = "2999-06-01" },
 ]
 ignore-until-fixed = [{ id = "CVE-4" }]
 "#,
@@ -110,7 +110,7 @@ ignore = [
     { package = "vendored-thing", reason = "never runs" },
     { id = "CVE-2", package = "requests" },
 ]
-ignore-until-fixed = [{ package = "libfoo", until = 2999-01-01 }]
+ignore-until-fixed = [{ package = "libfoo", expired-at = 2999-01-01 }]
 "#,
     );
     let config = load_config(&manifest).unwrap();
@@ -131,7 +131,7 @@ fn scoped_id_entries_retain_ecosystem_and_version_bounds() {
     let manifest = write(
         dir.path(),
         "pixi.toml",
-        "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", ecosystem = \"conda-forge\", version = \"1.13.1\", max-affected-version = \"1.13.2\" }]\n",
+        "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", ecosystem = \"conda-forge\", version = \"1.13.1\", up-to-version = \"1.13.2\" }]\n",
     );
     let config = load_config(&manifest).unwrap();
     assert_eq!(
@@ -141,7 +141,7 @@ fn scoped_id_entries_retain_ecosystem_and_version_bounds() {
             IgnoreScope {
                 ecosystem: Some("conda-forge".to_string()),
                 version: Some("1.13.1".to_string()),
-                max_affected_version: Some("1.13.2".to_string()),
+                up_to_version: Some("1.13.2".to_string()),
                 ..IgnoreScope::default()
             },
             false,
@@ -180,7 +180,7 @@ fn expired_ignore_rules_are_dropped() {
     let manifest = write(
         dir.path(),
         "pixi.toml",
-        "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", until = 2000-01-01 }, \"CVE-2\"]\n",
+        "[tool.pixi-audit]\nignore = [{ id = \"CVE-1\", expired-at = 2000-01-01 }, \"CVE-2\"]\n",
     );
     let config = load_config(&manifest).unwrap();
     assert_eq!(config.rules, [IgnoreRule::from_id("CVE-2".into(), false)]);
@@ -189,10 +189,10 @@ fn expired_ignore_rules_are_dropped() {
 #[test]
 fn malformed_ignore_rules_are_errors() {
     let cases = [
-        "ignore = [{ id = \"CVE-1\", until = \"soon\" }]",
-        "ignore = [{ id = \"CVE-1\", until = 20260901 }]",
+        "ignore = [{ id = \"CVE-1\", expired-at = \"soon\" }]",
+        "ignore = [{ id = \"CVE-1\", expired-at = 20260901 }]",
         "ignore = [{ id = \"CVE-1\", reasn = \"typo\" }]",
-        "ignore = [{ id = \"CVE-1\", ecosystem = \"PyPI\", version = \"1.0\", max-affected-version = \"2.0\", reasn = \"typo\" }]",
+        "ignore = [{ id = \"CVE-1\", ecosystem = \"PyPI\", version = \"1.0\", up-to-version = \"2.0\", reasn = \"typo\" }]",
         "ignore = [{ id = \"CVE-1\", scope = { package = \"requests\" } }]",
         "ignore = [{ reason = \"neither id nor package\" }]",
     ];
@@ -213,16 +213,16 @@ fn missing_table_yields_defaults() {
     let manifest = write(dir.path(), "pixi.toml", "[workspace]\nname = \"demo\"\n");
     let config = load_config(&manifest).unwrap();
     assert!(config.rules.is_empty());
-    assert_eq!(config.severity, None);
+    assert_eq!(config.fail_on, None);
 }
 
 #[test]
-fn invalid_severity_is_an_error() {
+fn invalid_fail_on_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write(
         dir.path(),
         "pixi.toml",
-        "[tool.pixi-audit]\nseverity = \"severe\"\n",
+        "[tool.pixi-audit]\nfail-on = \"severe\"\n",
     );
     assert!(load_config(&manifest).is_err());
 }
@@ -265,11 +265,11 @@ fn unparsable_toml_is_an_error() {
 }
 
 #[test]
-fn parse_band_accepts_the_four_bands_only() {
-    assert_eq!(parse_band("low").unwrap(), SeverityBand::Low);
-    assert_eq!(parse_band("medium").unwrap(), SeverityBand::Medium);
-    assert_eq!(parse_band("high").unwrap(), SeverityBand::High);
-    assert_eq!(parse_band("critical").unwrap(), SeverityBand::Critical);
-    assert!(parse_band("unknown").is_err());
-    assert!(parse_band("HIGH").is_err());
+fn parse_rating_accepts_the_four_ratings_only() {
+    assert_eq!(parse_rating("low").unwrap(), SeverityRating::Low);
+    assert_eq!(parse_rating("medium").unwrap(), SeverityRating::Medium);
+    assert_eq!(parse_rating("high").unwrap(), SeverityRating::High);
+    assert_eq!(parse_rating("critical").unwrap(), SeverityRating::Critical);
+    assert!(parse_rating("unknown").is_err());
+    assert!(parse_rating("HIGH").is_err());
 }

@@ -1,7 +1,7 @@
 //! OSV-protocol HTTP transport with ordered batching and bounded pagination.
 //!
 //! Callers supply a middleware client and choose their own TLS, timeout, and
-//! retry configuration. This crate does not select a vulnerability backend.
+//! retry configuration. This crate does not select a vulnerability database.
 
 use reqwest_middleware::{ClientWithMiddleware, RequestBuilder};
 use serde::de::DeserializeOwned;

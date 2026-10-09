@@ -5,7 +5,7 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{ThreatFeedError, http};
-use crate::{KnownExploited, RansomwareCampaignUse};
+use crate::{KevEntry, RansomwareCampaignUse};
 
 /// CISA's Known Exploited Vulnerabilities catalog feed.
 pub const DEFAULT_KEV_URL: &str =
@@ -38,13 +38,13 @@ impl KevClient {
 #[derive(Debug, Clone, Default)]
 pub struct KevCatalog {
     date_released: Option<String>,
-    entries: HashMap<String, KnownExploited>,
+    entries: HashMap<String, KevEntry>,
 }
 
 impl KevCatalog {
     /// Builds a catalog from entries, for callers that have the data
     /// already (tests, embedding consumers).
-    pub fn from_entries(date_released: Option<String>, entries: Vec<KnownExploited>) -> Self {
+    pub fn from_entries(date_released: Option<String>, entries: Vec<KevEntry>) -> Self {
         Self {
             date_released,
             entries: entries
@@ -60,7 +60,7 @@ impl KevCatalog {
     }
 
     /// The entry for `cve`, matched case-insensitively.
-    pub fn get(&self, cve: &str) -> Option<&KnownExploited> {
+    pub fn get(&self, cve: &str) -> Option<&KevEntry> {
         self.entries.get(&cve.to_ascii_uppercase())
     }
 
@@ -82,7 +82,7 @@ impl From<RawCatalog> for KevCatalog {
         let entries = raw
             .vulnerabilities
             .into_iter()
-            .map(|entry| KnownExploited {
+            .map(|entry| KevEntry {
                 cve: entry.cve_id,
                 vendor_project: entry.vendor_project,
                 product: entry.product,

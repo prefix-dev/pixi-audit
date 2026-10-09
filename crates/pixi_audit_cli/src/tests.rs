@@ -8,7 +8,7 @@ fn cli_definition_is_valid() {
 }
 
 #[test]
-fn lockfile_is_now_optional() {
+fn lock_file_is_now_optional() {
     assert!(Cli::try_parse_from(["pixi-audit"]).is_ok());
 }
 
@@ -28,7 +28,7 @@ fn repeatable_flags_accumulate() {
         "--json",
     ])
     .unwrap();
-    assert_eq!(cli.lockfile, Some(PathBuf::from("pixi.lock")));
+    assert_eq!(cli.lock_file, Some(PathBuf::from("pixi.lock")));
     assert_eq!(cli.environments, vec!["default", "prod"]);
     assert_eq!(cli.platforms, vec!["linux-64"]);
     assert_eq!(cli.ignore, vec!["CVE-2026-1234"]);
@@ -42,16 +42,16 @@ fn new_flags_parse() {
         "pixi.lock",
         "--ignore-until-fixed",
         "CVE-1",
-        "--severity",
+        "--fail-on",
         "high",
         "--fix",
     ])
     .unwrap();
     assert_eq!(cli.ignore_until_fixed, vec!["CVE-1"]);
-    assert_eq!(cli.severity, Some(SeverityBand::High));
+    assert_eq!(cli.fail_on, Some(SeverityRating::High));
     assert!(cli.fix);
-    assert_eq!(cli.sort_by, Field::Risk);
-    assert_eq!(cli.fields, DEFAULT_FIELDS.to_vec());
+    assert_eq!(cli.sort_by, Column::Risk);
+    assert_eq!(cli.columns, DEFAULT_COLUMNS.to_vec());
     assert!(!cli.ignore_unfixed);
     assert!(
         Cli::try_parse_from(["pixi-audit", "--ignore-unfixed"])
@@ -66,14 +66,14 @@ fn threat_fields_are_selectable() {
         "pixi-audit",
         "--sort-by",
         "epss",
-        "--fields",
+        "--columns",
         "vulnerability,risk,kev",
     ])
     .unwrap();
-    assert_eq!(cli.sort_by, Field::Epss);
+    assert_eq!(cli.sort_by, Column::Epss);
     assert_eq!(
-        cli.fields,
-        vec![Field::Vulnerability, Field::Risk, Field::Kev]
+        cli.columns,
+        vec![Column::Vulnerability, Column::Risk, Column::Kev]
     );
 }
 
@@ -87,7 +87,7 @@ fn ignore_subcommand_parses() {
         "--until-fixed",
         "--reason",
         "why",
-        "--until",
+        "--expired-at",
         "2099-01-01",
     ])
     .unwrap();
@@ -98,10 +98,12 @@ fn ignore_subcommand_parses() {
     assert_eq!(args.ids, ["CVE-1", "cve-2"]);
     assert!(args.until_fixed);
     assert_eq!(args.reason.as_deref(), Some("why"));
-    assert_eq!(args.until, Some(jiff::civil::date(2099, 1, 1)));
+    assert_eq!(args.expired_at, Some(jiff::civil::date(2099, 1, 1)));
 
     assert!(Cli::try_parse_from(["pixi-audit", "ignore"]).is_err());
-    assert!(Cli::try_parse_from(["pixi-audit", "ignore", "CVE-1", "--until", "tomorrow"]).is_err());
+    assert!(
+        Cli::try_parse_from(["pixi-audit", "ignore", "CVE-1", "--expired-at", "tomorrow"]).is_err()
+    );
     // A plain audit still parses without a subcommand.
     assert!(
         Cli::try_parse_from(["pixi-audit", "pixi.lock"])
@@ -112,13 +114,13 @@ fn ignore_subcommand_parses() {
 }
 
 #[test]
-fn invalid_severity_is_rejected_at_parse_time() {
-    assert!(Cli::try_parse_from(["pixi-audit", "pixi.lock", "--severity", "severe"]).is_err());
+fn invalid_fail_on_is_rejected_at_parse_time() {
+    assert!(Cli::try_parse_from(["pixi-audit", "pixi.lock", "--fail-on", "severe"]).is_err());
 }
 
 #[test]
-fn gate_applies_threshold_with_unknown_failsafe() {
-    let finding = |severity| pixi_audit::Finding {
+fn exit_status_applies_threshold_with_unknown_failsafe() {
+    let vuln_match = |severity| pixi_audit::Match {
         package: pixi_audit::PackageId {
             name: pixi_audit::PackageName::conda("p").unwrap(),
             version: "1".into(),
@@ -129,19 +131,20 @@ fn gate_applies_threshold_with_unknown_failsafe() {
         aliases: vec![],
         severity,
         fixed_versions: vec![],
-        upstream_fixes: vec![],
-        applicability: pixi_audit::MatchApplicability::Unspecified,
+        other_ecosystem_fixes: vec![],
+        upstream_releases: vec![],
+        match_confidence: pixi_audit::MatchConfidence::Unspecified,
         matched_identity: None,
         summary: None,
         url: None,
         cvss_base_score: None,
         epss: vec![],
-        known_exploited: vec![],
+        kev: vec![],
         risk: pixi_audit::RiskScore::NONE,
-        ignore_reason: None,
+        ignore_mode: None,
     };
     let report = |severity| AuditReport {
-        vulnerabilities: vec![finding(severity)],
+        matches: vec![vuln_match(severity)],
         summary: pixi_audit::AuditSummary {
             vulnerable: 1,
             ..Default::default()
@@ -149,51 +152,65 @@ fn gate_applies_threshold_with_unknown_failsafe() {
         ..Default::default()
     };
     // No threshold: any vulnerability fails.
-    assert_eq!(gate(&report(SeverityBand::Low), None, &[]), Gate::Fail);
+    assert_eq!(
+        exit_status(&report(SeverityRating::Low), None, &[]),
+        ExitStatus::Fail
+    );
     // Threshold high: medium passes with a note, high and critical fail.
     assert_eq!(
-        gate(&report(SeverityBand::Medium), Some(SeverityBand::High), &[]),
-        Gate::BelowThreshold {
-            band: SeverityBand::High,
+        exit_status(
+            &report(SeverityRating::Medium),
+            Some(SeverityRating::High),
+            &[]
+        ),
+        ExitStatus::BelowThreshold {
+            rating: SeverityRating::High,
             count: 1
         }
     );
     assert_eq!(
-        gate(&report(SeverityBand::High), Some(SeverityBand::High), &[]),
-        Gate::Fail
-    );
-    assert_eq!(
-        gate(
-            &report(SeverityBand::Critical),
-            Some(SeverityBand::High),
+        exit_status(
+            &report(SeverityRating::High),
+            Some(SeverityRating::High),
             &[]
         ),
-        Gate::Fail
+        ExitStatus::Fail
+    );
+    assert_eq!(
+        exit_status(
+            &report(SeverityRating::Critical),
+            Some(SeverityRating::High),
+            &[]
+        ),
+        ExitStatus::Fail
     );
     // Unknown always fails, even against critical.
     assert_eq!(
-        gate(
-            &report(SeverityBand::Unknown),
-            Some(SeverityBand::Critical),
+        exit_status(
+            &report(SeverityRating::Unknown),
+            Some(SeverityRating::Critical),
             &[]
         ),
-        Gate::Fail
+        ExitStatus::Fail
     );
     // Clean report never fails.
     assert_eq!(
-        gate(&AuditReport::default(), Some(SeverityBand::Low), &[]),
-        Gate::Clean
+        exit_status(&AuditReport::default(), Some(SeverityRating::Low), &[]),
+        ExitStatus::Clean
     );
-    assert_eq!(gate(&AuditReport::default(), None, &[]), Gate::Clean);
+    assert_eq!(
+        exit_status(&AuditReport::default(), None, &[]),
+        ExitStatus::Clean
+    );
 }
 
 #[test]
 fn warn_only_conda_keeps_pypi_blocking() {
-    let cli = Cli::try_parse_from(["pixi-audit", "--warn-only", "conda-forge"]).unwrap();
-    assert_eq!(cli.warn_only, [WarnOnlyEcosystem::CondaForge]);
+    let cli = Cli::try_parse_from(["pixi-audit", "--warn-only-ecosystem", "conda-forge"]).unwrap();
+    assert_eq!(cli.warn_only_ecosystem, [WarnOnlyEcosystem::CondaForge]);
 
     let mut conda = AuditReport::default();
-    conda.vulnerabilities.push(pixi_audit::Finding {
+    conda.matches.push(pixi_audit::Match {
         package: pixi_audit::PackageId {
             name: pixi_audit::PackageName::conda("openssl").unwrap(),
             version: "3.1.0".into(),
@@ -202,33 +219,43 @@ fn warn_only_conda_keeps_pypi_blocking() {
         environments: vec![],
         id: "CVE-1".into(),
         aliases: vec![],
-        severity: SeverityBand::Critical,
+        severity: SeverityRating::Critical,
         fixed_versions: vec![],
-        upstream_fixes: vec![],
-        applicability: pixi_audit::MatchApplicability::VersionUnbounded,
+        other_ecosystem_fixes: vec![],
+        upstream_releases: vec![],
+        match_confidence: pixi_audit::MatchConfidence::VersionUnbounded,
         matched_identity: None,
         summary: None,
         url: None,
         cvss_base_score: None,
         epss: vec![],
-        known_exploited: vec![],
+        kev: vec![],
         risk: pixi_audit::RiskScore::NONE,
-        ignore_reason: None,
+        ignore_mode: None,
     });
-    assert_eq!(gate(&conda, None, &cli.warn_only), Gate::Clean);
-    assert_eq!(gate(&conda, None, &[]), Gate::Fail);
-    let mut pypi = conda.vulnerabilities[0].clone();
+    assert_eq!(
+        exit_status(&conda, None, &cli.warn_only_ecosystem),
+        ExitStatus::Clean
+    );
+    assert_eq!(exit_status(&conda, None, &[]), ExitStatus::Fail);
+    let mut pypi = conda.matches[0].clone();
     pypi.package.name = pixi_audit::PackageName::pypi("openssl").unwrap();
     pypi.package.ecosystem = pixi_audit::PackageEcosystem::Pypi;
-    conda.vulnerabilities.push(pypi);
-    assert_eq!(gate(&conda, None, &cli.warn_only), Gate::Fail);
+    conda.matches.push(pypi);
+    assert_eq!(
+        exit_status(&conda, None, &cli.warn_only_ecosystem),
+        ExitStatus::Fail
+    );
     let both = Cli::try_parse_from([
         "pixi-audit",
-        "--warn-only",
+        "--warn-only-ecosystem",
         "conda-forge",
-        "--warn-only",
+        "--warn-only-ecosystem",
         "pypi",
     ])
     .unwrap();
-    assert_eq!(gate(&conda, None, &both.warn_only), Gate::Clean);
+    assert_eq!(
+        exit_status(&conda, None, &both.warn_only_ecosystem),
+        ExitStatus::Clean
+    );
 }

@@ -16,7 +16,7 @@ pub struct AuditConfig {
     pub ignore: Vec<IgnoreEntry>,
     pub ignore_until_fixed: Vec<IgnoreEntry>,
     pub ignore_unfixed: bool,
-    pub severity: Option<String>,
+    pub fail_on: Option<String>,
     #[serde(flatten)]
     pub unknown: BTreeMap<String, toml::Value>,
 }
@@ -42,13 +42,17 @@ pub struct IgnoreTable {
     pub reason: Option<String>,
     /// The last day the rule applies, as a TOML date or a `YYYY-MM-DD`
     /// string. Validated when the config is resolved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<toml::Value>,
+    #[serde(
+        default,
+        rename = "expired-at",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expired_at: Option<toml::Value>,
 }
 
 impl IgnoreEntry {
-    /// What the entry suppresses. An entry naming neither an id nor a
-    /// package would suppress everything, so it is rejected.
+    /// What the entry ignores. An entry naming neither an id nor a
+    /// package would ignore everything, so it is rejected.
     pub fn resolved(&self, until_fixed: bool) -> Result<IgnoreRule, String> {
         match self {
             IgnoreEntry::Id(id) => Ok(IgnoreRule::from_id(id.clone(), until_fixed)),
@@ -65,14 +69,15 @@ impl IgnoreEntry {
     }
 
     /// The rule's expiry, if it has one.
-    fn until(&self) -> Result<Option<Date>, String> {
+    fn expired_at(&self) -> Result<Option<Date>, String> {
         let IgnoreEntry::Rule(IgnoreTable {
-            until: Some(until), ..
+            expired_at: Some(expired_at),
+            ..
         }) = self
         else {
             return Ok(None);
         };
-        let text = match until {
+        let text = match expired_at {
             toml::Value::Datetime(datetime) => datetime.to_string(),
             toml::Value::String(text) => text.clone(),
             other => return Err(format!("'{other}' is not a date")),
@@ -88,11 +93,11 @@ impl IgnoreEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpiredIgnore {
     pub rule: IgnoreRule,
-    pub until: Date,
+    pub expired_at: Date,
 }
 
 /// Splits `entries` into the rules that still apply on `today` and the
-/// rules that expired. A rule applies through its `until` day inclusive.
+/// rules that expired. A rule applies through its `expired-at` day inclusive.
 pub fn effective_ignores(
     entries: &[IgnoreEntry],
     today: Date,
@@ -102,8 +107,10 @@ pub fn effective_ignores(
     let mut expired = Vec::new();
     for entry in entries {
         let rule = entry.resolved(until_fixed)?;
-        match entry.until()? {
-            Some(until) if until < today => expired.push(ExpiredIgnore { rule, until }),
+        match entry.expired_at()? {
+            Some(expired_at) if expired_at < today => {
+                expired.push(ExpiredIgnore { rule, expired_at })
+            }
             Some(_) | None => active.push(rule),
         }
     }
@@ -113,14 +120,14 @@ pub fn effective_ignores(
 /// The two ignore lists of `[tool.pixi-audit]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IgnoreList {
-    Always,
+    Permanent,
     UntilFixed,
 }
 
 impl IgnoreList {
     pub fn key(self) -> &'static str {
         match self {
-            Self::Always => "ignore",
+            Self::Permanent => "ignore",
             Self::UntilFixed => "ignore-until-fixed",
         }
     }
@@ -131,10 +138,10 @@ impl IgnoreList {
 }
 
 impl AuditConfig {
-    /// Ignore lists in manifest order, with their suppression policy.
+    /// Ignore lists in manifest order, with their ignore mode.
     pub fn ignore_lists(&self) -> [(IgnoreList, &[IgnoreEntry]); 2] {
         [
-            (IgnoreList::Always, &self.ignore),
+            (IgnoreList::Permanent, &self.ignore),
             (IgnoreList::UntilFixed, &self.ignore_until_fixed),
         ]
     }

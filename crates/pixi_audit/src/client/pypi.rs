@@ -3,20 +3,20 @@ use reqwest_middleware::ClientWithMiddleware;
 use url::Url;
 
 /// The default OSV API used to audit PyPI packages.
-pub const DEFAULT_PYPI_BASE_URL: &str = "https://api.osv.dev";
+pub const DEFAULT_OSV_URL: &str = "https://api.osv.dev";
 
 /// Environment variable to override the PyPI vulnerability API.
-pub const PYPI_BASE_URL_ENV_VAR: &str = "PIXI_AUDIT_PYPI_BASE_URL";
+pub const OSV_URL_ENV_VAR: &str = "PIXI_AUDIT_OSV_URL";
 
 /// Client for auditing PyPI packages against the OSV API.
 ///
-/// A distinct type from [`super::BasiliskClient`] so the two backends cannot be
+/// A distinct type from [`super::BasiliskClient`] so the two databases cannot be
 /// swapped by accident, even though they speak the same protocol.
-pub struct PypiAuditClient {
+pub struct OsvDevClient {
     inner: OsvClient,
 }
 
-impl PypiAuditClient {
+impl OsvDevClient {
     /// Wraps `client`, which carries whatever middleware, timeouts, and
     /// proxy configuration the caller set up. The same client can be shared
     /// with a [`super::BasiliskClient`]. No timeout is applied here, so callers
