@@ -411,7 +411,6 @@ fn base_url_from_env(var: &str, default: &str) -> miette::Result<Url> {
 }
 
 async fn run(cli: Cli) -> miette::Result<RunOutcome> {
-    // Stop before credential refresh, threat feeds, or `--fix` can access the network.
     if cli.offline {
         miette::bail!(
             "Auditing requires online vulnerability data; network access is disabled by --offline"

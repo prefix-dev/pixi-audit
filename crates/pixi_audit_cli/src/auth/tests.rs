@@ -199,9 +199,7 @@ async fn shared_login_is_sent_only_to_production_origin() {
         "https://api.basilisk.prefix.dev:444/",
         "https://api.basilisk.prefix.dev.attacker.example/",
     ] {
-        // Even accidental reuse of this client must not leak credentials.
         http.get(other).send().await.unwrap();
-        // Building a dedicated client for a custom endpoint also stays anonymous.
         let other = Url::parse(other).unwrap();
         let (custom, custom_seen) =
             capture_client(false, &other, Some(store.clone()), false, StatusCode::OK);

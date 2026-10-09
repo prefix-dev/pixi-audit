@@ -1,5 +1,4 @@
-//! Reuse Pixi's login only for the production Basilisk origin. Other audit
-//! services and custom endpoints never receive the shared credentials.
+//! Optional shared-login authentication for the production Basilisk API.
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -40,8 +39,7 @@ fn validate_base_url(base_url: &Url) -> miette::Result<()> {
     Ok(())
 }
 
-/// Build a dedicated client without ever initiating an interactive login.
-/// Missing or unsuitable credentials leave public auditing anonymous.
+/// Build a client with optional authentication, without initiating login.
 pub(super) fn build(offline: bool, base_url: &Url) -> miette::Result<ClientWithMiddleware> {
     validate_base_url(base_url)?;
     let storage = if production_origin(base_url) && !offline {
@@ -80,8 +78,7 @@ fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) 
                 false
             }
         }
-        // In particular, do not forward a channel API token just because it
-        // shares the host key. Explicit API-token support is separate.
+        // Channel API tokens are not Basilisk credentials.
         Ok(_) => false,
         Err(_) => {
             if !warned.swap(true, Ordering::Relaxed) {
@@ -120,14 +117,13 @@ fn client_builder(
                 origin: base_url.origin(),
                 warned: AtomicBool::new(false),
             })
-            // After authentication so the anonymous retry cannot reattach it.
+            // Retry after authentication to avoid reattaching credentials.
             .with(AnonymousRetry::default());
     }
     Ok(builder)
 }
 
-/// Check the current entry before each request, not just at construction: a
-/// later login can replace the shared entry with a channel-only credential.
+/// Validate the saved login before each request.
 struct SharedLogin {
     authentication: AuthenticationMiddleware,
     storage: AuthenticationStorage,
@@ -152,8 +148,7 @@ impl Middleware for SharedLogin {
     }
 }
 
-/// A revoked or server-rejected login must not break a public audit. Retry a
-/// replayable authenticated request once, without credentials, on HTTP 401.
+/// Retry authenticated HTTP 401 responses once without credentials.
 #[derive(Default)]
 struct AnonymousRetry {
     warned: AtomicBool,
