@@ -7,7 +7,7 @@ license.workspace = true
 name = "pixi_audit_cli"
 readme.workspace = true
 repository.workspace = true
-version = "0.1.2"
+version = "0.2.0"
 
 # pixi discovers extensions as `pixi-<cmd>` executables on PATH, so the
 # binary name must be `pixi-audit` even though the package is snake_case.
