@@ -82,19 +82,19 @@ pub fn discover_workspace(start: &Path) -> miette::Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// The lockfile to audit and the workspace manifest that governs it.
+/// The lock file to audit and the workspace manifest that governs it.
 pub struct ResolvedTargets {
-    pub lockfile: PathBuf,
-    /// `None` when an explicit lockfile has no manifest beside it.
+    pub lock_file: PathBuf,
+    /// `None` when an explicit lock file has no manifest beside it.
     pub manifest: Option<PathBuf>,
 }
 
-/// An explicit lockfile is used as-is (manifest = its sibling, if any).
+/// An explicit lock file is used as-is (manifest = its sibling, if any).
 /// Otherwise the workspace is discovered by walking up from the cwd.
-pub fn resolve_targets(cli_lockfile: Option<PathBuf>) -> miette::Result<ResolvedTargets> {
-    match cli_lockfile {
-        Some(lockfile) => {
-            let manifest = match lockfile
+pub fn resolve_targets(cli_lock_file: Option<PathBuf>) -> miette::Result<ResolvedTargets> {
+    match cli_lock_file {
+        Some(lock_file) => {
+            let manifest = match lock_file
                 .canonicalize()
                 .ok()
                 .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
@@ -102,7 +102,10 @@ pub fn resolve_targets(cli_lockfile: Option<PathBuf>) -> miette::Result<Resolved
                 Some(directory) => find_manifest_in(&directory)?,
                 None => None,
             };
-            Ok(ResolvedTargets { lockfile, manifest })
+            Ok(ResolvedTargets {
+                lock_file,
+                manifest,
+            })
         }
         None => {
             let cwd = std::env::current_dir()
@@ -110,19 +113,19 @@ pub fn resolve_targets(cli_lockfile: Option<PathBuf>) -> miette::Result<Resolved
                 .wrap_err("cannot determine the current directory")?;
             let manifest = discover_workspace(&cwd)?.ok_or_else(|| {
                 miette::miette!(
-                    "no pixi workspace found; pass a lockfile path or run inside a pixi workspace"
+                    "no pixi workspace found; pass a lock file path or run inside a pixi workspace"
                 )
             })?;
             let root = manifest.parent().expect("manifest has a directory");
-            let lockfile = root.join("pixi.lock");
-            if !lockfile.is_file() {
+            let lock_file = root.join("pixi.lock");
+            if !lock_file.is_file() {
                 return Err(miette::miette!(
                     "workspace at '{}' has no pixi.lock; run `pixi lock` first",
                     root.display()
                 ));
             }
             Ok(ResolvedTargets {
-                lockfile,
+                lock_file,
                 manifest: Some(manifest),
             })
         }

@@ -1,4 +1,4 @@
-//! Distinct Basilisk and PyPI backend clients and audit errors.
+//! Distinct Basilisk and PyPI database clients and audit errors.
 
 use thiserror::Error;
 use url::Url;
@@ -6,8 +6,8 @@ use url::Url;
 mod basilisk;
 mod pypi;
 
-pub use basilisk::{BASE_URL_ENV_VAR, BasiliskClient, DEFAULT_BASE_URL};
-pub use pypi::{DEFAULT_PYPI_BASE_URL, PYPI_BASE_URL_ENV_VAR, PypiAuditClient};
+pub use basilisk::{BASILISK_URL_ENV_VAR, BasiliskClient, DEFAULT_BASILISK_URL};
+pub use pypi::{DEFAULT_OSV_URL, OSV_URL_ENV_VAR, OsvDevClient};
 
 /// A failed request to a vulnerability database.
 #[derive(Debug, Error)]

@@ -13,13 +13,13 @@ use reqwest::{Request, Response, StatusCode, header::AUTHORIZATION};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use url::Url;
 
-use pixi_audit::DEFAULT_BASE_URL;
+use pixi_audit::DEFAULT_BASILISK_URL;
 
 const CREDENTIAL_KEY: &str = "prefix.dev";
 
 fn production_origin(base_url: &Url) -> bool {
     base_url.origin()
-        == Url::parse(DEFAULT_BASE_URL)
+        == Url::parse(DEFAULT_BASILISK_URL)
             .expect("valid default API URL")
             .origin()
 }
@@ -63,7 +63,7 @@ fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) 
             access_token,
             ..
         })) => {
-            if audience.as_deref() == Some(DEFAULT_BASE_URL)
+            if audience.as_deref() == Some(DEFAULT_BASILISK_URL)
                 && !access_token.is_empty()
                 && reqwest::header::HeaderValue::from_str(&format!("Bearer {access_token}")).is_ok()
             {
@@ -72,7 +72,7 @@ fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) 
                 if !warned.swap(true, Ordering::Relaxed) {
                     eprintln!(
                         "Warning: Saved prefix.dev login has no Basilisk audience or has an invalid token; \
-                         continuing anonymously. Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASE_URL}` to log in again."
+                         continuing anonymously. Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASILISK_URL}` to log in again."
                     );
                 }
                 false
@@ -174,7 +174,7 @@ impl Middleware for AnonymousRetry {
             if !self.warned.swap(true, Ordering::Relaxed) {
                 eprintln!(
                     "Warning: Basilisk rejected the saved login; retrying anonymously. \
-                     Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASE_URL}` to log in again."
+                     Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASILISK_URL}` to log in again."
                 );
             }
             retry.headers_mut().remove(AUTHORIZATION);

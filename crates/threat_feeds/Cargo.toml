@@ -1,13 +1,13 @@
 [package]
 authors.workspace = true
-description = "Clients and records for FIRST EPSS and CISA KEV threat feeds"
+description = "Clients and records for FIRST EPSS and CISA KEV threat data"
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 name = "threat_feeds"
 readme.workspace = true
 repository.workspace = true
-version = "0.1.2"
+version = "0.2.0"
 
 [dependencies]
 osv_client = { workspace = true }

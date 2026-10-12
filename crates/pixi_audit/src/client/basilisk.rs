@@ -6,12 +6,12 @@ use super::AuditError;
 use crate::types::{BatchResult, OsvQuery, OsvVulnerability};
 
 /// The default Basilisk API instance.
-pub const DEFAULT_BASE_URL: &str = "https://api.basilisk.prefix.dev";
+pub const DEFAULT_BASILISK_URL: &str = "https://api.basilisk.prefix.dev";
 
 /// Environment variable to override the audit API base URL.
-pub const BASE_URL_ENV_VAR: &str = "PIXI_AUDIT_BASE_URL";
+pub const BASILISK_URL_ENV_VAR: &str = "PIXI_AUDIT_BASILISK_URL";
 
-/// Client for the Basilisk vulnerability backend.
+/// Client for the Basilisk vulnerability database.
 pub struct BasiliskClient {
     inner: OsvClient,
 }

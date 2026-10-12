@@ -6,7 +6,7 @@ use pixi_audit_test_support::{epss_router, kev_router, osv_router, spawn_router}
 
 const BIN: &str = env!("CARGO_BIN_EXE_pixi-audit");
 
-fn lockfile() -> String {
+fn lock_file() -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/pixi.lock")
         .to_string_lossy()
@@ -72,12 +72,12 @@ fn threat_routes() -> Router {
     })))
 }
 
-/// Environment pointing every backend and feed at the mock at `base_url`,
+/// Environment pointing every database and feed at the mock at `base_url`,
 /// with the HTTP cache in a throwaway directory.
 fn audit_env(base_url: &str, cache_dir: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
     vec![
-        ("PIXI_AUDIT_BASE_URL", base_url.into()),
-        ("PIXI_AUDIT_PYPI_BASE_URL", base_url.into()),
+        ("PIXI_AUDIT_BASILISK_URL", base_url.into()),
+        ("PIXI_AUDIT_OSV_URL", base_url.into()),
         ("PIXI_AUDIT_EPSS_BASE_URL", base_url.into()),
         ("PIXI_AUDIT_KEV_URL", format!("{base_url}kev.json").into()),
         ("PIXI_CACHE_DIR", cache_dir.into()),
@@ -110,16 +110,16 @@ async fn run_cli_env(base_url: String, args: Vec<String>, env: Vec<(&str, &str)>
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn vulnerable_lockfile_reports_and_exits_1() {
+async fn vulnerable_lock_file_reports_and_exits_1() {
     let base = spawn_mock(true).await;
-    let output = run_cli(base, vec![lockfile()]).await;
+    let output = run_cli(base, vec![lock_file()]).await;
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     let row = stdout
         .lines()
         .find(|line| line.contains("BSLK-1"))
-        .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
+        .unwrap_or_else(|| panic!("no vulnerability match row in stdout: {stdout}"));
     let cells: Vec<&str> = row.split_whitespace().collect();
     // Critical (9.0) averaged with CVSS 9.8, KEV-listed => 0.94 * 1.05.
     assert_eq!(
@@ -142,8 +142,8 @@ async fn warn_only_conda_reports_without_failing() {
     let output = run_cli_env(
         base,
         vec![
-            lockfile(),
-            "--warn-only".to_string(),
+            lock_file(),
+            "--warn-only-ecosystem".to_string(),
             "conda-forge".to_string(),
             "--json".to_string(),
         ],
@@ -153,7 +153,7 @@ async fn warn_only_conda_reports_without_failing() {
     assert_eq!(output.status.code(), Some(0));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["summary"]["vulnerable"], 1);
-    assert_eq!(report["vulnerabilities"][0]["ecosystem"], "conda-forge");
+    assert_eq!(report["matches"][0]["ecosystem"], "conda-forge");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("::warning title=BSLK-1"), "{stderr}");
     assert!(!stderr.contains("::error"), "{stderr}");
@@ -163,9 +163,9 @@ async fn warn_only_conda_reports_without_failing() {
 async fn explain_rejects_machine_readable_formats() {
     let base = spawn_mock(true).await;
     for args in [
-        vec![lockfile(), "--json".to_string(), "--explain".to_string()],
+        vec![lock_file(), "--json".to_string(), "--explain".to_string()],
         vec![
-            lockfile(),
+            lock_file(),
             "--format".to_string(),
             "sarif".to_string(),
             "--explain".to_string(),
@@ -180,15 +180,15 @@ async fn explain_rejects_machine_readable_formats() {
 #[tokio::test(flavor = "multi_thread")]
 async fn threat_data_is_serialized() {
     let base = spawn_mock(true).await;
-    let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
+    let output = run_cli(base, vec![lock_file(), "--json".to_string()]).await;
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let finding = &report["vulnerabilities"][0];
-    assert_eq!(finding["epss"][0]["cve"], "CVE-2026-1234");
-    assert_eq!(finding["epss"][0]["epss"], 0.5);
-    assert_eq!(finding["known_exploited"][0]["vendor_project"], "OpenSSL");
-    assert_eq!(finding["cvss_base_score"], 9.8);
-    let risk = finding["risk"].as_f64().unwrap();
+    let vuln_match = &report["matches"][0];
+    assert_eq!(vuln_match["epss"][0]["cve"], "CVE-2026-1234");
+    assert_eq!(vuln_match["epss"][0]["epss"], 0.5);
+    assert_eq!(vuln_match["kev"][0]["vendor_project"], "OpenSSL");
+    assert_eq!(vuln_match["cvss_base_score"], 9.8);
+    let risk = vuln_match["risk"].as_f64().unwrap();
     assert!((risk - 98.7).abs() < 1e-9, "risk: {risk}");
     assert_eq!(report["threat_data"]["epss"]["status"], "loaded");
     assert_eq!(report["threat_data"]["kev"]["date"], "2026-09-01");
@@ -200,7 +200,7 @@ async fn unreachable_threat_sources_warn_but_do_not_fail_the_audit() {
     // Port 9 (discard) refuses connections immediately.
     let output = run_cli_env(
         base,
-        vec![lockfile(), "--json".to_string()],
+        vec![lock_file(), "--json".to_string()],
         vec![
             ("PIXI_AUDIT_EPSS_BASE_URL", "http://127.0.0.1:9/"),
             ("PIXI_AUDIT_KEV_URL", "http://127.0.0.1:9/kev.json"),
@@ -210,8 +210,8 @@ async fn unreachable_threat_sources_warn_but_do_not_fail_the_audit() {
 
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["vulnerabilities"][0]["id"], "BSLK-1");
-    assert_eq!(report["vulnerabilities"][0]["risk"], 0.0);
+    assert_eq!(report["matches"][0]["id"], "BSLK-1");
+    assert_eq!(report["matches"][0]["risk"], 0.0);
     assert_eq!(report["threat_data"]["epss"]["status"], "failed");
     assert_eq!(report["threat_data"]["kev"]["status"], "failed");
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -230,7 +230,7 @@ async fn sarif_format_points_at_the_lock_file() {
     let base = spawn_mock(true).await;
     let output = run_cli(
         base,
-        vec![lockfile(), "--format".to_string(), "sarif".to_string()],
+        vec![lock_file(), "--format".to_string(), "sarif".to_string()],
     )
     .await;
 
@@ -264,9 +264,9 @@ async fn sarif_format_points_at_the_lock_file() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn clean_lockfile_exits_0() {
+async fn clean_lock_file_exits_0() {
     let base = spawn_mock(false).await;
-    let output = run_cli(base, vec![lockfile()]).await;
+    let output = run_cli(base, vec![lock_file()]).await;
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -277,13 +277,13 @@ async fn clean_lockfile_exits_0() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fields_and_sort_by_shape_the_table() {
+async fn columns_and_sort_by_shape_the_table() {
     let base = spawn_mock(true).await;
     let output = run_cli(
         base,
         vec![
-            lockfile(),
-            "--fields".to_string(),
+            lock_file(),
+            "--columns".to_string(),
             "vulnerability,name,url".to_string(),
             "--sort-by".to_string(),
             "name".to_string(),
@@ -314,11 +314,15 @@ async fn fields_and_sort_by_shape_the_table() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grouped_format_prints_findings_per_package() {
+async fn by_package_format_prints_matches_per_package() {
     let base = spawn_mock(true).await;
     let output = run_cli(
         base,
-        vec![lockfile(), "--format".to_string(), "grouped".to_string()],
+        vec![
+            lock_file(),
+            "--format".to_string(),
+            "by-package".to_string(),
+        ],
     )
     .await;
 
@@ -329,7 +333,7 @@ async fn grouped_format_prints_findings_per_package() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("fixed in: 3.1.1"));
-    // Without hyperlink support the grouped format prints the Basilisk URL.
+    // Without hyperlink support the by-package format prints the Basilisk URL.
     assert!(
         stdout.contains("https://basilisk.prefix.dev/advisories/BSLK-1"),
         "stdout: {stdout}"
@@ -339,7 +343,7 @@ async fn grouped_format_prints_findings_per_package() {
 #[tokio::test(flavor = "multi_thread")]
 async fn github_actions_get_annotations_on_stderr() {
     let base = spawn_mock(true).await;
-    let output = run_cli_env(base, vec![lockfile()], vec![("GITHUB_ACTIONS", "true")]).await;
+    let output = run_cli_env(base, vec![lock_file()], vec![("GITHUB_ACTIONS", "true")]).await;
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -356,13 +360,13 @@ async fn github_actions_get_annotations_on_stderr() {
 #[tokio::test(flavor = "multi_thread")]
 async fn json_mode_emits_only_the_report_on_stdout() {
     let base = spawn_mock(true).await;
-    let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
+    let output = run_cli(base, vec![lock_file(), "--json".to_string()]).await;
 
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout is exactly one JSON document");
     assert_eq!(report["summary"]["vulnerable"], 1);
-    assert_eq!(report["vulnerabilities"][0]["id"], "BSLK-1");
+    assert_eq!(report["matches"][0]["id"], "BSLK-1");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -371,7 +375,7 @@ async fn stale_ignore_rules_warn_on_stderr() {
     let output = run_cli(
         base,
         vec![
-            lockfile(),
+            lock_file(),
             "--json".to_string(),
             "--ignore".to_string(),
             "cve-2026-1234".to_string(),
@@ -386,28 +390,28 @@ async fn stale_ignore_rules_warn_on_stderr() {
     assert_eq!(output.status.code(), Some(0));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("warning: ignore rule 'CVE-0000-0000' matched no finding"),
+        stderr.contains("warning: ignore rule 'CVE-0000-0000' matched no vulnerability"),
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("warning: ignore rule 'GHSA-stale' matched no finding"),
+        stderr.contains("warning: ignore rule 'GHSA-stale' matched no vulnerability"),
         "stderr: {stderr}"
     );
     assert!(!stderr.contains("'cve-2026-1234'"), "stderr: {stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        report["unmatched_ignores"],
+        report["unused_ignores"],
         serde_json::json!(["CVE-0000-0000", "GHSA-stale"])
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ignored_finding_exits_0_but_is_reported() {
+async fn ignored_match_exits_0_but_is_reported() {
     let base = spawn_mock(true).await;
     let output = run_cli(
         base,
         vec![
-            lockfile(),
+            lock_file(),
             "--ignore".to_string(),
             "cve-2026-1234".to_string(),
         ],
@@ -419,7 +423,7 @@ async fn ignored_finding_exits_0_but_is_reported() {
     assert!(stdout.contains("Ignored (1)"), "stdout: {stdout}");
     let row = stdout.lines().find(|line| line.contains("BSLK-1")).unwrap();
     assert!(
-        row.contains("openssl") && row.ends_with("always"),
+        row.contains("openssl") && row.ends_with("permanent"),
         "row: {row}"
     );
 }
@@ -429,13 +433,13 @@ async fn environment_filter_limits_the_audit() {
     let base = spawn_mock(true).await;
     let output = run_cli(
         base,
-        vec![lockfile(), "--environment".to_string(), "prod".to_string()],
+        vec![lock_file(), "--environment".to_string(), "prod".to_string()],
     )
     .await;
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains("Unchecked"), "stdout: {stdout}");
+    assert!(!stdout.contains("Not audited"), "stdout: {stdout}");
     let row = stdout.lines().find(|line| line.contains("BSLK-1")).unwrap();
     let cells: Vec<&str> = row.split_whitespace().collect();
     assert!(
@@ -449,7 +453,7 @@ async fn unknown_environment_exits_2() {
     let base = spawn_mock(false).await;
     let output = run_cli(
         base,
-        vec![lockfile(), "--environment".to_string(), "nope".to_string()],
+        vec![lock_file(), "--environment".to_string(), "nope".to_string()],
     )
     .await;
 
@@ -462,7 +466,7 @@ async fn unknown_environment_exits_2() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn missing_lockfile_exits_2() {
+async fn missing_lock_file_exits_2() {
     let base = spawn_mock(false).await;
     let output = run_cli(base, vec!["does-not-exist.lock".to_string()]).await;
 
@@ -486,7 +490,7 @@ fn vuln_doc_nofix_medium() -> serde_json::Value {
     })
 }
 
-fn vuln_doc_basilisk_upstream_fix() -> serde_json::Value {
+fn vuln_doc_basilisk_upstream_release() -> serde_json::Value {
     serde_json::json!({
         "id": "CVE-2026-50219",
         "summary": "Known upstream fix",
@@ -526,11 +530,11 @@ async fn spawn_mock_versioned(doc: serde_json::Value, vulnerable_version: &str) 
     spawn_router(app).await.to_string()
 }
 
-/// Copies the fixture lockfile into a temp workspace with the given
+/// Copies the fixture lock file into a temp workspace with the given
 /// manifest content; returns the tempdir (keep it alive).
 fn temp_workspace(manifest_name: &str, manifest_content: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::copy(lockfile(), dir.path().join("pixi.lock")).unwrap();
+    std::fs::copy(lock_file(), dir.path().join("pixi.lock")).unwrap();
     std::fs::write(dir.path().join(manifest_name), manifest_content).unwrap();
     dir
 }
@@ -558,9 +562,9 @@ async fn run_cli_in(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn basilisk_upstream_fix_is_rendered() {
-    let base = spawn_mock_versioned(vuln_doc_basilisk_upstream_fix(), "3.1.0").await;
-    let output = run_cli(base, vec![lockfile()]).await;
+async fn basilisk_upstream_release_is_rendered() {
+    let base = spawn_mock_versioned(vuln_doc_basilisk_upstream_release(), "3.1.0").await;
+    let output = run_cli(base, vec![lock_file()]).await;
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -570,11 +574,11 @@ async fn basilisk_upstream_fix_is_rendered() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn severity_threshold_gates_exit_code_but_not_output() {
-    // MEDIUM finding vs --severity high => exit 0, finding still printed.
+    // MEDIUM match vs --fail-on high => exit 0, match still printed.
     let base = spawn_mock_versioned(vuln_doc_nofix_medium(), "3.1.0").await;
     let output = run_cli(
         base,
-        vec![lockfile(), "--severity".to_string(), "high".to_string()],
+        vec![lock_file(), "--fail-on".to_string(), "high".to_string()],
     )
     .await;
     assert_eq!(output.status.code(), Some(0));
@@ -590,24 +594,24 @@ async fn severity_threshold_gates_exit_code_but_not_output() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn severity_threshold_still_fails_at_or_above() {
-    // CRITICAL finding vs --severity high => exit 1.
+    // CRITICAL match vs --fail-on high => exit 1.
     let base = spawn_mock(true).await;
     let output = run_cli(
         base,
-        vec![lockfile(), "--severity".to_string(), "high".to_string()],
+        vec![lock_file(), "--fail-on".to_string(), "high".to_string()],
     )
     .await;
     assert_eq!(output.status.code(), Some(1));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ignore_until_fixed_suppresses_only_unfixed_findings() {
-    // No fix known => suppressed, marked, exit 0.
+async fn ignore_until_fixed_ignores_only_unfixed_matches() {
+    // No fix known => ignored, marked, exit 0.
     let base = spawn_mock_versioned(vuln_doc_nofix_medium(), "3.1.0").await;
     let output = run_cli(
         base,
         vec![
-            lockfile(),
+            lock_file(),
             "--ignore-until-fixed".to_string(),
             "BSLK-NOFIX".to_string(),
         ],
@@ -620,12 +624,12 @@ async fn ignore_until_fixed_suppresses_only_unfixed_findings() {
         "stdout: {stdout}"
     );
 
-    // Fix known (BSLK-1 fixes at 3.1.1) => NOT suppressed, exit 1.
+    // Fix known (BSLK-1 fixes at 3.1.1) => NOT ignored, exit 1.
     let base = spawn_mock(true).await;
     let output = run_cli(
         base,
         vec![
-            lockfile(),
+            lock_file(),
             "--ignore-until-fixed".to_string(),
             "BSLK-1".to_string(),
         ],
@@ -635,10 +639,10 @@ async fn ignore_until_fixed_suppresses_only_unfixed_findings() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ignore_unfixed_suppresses_unfixed_findings_until_a_fix_exists() {
+async fn ignore_unfixed_ignores_unfixed_matches_until_a_fix_exists() {
     // No fix known => ignored with the until-fixed reason, exit 0.
     let base = spawn_mock_versioned(vuln_doc_nofix_medium(), "3.1.0").await;
-    let output = run_cli(base, vec![lockfile(), "--ignore-unfixed".to_string()]).await;
+    let output = run_cli(base, vec![lock_file(), "--ignore-unfixed".to_string()]).await;
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Ignored (1)"), "stdout: {stdout}");
@@ -649,7 +653,7 @@ async fn ignore_unfixed_suppresses_unfixed_findings_until_a_fix_exists() {
 
     // Fix known => still reported, exit 1.
     let base = spawn_mock(true).await;
-    let output = run_cli(base, vec![lockfile(), "--ignore-unfixed".to_string()]).await;
+    let output = run_cli(base, vec![lock_file(), "--ignore-unfixed".to_string()]).await;
     assert_eq!(output.status.code(), Some(1));
 
     // The config key does the same.
@@ -668,7 +672,7 @@ async fn discovery_and_config_file_drive_a_bare_invocation() {
         "pixi.toml",
         "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore = [\"BSLK-1\"]\n",
     );
-    // Run bare (no lockfile arg) from a nested directory.
+    // Run bare (no lock file arg) from a nested directory.
     let nested = workspace.path().join("src");
     std::fs::create_dir(&nested).unwrap();
     let base = spawn_mock(true).await;
@@ -773,7 +777,7 @@ async fn ignore_subcommand_can_scope_a_rule_to_a_package() {
 async fn expired_ignore_rules_no_longer_apply() {
     let workspace = temp_workspace(
         "pixi.toml",
-        "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore = [{ id = \"CVE-2026-1234\", until = 2000-01-01 }]\n",
+        "[workspace]\nname = \"demo\"\n\n[tool.pixi-audit]\nignore = [{ id = \"CVE-2026-1234\", expired-at = 2000-01-01 }]\n",
     );
     let base = spawn_mock(true).await;
     let output = run_cli_in(workspace.path().to_path_buf(), base, vec![], None).await;
@@ -802,12 +806,12 @@ async fn fix_runs_pixi_update_and_reaudits() {
         "pixi.toml",
         "[workspace]\nname = \"demo\"\n\n[dependencies]\nopenssl = \">=3.1.0,<4\"\n",
     );
-    // "Fixed" lockfile: openssl bumped to 3.1.1 (the mock only flags 3.1.0).
-    let fixed_lock = std::fs::read_to_string(lockfile())
+    // "Fixed" lock file: openssl bumped to 3.1.1 (the mock only flags 3.1.0).
+    let fixed_lock = std::fs::read_to_string(lock_file())
         .unwrap()
         .replace("openssl-3.1.0-hd590300_3", "openssl-3.1.1-hd590300_0");
     std::fs::write(workspace.path().join("fixed.lock"), fixed_lock).unwrap();
-    // Fake pixi: records argv, swaps in the fixed lockfile.
+    // Fake pixi: records argv, swaps in the fixed lock file.
     let bin_dir = workspace.path().join("bin");
     std::fs::create_dir(&bin_dir).unwrap();
     let fake_pixi = bin_dir.join("pixi");
@@ -883,7 +887,7 @@ async fn fix_without_pixi_on_path_exits_2() {
 async fn fix_skips_pixi_update_when_no_fix_is_known() {
     use std::os::unix::fs::PermissionsExt;
 
-    // The only fix is upstream (not published on conda-forge), so there is
+    // The only fix is upstream (no conda-forge build), so there is
     // nothing to update to and `pixi update` must not run.
     let workspace = temp_workspace(
         "pixi.toml",
@@ -907,7 +911,7 @@ async fn fix_skips_pixi_update_when_no_fix_is_known() {
         std::env::join_paths(paths).unwrap()
     };
 
-    let base = spawn_mock_versioned(vuln_doc_basilisk_upstream_fix(), "3.1.0").await;
+    let base = spawn_mock_versioned(vuln_doc_basilisk_upstream_release(), "3.1.0").await;
     let output = run_cli_in(
         workspace.path().to_path_buf(),
         base,
@@ -991,16 +995,16 @@ fn vuln_doc_purl_matched() -> serde_json::Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cpe_match_without_version_bounds_shows_no_upstream_fix() {
+async fn cpe_match_without_version_bounds_shows_no_fix_elsewhere() {
     let base = spawn_mock_versioned(vuln_doc_cpe_unbounded(), "3.1.0").await;
-    let output = run_cli(base.clone(), vec![lockfile()]).await;
+    let output = run_cli(base.clone(), vec![lock_file()]).await;
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     let row = stdout
         .lines()
         .find(|line| line.contains("CVE-2022-25852"))
-        .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
+        .unwrap_or_else(|| panic!("no vulnerability match row in stdout: {stdout}"));
     assert!(row.contains("CVE-2022-25852 (no version limits)"), "{row}");
     assert!(!stdout.contains("npm"), "stdout: {stdout}");
     assert!(
@@ -1011,9 +1015,9 @@ async fn cpe_match_without_version_bounds_shows_no_upstream_fix() {
     let output = run_cli(
         base.clone(),
         vec![
-            lockfile(),
-            "--fields".to_string(),
-            "vulnerability,match".to_string(),
+            lock_file(),
+            "--columns".to_string(),
+            "vulnerability,confidence".to_string(),
         ],
     )
     .await;
@@ -1024,44 +1028,44 @@ async fn cpe_match_without_version_bounds_shows_no_upstream_fix() {
         .unwrap();
     assert!(row.contains("CVE-2022-25852  no version limits"), "{row}");
 
-    let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
+    let output = run_cli(base, vec![lock_file(), "--json".to_string()]).await;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let finding = &report["vulnerabilities"][0];
-    assert_eq!(finding["applicability"], "version-unbounded");
-    assert_eq!(finding["matched_identity"]["kind"], "cpe");
-    assert_eq!(finding["upstream_fixes"], serde_json::json!([]));
+    let vuln_match = &report["matches"][0];
+    assert_eq!(vuln_match["match_confidence"], "version-unbounded");
+    assert_eq!(vuln_match["matched_identity"]["kind"], "cpe");
+    assert_eq!(vuln_match["other_ecosystem_fixes"], serde_json::json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn purl_match_keeps_the_other_ecosystem_fixes() {
     let base = spawn_mock_versioned(vuln_doc_purl_matched(), "3.1.0").await;
-    let output = run_cli(base.clone(), vec![lockfile()]).await;
+    let output = run_cli(base.clone(), vec![lock_file()]).await;
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).unwrap();
     let row = stdout
         .lines()
         .find(|line| line.contains("CVE-2026-50014"))
-        .unwrap_or_else(|| panic!("no finding row in stdout: {stdout}"));
+        .unwrap_or_else(|| panic!("no vulnerability match row in stdout: {stdout}"));
     assert!(
         row.contains("npm: 10.34.0, npm: 11.4.0  CVE-2026-50014  Unknown"),
         "row: {row}"
     );
     assert!(!stdout.contains("unbounded"), "stdout: {stdout}");
 
-    let output = run_cli(base, vec![lockfile(), "--json".to_string()]).await;
+    let output = run_cli(base, vec![lock_file(), "--json".to_string()]).await;
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let finding = &report["vulnerabilities"][0];
-    assert_eq!(finding["applicability"], "evaluated");
+    let vuln_match = &report["matches"][0];
+    assert_eq!(vuln_match["match_confidence"], "evaluated");
     assert_eq!(
-        finding["matched_identity"],
+        vuln_match["matched_identity"],
         serde_json::json!({"kind": "purl", "value": "pkg:npm/openssl"})
     );
     assert_eq!(
-        finding["upstream_fixes"],
+        vuln_match["other_ecosystem_fixes"],
         serde_json::json!([
-            {"version": "10.34.0", "origin": "ecosystem", "ecosystem": "npm"},
-            {"version": "11.4.0", "origin": "ecosystem", "ecosystem": "npm"}
+            {"version": "10.34.0", "ecosystem": "npm"},
+            {"version": "11.4.0", "ecosystem": "npm"}
         ])
     );
 }

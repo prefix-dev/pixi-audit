@@ -7,7 +7,7 @@ license.workspace = true
 name = "pixi_audit"
 readme.workspace = true
 repository.workspace = true
-version = "0.1.2"
+version = "0.2.0"
 
 [features]
 default = ["lock"]
@@ -15,7 +15,7 @@ default = ["lock"]
 lock = ["dep:rattler_lock"]
 
 [[example]]
-name = "audit_lockfile"
+name = "audit_lock_file"
 required-features = ["lock"]
 
 [dependencies]
@@ -40,7 +40,7 @@ uv-pep440 = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "json"] }
 pixi_audit_test_support = { workspace = true }
-# TLS for the `audit_lockfile` example, which talks to the real API; library
+# TLS for the `audit_lock_file` example, which talks to the real API; library
 # consumers bring their own configured client.
 reqwest = { workspace = true, features = ["json", "rustls"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

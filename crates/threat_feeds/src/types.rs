@@ -34,7 +34,7 @@ impl RansomwareCampaignUse {
 
 /// An entry of CISA's Known Exploited Vulnerabilities catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KnownExploited {
+pub struct KevEntry {
     pub cve: String,
     pub vendor_project: String,
     pub product: String,

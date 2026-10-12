@@ -43,9 +43,13 @@ git push origin v0.1.3 osv_client-v0.1.3 threat_feeds-v0.1.3
 
 `release-plz.toml` groups the CLI and four libraries into one version, so library-only changes also trigger releases. Only the CLI gets a GitHub release and changelog.
 
-The CLI, `pixi_audit`, and `osv_protocol` share `v<version>`. `osv_client` and `threat_feeds` need separate tags because they don't exist at `v0.1.2`. Only `v*` tags trigger publishing. Test support is excluded with `publish = false` and `git_only = false`.
+The CLI, `pixi_audit`, and `osv_protocol` share `v<version>`. `osv_client` and `threat_feeds` need separate tags because they don't exist at `v0.1.2`. Only `v*` tags trigger publishing.
+
+The `pixi_audit_test_support` entry in `release-plz.toml` sets `release = false`, `git_only = false`, and `publish = false`. This excludes it from releases and old-tag lookups, and keeps release-plz's publishing default from conflicting with Cargo's `publish = false`.
 
 Tagging runs before release-PR updates. Only PR updates share a concurrency group, so newer pushes cannot cancel pending tagging jobs. `release_always = false` prevents ordinary merges from being tagged.
+
+CI runs `release-plz release --dry-run` and `release-plz update` with the same pinned action as the release workflow. These check release configuration and version/changelog generation before merging, using a read-only token. They do not publish, push tags, or open PRs.
 
 ## Attestations
 

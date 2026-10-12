@@ -23,13 +23,13 @@ pub(super) struct FixPlan(BTreeMap<PackageName, PackageVersion>);
 impl FixPlan {
     pub(super) fn from_report(report: &AuditReport) -> Self {
         let mut plan = Self::default();
-        for finding in &report.vulnerabilities {
-            let Some(fixed) = finding.lowest_fixed_version() else {
+        for vuln_match in &report.matches {
+            let Some(fixed) = vuln_match.lowest_fixed_version() else {
                 continue;
             };
             // Multiple advisories for one package must all be resolved, so
             // retain the greatest of their minimum required fixes.
-            match plan.0.entry(finding.package.name.clone()) {
+            match plan.0.entry(vuln_match.package.name.clone()) {
                 Entry::Vacant(entry) => {
                     entry.insert(fixed);
                 }
@@ -74,7 +74,7 @@ impl FixPlan {
         let mut changed = 0;
         for (name, item) in dependencies.iter_mut() {
             // A key that is not a valid name in this table's ecosystem cannot
-            // match any finding; pixi itself would reject it.
+            // match any vulnerability; pixi itself would reject it.
             let Ok(name) = parse_name(name.get()) else {
                 continue;
             };

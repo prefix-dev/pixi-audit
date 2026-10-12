@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    test_support::{basilisk_client as client, pypi_client, spawn_router as spawn},
+    test_support::{basilisk_client as client, osv_client, spawn_router as spawn},
     types::{BatchResponse, BatchResult, OsvQuery, QueryPackage},
 };
 use axum::{Router, routing::post};
@@ -32,7 +32,7 @@ async fn pypi_base_url_with_deep_path_keeps_all_segments() {
     let base = spawn(app).await;
     let deep = base.join("a/b").unwrap();
     assert!(!deep.path().ends_with('/'));
-    let client = pypi_client(deep);
+    let client = osv_client(deep);
 
     let results = client
         .osv_client()

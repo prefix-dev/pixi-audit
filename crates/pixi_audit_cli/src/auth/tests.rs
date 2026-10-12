@@ -31,7 +31,7 @@ async fn sends_saved_pixi_login_to_basilisk() {
         .store(
             "prefix.dev",
             &Authentication::OAuth {
-                audience: Some(DEFAULT_BASE_URL.into()),
+                audience: Some(DEFAULT_BASILISK_URL.into()),
                 access_token: "fixture-pixi-access-token".into(),
                 refresh_token: None,
                 expires_at: Some(i64::MAX),
@@ -44,7 +44,7 @@ async fn sends_saved_pixi_login_to_basilisk() {
 
     let mut audit_storage = AuthenticationStorage::empty();
     audit_storage.add_backend(Arc::new(FileStorage::from_path(path).unwrap()));
-    let url = Url::parse(DEFAULT_BASE_URL).unwrap();
+    let url = Url::parse(DEFAULT_BASILISK_URL).unwrap();
     let captured = Arc::new(Mutex::new(None));
     let client = client_builder(false, &url, Some(audit_storage))
         .unwrap()

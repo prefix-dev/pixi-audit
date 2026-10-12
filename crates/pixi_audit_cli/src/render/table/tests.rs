@@ -1,13 +1,13 @@
 use pixi_audit::{
-    AuditPackage, AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
-    MatchApplicability, PackageEcosystem, PackageId, PackageName, RansomwareCampaignUse, RiskScore,
-    SeverityBand, UpstreamFix, UpstreamOrigin,
+    AuditPackage, AuditReport, AuditSummary, EpssScore, IgnoreMode, KevEntry, Match,
+    MatchConfidence, OtherEcosystemFix, PackageEcosystem, PackageId, PackageName,
+    RansomwareCampaignUse, RiskScore, SeverityRating,
 };
 
-use super::{Field, TableLayout, render_table, render_table_after_fix, render_table_explained};
+use super::{Column, TableLayout, render_table, render_table_after_fix, render_table_explained};
 
-fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
-    Finding {
+fn vuln_match(package: &str, id: &str, severity: SeverityRating) -> Match {
+    Match {
         package: PackageId {
             name: PackageName::conda(package).unwrap(),
             version: "3.1.0".to_string(),
@@ -19,20 +19,21 @@ fn finding(package: &str, id: &str, severity: SeverityBand) -> Finding {
         severity,
         cvss_base_score: None,
         fixed_versions: vec!["3.1.4".to_string()],
-        upstream_fixes: vec![],
-        applicability: MatchApplicability::Unspecified,
+        other_ecosystem_fixes: vec![],
+        upstream_releases: vec![],
+        match_confidence: MatchConfidence::Unspecified,
         matched_identity: None,
         summary: None,
         url: Some(format!("https://osv.dev/{id}")),
         epss: vec![],
-        known_exploited: vec![],
+        kev: vec![],
         risk: RiskScore::NONE,
-        ignore_reason: None,
+        ignore_mode: None,
     }
 }
 
-fn pypi_finding(id: &str) -> Finding {
-    Finding {
+fn pypi_match(id: &str) -> Match {
+    Match {
         package: PackageId {
             name: PackageName::pypi("requests").unwrap(),
             version: "2.32.0".to_string(),
@@ -41,33 +42,34 @@ fn pypi_finding(id: &str) -> Finding {
         environments: vec!["default".to_string()],
         id: id.to_string(),
         aliases: vec!["CVE-2026-9".to_string()],
-        severity: SeverityBand::Unknown,
+        severity: SeverityRating::Unknown,
         cvss_base_score: None,
         fixed_versions: vec![],
-        upstream_fixes: vec![],
-        applicability: MatchApplicability::Unspecified,
+        other_ecosystem_fixes: vec![],
+        upstream_releases: vec![],
+        match_confidence: MatchConfidence::Unspecified,
         matched_identity: None,
         summary: Some("Leaks credentials".to_string()),
         url: None,
         epss: vec![],
-        known_exploited: vec![],
+        kev: vec![],
         risk: RiskScore::NONE,
-        ignore_reason: None,
+        ignore_mode: None,
     }
 }
 
 /// Attaches an EPSS record and, optionally, a KEV entry, and recomputes
 /// the risk score.
-fn with_threat_data(mut finding: Finding, epss: f64, percentile: f64, kev: bool) -> Finding {
-    finding.epss = vec![EpssScore {
-        cve: finding.id.clone(),
+fn with_threat_data(mut vuln_match: Match, epss: f64, percentile: f64, kev: bool) -> Match {
+    vuln_match.epss = vec![EpssScore {
+        cve: vuln_match.id.clone(),
         epss,
         percentile,
         date: "2026-09-01".to_string(),
     }];
     if kev {
-        finding.known_exploited = vec![KnownExploited {
-            cve: finding.id.clone(),
+        vuln_match.kev = vec![KevEntry {
+            cve: vuln_match.id.clone(),
             vendor_project: "OpenSSL".to_string(),
             product: "OpenSSL".to_string(),
             vulnerability_name: "OpenSSL overflow".to_string(),
@@ -78,13 +80,13 @@ fn with_threat_data(mut finding: Finding, epss: f64, percentile: f64, kev: bool)
             notes: String::new(),
         }];
     }
-    finding.risk = RiskScore::compute(
-        finding.severity,
-        finding.cvss_base_score,
-        &finding.epss,
-        &finding.known_exploited,
+    vuln_match.risk = RiskScore::compute(
+        vuln_match.severity,
+        vuln_match.cvss_base_score,
+        &vuln_match.epss,
+        &vuln_match.kev,
     );
-    finding
+    vuln_match
 }
 
 /// Row cells of every line mentioning one of `ids`, whitespace-split.
@@ -98,16 +100,16 @@ fn rows<'a>(text: &'a str, ids: &[&str]) -> Vec<Vec<&'a str>> {
 #[test]
 fn threat_columns_show_scores_and_flag_kev_rows() {
     let listed = with_threat_data(
-        finding("openssl", "CVE-2026-0001", SeverityBand::Critical),
+        vuln_match("openssl", "CVE-2026-0001", SeverityRating::Critical),
         0.5,
         0.9,
         true,
     );
-    let faint = with_threat_data(pypi_finding("GHSA-1"), 0.0004, 0.112, false);
+    let faint = with_threat_data(pypi_match("GHSA-1"), 0.0004, 0.112, false);
     let report = AuditReport {
-        vulnerabilities: vec![
+        matches: vec![
             faint,
-            finding("openssl", "CVE-2026-0002", SeverityBand::Medium),
+            vuln_match("openssl", "CVE-2026-0002", SeverityRating::Medium),
             listed,
         ],
         summary: AuditSummary {
@@ -118,7 +120,12 @@ fn threat_columns_show_scores_and_flag_kev_rows() {
         ..Default::default()
     };
     let layout = TableLayout {
-        fields: vec![Field::Vulnerability, Field::Epss, Field::Risk, Field::Kev],
+        columns: vec![
+            Column::Vulnerability,
+            Column::Epss,
+            Column::Risk,
+            Column::Kev,
+        ],
         ..TableLayout::default()
     };
     let text = render_table(&report, "pixi.lock", &layout);
@@ -147,7 +154,7 @@ fn threat_columns_show_scores_and_flag_kev_rows() {
 #[test]
 fn sort_by_epss_and_kev_put_the_scored_rows_first() {
     let mut scored = with_threat_data(
-        finding("openssl", "CVE-2026-0001", SeverityBand::Low),
+        vuln_match("openssl", "CVE-2026-0001", SeverityRating::Low),
         0.3,
         0.95,
         false,
@@ -162,14 +169,14 @@ fn sort_by_epss_and_kev_put_the_scored_rows_first() {
         },
     );
     let listed = with_threat_data(
-        finding("openssl", "CVE-2026-0002", SeverityBand::Low),
+        vuln_match("openssl", "CVE-2026-0002", SeverityRating::Low),
         0.01,
         0.5,
         true,
     );
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding("openssl", "CVE-2026-0003", SeverityBand::Critical),
+        matches: vec![
+            vuln_match("openssl", "CVE-2026-0003", SeverityRating::Critical),
             listed,
             scored,
         ],
@@ -180,9 +187,9 @@ fn sort_by_epss_and_kev_put_the_scored_rows_first() {
         },
         ..Default::default()
     };
-    let ids = |sort_by: Field| -> Vec<String> {
+    let ids = |sort_by: Column| -> Vec<String> {
         let layout = TableLayout {
-            fields: vec![Field::Vulnerability],
+            columns: vec![Column::Vulnerability],
             sort_by,
         };
         rows(
@@ -194,41 +201,39 @@ fn sort_by_epss_and_kev_put_the_scored_rows_first() {
         .collect()
     };
     assert_eq!(
-        ids(Field::Epss),
+        ids(Column::Epss),
         ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"]
     );
     // KEV first; the rest by risk, and the unscored critical one last.
     assert_eq!(
-        ids(Field::Kev),
+        ids(Column::Kev),
         ["CVE-2026-0002", "CVE-2026-0001", "CVE-2026-0003"]
     );
     // Severity leads, then risk breaks the tie between the two lows.
     assert_eq!(
-        ids(Field::Severity),
+        ids(Column::Severity),
         ["CVE-2026-0003", "CVE-2026-0002", "CVE-2026-0001"]
     );
 }
 
 fn full_report() -> AuditReport {
-    let mut second = finding("openssl", "CVE-2026-0002", SeverityBand::Medium);
+    let mut second = vuln_match("openssl", "CVE-2026-0002", SeverityRating::Medium);
     second.fixed_versions = vec![];
-    second.upstream_fixes = vec![UpstreamFix {
+    second.other_ecosystem_fixes = vec![OtherEcosystemFix {
         version: "3.2.0".to_string(),
-        origin: UpstreamOrigin::Ecosystem {
-            ecosystem: "PyPI".to_string(),
-        },
+        ecosystem: "PyPI".to_string(),
     }];
     second.url = None;
-    let mut ignored = finding("libxml2", "CVE-2026-0003", SeverityBand::Low);
-    ignored.ignore_reason = Some(IgnoreReason::UntilFixed);
+    let mut ignored = vuln_match("libxml2", "CVE-2026-0003", SeverityRating::Low);
+    ignored.ignore_mode = Some(IgnoreMode::UntilFixed);
     AuditReport {
-        vulnerabilities: vec![
-            finding("openssl", "CVE-2026-0001", SeverityBand::Critical),
+        matches: vec![
+            vuln_match("openssl", "CVE-2026-0001", SeverityRating::Critical),
             second,
-            pypi_finding("GHSA-1"),
+            pypi_match("GHSA-1"),
         ],
         ignored: vec![ignored],
-        unchecked: vec![AuditPackage {
+        not_audited: vec![AuditPackage {
             name: PackageName::conda("samtools").unwrap(),
             version: Some("1.2".to_string()),
             ecosystem: PackageEcosystem::Other("bioconda".to_string()),
@@ -238,9 +243,9 @@ fn full_report() -> AuditReport {
             audited: 10,
             vulnerable: 3,
             ignored: 1,
-            unchecked: 1,
+            not_audited: 1,
         },
-        unmatched_ignores: vec![],
+        unused_ignores: vec![],
         threat_data: Default::default(),
     }
 }
@@ -262,10 +267,10 @@ fn clean_report() {
    ├── by severity: 0 critical, 0 high, 0 medium, 0 low, 0 unknown
    └── by status:   0 fixed, 0 not-fixed, 0 ignored
 
- ✔ No vulnerabilities found (5 audited, 0 ignored, 0 unchecked)
+ ✔ No vulnerabilities found (5 audited, 0 ignored, 0 not audited)
 
- Next steps
-   • None. No vulnerabilities were found in checked packages.
+ Recommendations
+   • None. No vulnerabilities were found in audited packages.
 
  Add `--explain` for scoring and report definitions.
 "
@@ -275,25 +280,25 @@ fn clean_report() {
 #[test]
 fn explained_table_keeps_actions_before_contextual_definitions() {
     let text = render_table_explained(&full_report(), "pixi.lock", &TableLayout::default());
-    let actions = text.find("Next steps").unwrap();
-    let explanation = text.find("How this report works").unwrap();
+    let actions = text.find("Recommendations").unwrap();
+    let explanation = text.find("Definitions").unwrap();
     assert!(actions < explanation, "{text}");
     assert!(
         text.contains(
-            "How this report works\n\n   Counts\n     Package  One locked name, version, and source.\n"
+            "Definitions\n\n   Counts\n     Package              One locked name, version, and source.\n"
         ),
         "{text}"
     );
     assert!(
         text.contains(
-            "\n     Risk      A 0–100 score for ordering individual findings.\n       Formula   min(threat × severity × boost, 1) × 100.\n     Threat"
+            "\n     Risk      A 0–100 score for ordering individual vulnerability matches.\n       Formula   min(threat × severity × boost, 1) × 100.\n     Threat"
         ),
         "{text}"
     );
     for expected in [
-        "A 0–100 score for ordering individual findings.",
+        "A 0–100 score for ordering individual vulnerability matches.",
         "A fixed release exists for the audited package source.",
-        "Fix only upstream",
+        "Fix only elsewhere",
         "Audit sources list no fixed release.",
         "Excluded from active totals and the failure decision.",
         "The package source lacks vulnerability database coverage.",
@@ -301,7 +306,7 @@ fn explained_table_keeps_actions_before_contextual_definitions() {
         assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
     }
     let compact = render_table(&full_report(), "pixi.lock", &TableLayout::default());
-    assert!(!compact.contains("How this report works"));
+    assert!(!compact.contains("Definitions"));
     assert!(compact.contains("Add `--explain` for scoring and report definitions."));
 }
 
@@ -310,12 +315,12 @@ fn default_layout_sorts_by_severity_and_marks_kind_like_pixi_lock() {
     let text = render_table(&full_report(), "pixi.lock", &TableLayout::default());
     assert_eq!(
         text,
-        " Unchecked (1) — no vulnerability database for these sources
+        " Not audited (1) — no vulnerability database for these sources
 
           Name      Version  Source    Environments
  (conda)  samtools  1.2      bioconda  default
 
- ✔ Audited pixi.lock                 [10 packages audited, 1 unchecked]
+ ✔ Audited pixi.lock                 [10 packages audited, 1 not audited]
  ✔ Scanned for vulnerabilities       [3 vulnerability matches]
    ├── by severity: 1 critical, 0 high, 1 medium, 0 low, 1 unknown
    └── by status:   1 fixed, 2 not-fixed, 1 ignored
@@ -330,21 +335,21 @@ fn default_layout_sorts_by_severity_and_marks_kind_like_pixi_lock() {
           Name     Version  Fixed in  Vulnerability  Severity  EPSS  Risk  Environments   Ignored
  (conda)  libxml2  3.1.0    3.1.4     CVE-2026-0003  Low                   default, prod  until a fix is released
 
- ✖ 3 vulnerabilities in 2 package(s) (10 audited, 1 ignored, 1 unchecked)
+ ✖ 3 vulnerabilities in 2 package(s) (10 audited, 1 ignored, 1 not audited)
 
- Assessment
-   • Highest finding prioritization score:  n/a
+ Overview
+   • Highest risk score:                    n/a
    • CISA KEV matches:                      n/a — CISA KEV catalog not checked
-   • Critical/high findings:                1
+   • Critical/high vulnerability matches:   1
    • Fix available in audited ecosystem:    1 of 3 vulnerabilities across 1 audited package
-   • Fix only upstream:                     1 vulnerability
+   • Fix only elsewhere:                    1 vulnerability
    • No known fix:                          1 vulnerability
 
- Next steps
+ Recommendations
    • Re-run this audit with `--fix` to ask pixi to update 1 package name. Fixed releases in the audited ecosystem are available for 1 vulnerability.
-   • 1 vulnerability has a fix only upstream. `--fix` cannot install it. Wait for an ecosystem build or change dependency source.
+   • 1 vulnerability has a fix only elsewhere. `--fix` cannot install it. Wait for an ecosystem build or change dependency source.
    • 1 vulnerability has no known fix. Remove, replace, or mitigate the affected dependencies. Use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.
-   • Review 1 unchecked package. Its source is not covered by the configured vulnerability databases.
+   • Review 1 package that was not audited. Its source is not covered by the configured vulnerability databases.
 
  Add `--explain` for scoring and report definitions.
 "
@@ -352,15 +357,15 @@ fn default_layout_sorts_by_severity_and_marks_kind_like_pixi_lock() {
 }
 
 #[test]
-fn fields_select_and_order_columns() {
+fn columns_select_and_order() {
     let layout = TableLayout {
-        fields: vec![
-            Field::Vulnerability,
-            Field::Aliases,
-            Field::Summary,
-            Field::Name,
+        columns: vec![
+            Column::Vulnerability,
+            Column::Aliases,
+            Column::Summary,
+            Column::Name,
         ],
-        sort_by: Field::Severity,
+        sort_by: Column::Severity,
     };
     let text = render_table(&full_report(), "pixi.lock", &layout);
     let table: Vec<&str> = text
@@ -382,8 +387,8 @@ fn fields_select_and_order_columns() {
 #[test]
 fn sort_by_name_keeps_severity_order_within_a_package() {
     let layout = TableLayout {
-        fields: vec![Field::Name, Field::Vulnerability, Field::Severity],
-        sort_by: Field::Name,
+        columns: vec![Column::Name, Column::Vulnerability, Column::Severity],
+        sort_by: Column::Name,
     };
     let text = render_table(&full_report(), "pixi.lock", &layout);
     let ids: Vec<&str> = text
@@ -462,7 +467,7 @@ fn colored_output_uses_single_letter_kind_markers() {
     // Secondary text is dimmed too, never recolored grey, and the status
     // tree stays dim through its colored counts.
     assert!(
-        text.contains("\x1b[2m[10 packages audited, 1 unchecked]"),
+        text.contains("\x1b[2m[10 packages audited, 1 not audited]"),
         "{text}"
     );
     assert!(!text.contains("\x1b[38;5;8m"), "{text}");
@@ -475,13 +480,13 @@ fn colored_output_uses_single_letter_kind_markers() {
 }
 
 #[test]
-fn sort_by_fixed_in_puts_unfixed_last() {
+fn sort_by_fixed_in_puts_no_fix_last() {
     let layout = TableLayout {
-        fields: vec![Field::Vulnerability, Field::FixedIn],
-        sort_by: Field::FixedIn,
+        columns: vec![Column::Vulnerability, Column::FixedIn],
+        sort_by: Column::FixedIn,
     };
     let mut report = full_report();
-    report.vulnerabilities.reverse();
+    report.matches.reverse();
     let text = render_table(&report, "pixi.lock", &layout);
     let ids: Vec<&str> = text
         .lines()
@@ -493,17 +498,17 @@ fn sort_by_fixed_in_puts_unfixed_last() {
     assert_eq!(ids, ["CVE-2026-0001", "GHSA-1", "CVE-2026-0002"]);
 }
 
-/// A report with one match of each weak applicability.
-fn weak_match_report() -> AuditReport {
-    let mut unbounded = finding("libpq", "CVE-2022-25852", SeverityBand::High);
+/// A report with one vulnerability match of each weak confidence.
+fn weak_confidence_report() -> AuditReport {
+    let mut unbounded = vuln_match("libpq", "CVE-2022-25852", SeverityRating::High);
     unbounded.fixed_versions = vec![];
-    unbounded.applicability = MatchApplicability::VersionUnbounded;
-    let mut unevaluated = finding("libpq", "CVE-2026-0009", SeverityBand::Medium);
-    unevaluated.applicability = MatchApplicability::Unevaluated;
-    let mut evaluated = finding("pnpm", "CVE-2026-50014", SeverityBand::Low);
-    evaluated.applicability = MatchApplicability::Evaluated;
+    unbounded.match_confidence = MatchConfidence::VersionUnbounded;
+    let mut unevaluated = vuln_match("libpq", "CVE-2026-0009", SeverityRating::Medium);
+    unevaluated.match_confidence = MatchConfidence::Unevaluated;
+    let mut evaluated = vuln_match("pnpm", "CVE-2026-50014", SeverityRating::Low);
+    evaluated.match_confidence = MatchConfidence::Evaluated;
     AuditReport {
-        vulnerabilities: vec![unbounded, unevaluated, evaluated, pypi_finding("GHSA-1")],
+        matches: vec![unbounded, unevaluated, evaluated, pypi_match("GHSA-1")],
         summary: AuditSummary {
             audited: 4,
             vulnerable: 4,
@@ -515,7 +520,11 @@ fn weak_match_report() -> AuditReport {
 
 #[test]
 fn weak_matches_are_flagged_and_counted() {
-    let text = render_table(&weak_match_report(), "pixi.lock", &TableLayout::default());
+    let text = render_table(
+        &weak_confidence_report(),
+        "pixi.lock",
+        &TableLayout::default(),
+    );
     assert!(text.contains("4 vulnerability matches"), "{text}");
     assert!(
         text.contains("1 no version limits, 1 version not checked"),
@@ -543,12 +552,12 @@ fn completed_fix_does_not_recommend_another_blind_attempt() {
 }
 
 #[test]
-fn match_column_replaces_the_marker_and_sorts_by_confidence() {
+fn confidence_column_replaces_the_marker_and_sorts_by_confidence() {
     let layout = TableLayout {
-        fields: vec![Field::Vulnerability, Field::Match],
-        sort_by: Field::Match,
+        columns: vec![Column::Vulnerability, Column::Confidence],
+        sort_by: Column::Confidence,
     };
-    let text = render_table(&weak_match_report(), "pixi.lock", &layout);
+    let text = render_table(&weak_confidence_report(), "pixi.lock", &layout);
     let ids: Vec<&str> = text
         .lines()
         .skip_while(|line| !line.contains("Vulnerability"))

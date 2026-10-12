@@ -1,28 +1,37 @@
 use super::*;
 use crate::test_support::{conda_name, pypi_name};
 
-fn on_pypi(version: &str) -> UpstreamFix {
-    UpstreamFix {
+fn on_pypi(version: &str) -> OtherEcosystemFix {
+    OtherEcosystemFix {
         version: version.to_string(),
-        origin: UpstreamOrigin::Ecosystem {
-            ecosystem: "PyPI".to_string(),
-        },
+        ecosystem: "PyPI".to_string(),
     }
 }
 
-fn project_release(version: &str, conda_publication: CondaPublication) -> UpstreamFix {
-    UpstreamFix {
+fn project_release(version: &str, conda_forge_build: CondaForgeBuild) -> UpstreamRelease {
+    UpstreamRelease {
         version: version.to_string(),
-        origin: UpstreamOrigin::Project { conda_publication },
+        conda_forge_build,
     }
 }
 
-fn versions(fixes: &[UpstreamFix]) -> Vec<&str> {
-    fixes.iter().map(|fix| fix.version.as_str()).collect()
+/// Every fix version reported outside the queried ecosystem.
+fn external_versions(fixes: &FixedVersions) -> Vec<&str> {
+    fixes
+        .other_ecosystem
+        .iter()
+        .map(|fix| fix.version.as_str())
+        .chain(
+            fixes
+                .upstream_releases
+                .iter()
+                .map(|fix| fix.version.as_str()),
+        )
+        .collect()
 }
 /// A document shaped like basilisk's real output: the conda-forge entry
-/// carries `versions` + `database_specific` (no ranges); the upstream
-/// PyPI entry carries the ranges with `fixed` events.
+/// carries `versions` + `database_specific` (no ranges); the PyPI
+/// entry carries the ranges with `fixed` events.
 fn basilisk_shaped_doc() -> OsvVulnerability {
     serde_json::from_value(serde_json::json!({
             "id": "CVE-2026-9999",
@@ -81,30 +90,36 @@ fn basilisk_fix_doc(conda_publication: &str) -> OsvVulnerability {
 
 #[test]
 fn basilisk_fix_is_classified_by_publication_state() {
-    for (publication, expected_fixed, expected_upstream) in [
+    for (publication, expected_fixed, expected_releases) in [
         ("published", vec!["2.8.2"], vec![]),
         (
             "not_published",
             vec![],
-            vec![project_release("2.8.2", CondaPublication::NotPublished)],
+            vec![project_release("2.8.2", CondaForgeBuild::Missing)],
         ),
         (
             "unknown",
             vec![],
-            vec![project_release("2.8.2", CondaPublication::Unknown)],
+            vec![project_release("2.8.2", CondaForgeBuild::Unknown)],
         ),
     ] {
-        let FixedVersions {
-            same_ecosystem: fixed,
-            upstream,
-        } = fixed_versions(
+        let fixes = fixed_versions(
             &basilisk_fix_doc(publication),
             &conda_name("libexpat"),
             "conda-forge",
         );
+        assert!(!external_versions(&fixes).contains(&"9.9.9"));
+        let FixedVersions {
+            same_ecosystem: fixed,
+            other_ecosystem,
+            upstream_releases,
+        } = fixes;
         assert_eq!(fixed, expected_fixed, "publication: {publication}");
-        assert_eq!(upstream, expected_upstream, "publication: {publication}");
-        assert!(!versions(&upstream).contains(&"9.9.9"));
+        assert!(other_ecosystem.is_empty(), "publication: {publication}");
+        assert_eq!(
+            upstream_releases, expected_releases,
+            "publication: {publication}"
+        );
     }
 }
 
@@ -115,18 +130,22 @@ fn fixed_versions_only_come_from_the_queried_ecosystem() {
     // presented as a conda-forge fixed version.
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
     assert!(fixed.is_empty());
-    assert_eq!(upstream, vec![on_pypi("10.2.0")]);
+    assert_eq!(other_ecosystem, vec![on_pypi("10.2.0")]);
+    assert!(upstream_releases.is_empty());
 
     // Queried as PyPI, the same fix IS a same-ecosystem fixed version.
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &pypi_name("pillow"), "PyPI");
     assert_eq!(fixed, vec!["10.2.0"]);
-    assert!(upstream.is_empty());
+    assert!(other_ecosystem.is_empty());
+    assert!(upstream_releases.is_empty());
 }
 
 #[test]
@@ -167,10 +186,12 @@ fn missing_or_malformed_basilisk_metadata_falls_back_to_osv_ranges() {
 
         let FixedVersions {
             same_ecosystem: fixed,
-            upstream,
+            other_ecosystem,
+            upstream_releases,
         } = fixed_versions(&doc, &conda_name("libexpat"), "conda-forge");
         assert_eq!(fixed, vec!["2.8.3"]);
-        assert!(upstream.is_empty());
+        assert!(other_ecosystem.is_empty());
+        assert!(upstream_releases.is_empty());
     }
 }
 
@@ -205,10 +226,12 @@ fn basilisk_metadata_requires_matching_package_and_ecosystem() {
 
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("libexpat"), "conda-forge");
     assert!(fixed.is_empty());
-    assert!(upstream.is_empty());
+    assert!(other_ecosystem.is_empty());
+    assert!(upstream_releases.is_empty());
 }
 
 #[test]
@@ -228,10 +251,12 @@ fn non_conda_queries_ignore_basilisk_metadata_but_keep_osv_ranges() {
 
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &pypi_name("demo"), "PyPI");
     assert_eq!(fixed, vec!["4.0.0"]);
-    assert!(upstream.is_empty());
+    assert!(other_ecosystem.is_empty());
+    assert!(upstream_releases.is_empty());
 }
 
 #[test]
@@ -266,10 +291,12 @@ fn standard_range_fixes_and_basilisk_metadata_are_deduplicated() {
 
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("libexpat"), "conda-forge");
     assert_eq!(fixed, vec!["2.8.2", "2.8.3"]);
-    assert_eq!(upstream, vec![on_pypi("2.8.4")]);
+    assert_eq!(other_ecosystem, vec![on_pypi("2.8.4")]);
+    assert!(upstream_releases.is_empty());
 }
 
 #[test]
@@ -288,27 +315,27 @@ fn only_release_ranges_contribute_fixed_versions() {
 
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &pypi_name("demo"), "PyPI");
     assert_eq!(fixed, vec!["1.2.3"]);
-    assert!(upstream.is_empty());
+    assert!(other_ecosystem.is_empty());
+    assert!(upstream_releases.is_empty());
 }
 
 #[test]
-fn upstream_fixed_versions_require_a_name_match() {
+fn other_ecosystem_fixed_versions_require_a_name_match() {
     // The django entry in the same advisory must not leak its fixed
     // version into pillow's report.
     let doc = basilisk_shaped_doc();
-    let FixedVersions {
-        same_ecosystem: fixed,
-        upstream,
-    } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
-    assert!(!versions(&upstream).contains(&"5.0.2"));
+    let fixes = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
+    assert!(!external_versions(&fixes).contains(&"5.0.2"));
+    let fixed = fixes.same_ecosystem;
     assert!(!fixed.contains(&"5.0.2".to_string()));
 }
 
 #[test]
-fn fix_present_in_own_ecosystem_is_not_repeated_as_upstream() {
+fn fix_present_in_own_ecosystem_is_not_repeated_elsewhere() {
     let doc: OsvVulnerability = serde_json::from_value(serde_json::json!({
             "id": "X",
             "affected": [
@@ -325,12 +352,13 @@ fn fix_present_in_own_ecosystem_is_not_repeated_as_upstream() {
         .unwrap();
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("pillow"), "conda-forge");
     assert_eq!(fixed, vec!["10.2.0"]);
     assert!(
-        upstream.is_empty(),
-        "version already reported as fixed must not repeat as upstream: {upstream:?}"
+        other_ecosystem.is_empty() && upstream_releases.is_empty(),
+        "version already reported as fixed must not repeat elsewhere: {other_ecosystem:?} {upstream_releases:?}"
     );
 }
 
@@ -385,10 +413,12 @@ fn affected_entry_without_package_counts_as_same_ecosystem() {
     .unwrap();
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("anything"), "conda-forge");
     assert_eq!(fixed, vec!["1.2.3"]);
-    assert!(upstream.is_empty());
+    assert!(other_ecosystem.is_empty());
+    assert!(upstream_releases.is_empty());
 }
 
 #[test]
@@ -405,10 +435,12 @@ fn pypi_names_match_under_pep_503_normalization() {
     .unwrap();
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &pypi_name("ruamel_yaml"), "PyPI");
     assert_eq!(fixed, vec!["0.18.7"]);
-    assert!(upstream.is_empty());
+    assert!(other_ecosystem.is_empty());
+    assert!(upstream_releases.is_empty());
 
     // Conda names only fold case; `ruamel.yaml` and `ruamel-yaml` differ.
     let FixedVersions {
@@ -418,12 +450,10 @@ fn pypi_names_match_under_pep_503_normalization() {
     assert!(fixed.is_empty());
 }
 
-fn on_npm(version: &str) -> UpstreamFix {
-    UpstreamFix {
+fn on_npm(version: &str) -> OtherEcosystemFix {
+    OtherEcosystemFix {
         version: version.to_string(),
-        origin: UpstreamOrigin::Ecosystem {
-            ecosystem: "npm".to_string(),
-        },
+        ecosystem: "npm".to_string(),
     }
 }
 
@@ -504,17 +534,19 @@ fn purl_identity_admits_fixes_from_that_purl_only() {
     let doc = pnpm_shaped_doc();
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("pnpm"), "conda-forge");
     assert!(fixed.is_empty());
     // The version suffix on the second entry's purl does not matter, and
     // the npm origin of 11.4.0 wins over basilisk's project release.
-    assert_eq!(upstream, vec![on_npm("10.34.0"), on_npm("11.4.0")]);
+    assert_eq!(other_ecosystem, vec![on_npm("10.34.0"), on_npm("11.4.0")]);
+    assert!(upstream_releases.is_empty());
 
     assert_eq!(
         basilisk_match(&doc, &conda_name("pnpm"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::Evaluated,
+            match_confidence: MatchConfidence::Evaluated,
             matched_identity: Some(purl_identity("pkg:npm/pnpm")),
         })
     );
@@ -529,8 +561,10 @@ fn purl_identity_matches_by_purl_not_by_name() {
         "applicability": "evaluated",
         "matched_identity": {"kind": "purl", "value": "pkg:npm/pg-native@3.0.0?arch=x86"}
     }));
-    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
-    assert_eq!(upstream, vec![on_npm("3.0.1")]);
+    let FixedVersions {
+        other_ecosystem, ..
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert_eq!(other_ecosystem, vec![on_npm("3.0.1")]);
 }
 
 #[test]
@@ -543,17 +577,19 @@ fn cpe_identity_admits_no_cross_ecosystem_fixes() {
     }));
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
     assert!(fixed.is_empty());
+    assert!(upstream_releases.is_empty());
     assert!(
-        upstream.is_empty(),
-        "npm libpq is not conda-forge libpq: {upstream:?}"
+        other_ecosystem.is_empty(),
+        "npm libpq is not conda-forge libpq: {other_ecosystem:?}"
     );
     assert_eq!(
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::VersionUnbounded,
+            match_confidence: MatchConfidence::VersionUnbounded,
             matched_identity: Some(cpe_identity("cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*")),
         })
     );
@@ -567,10 +603,12 @@ fn cpe_identity_keeps_basilisk_project_fix() {
         "conda_publication": "not_published",
         "matched_identity": {"kind": "cpe", "value": "cpe:2.3:a:postgresql:postgresql:*:*:*:*:*:*:*:*"}
     }));
-    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    let FixedVersions {
+        upstream_releases, ..
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
     assert_eq!(
-        upstream,
-        vec![project_release("16.1", CondaPublication::NotPublished)]
+        upstream_releases,
+        vec![project_release("16.1", CondaForgeBuild::Missing)]
     );
 }
 
@@ -589,9 +627,10 @@ fn without_identity_the_name_match_needs_an_evaluated_applicability() {
             "comparator": "conda",
             "matcher_version": "v8"
         }));
-        let FixedVersions { upstream, .. } =
-            fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
-        assert_eq!(upstream, expected, "applicability: {applicability}");
+        let FixedVersions {
+            other_ecosystem, ..
+        } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+        assert_eq!(other_ecosystem, expected, "applicability: {applicability}");
         assert_eq!(
             basilisk_match(&doc, &conda_name("libpq"), "conda-forge").map(|m| m.matched_identity),
             Some(None),
@@ -606,20 +645,24 @@ fn unknown_applicability_is_unspecified_and_trusts_nothing() {
     assert_eq!(
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::Unspecified,
+            match_confidence: MatchConfidence::Unspecified,
             matched_identity: None,
         })
     );
-    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
-    assert!(upstream.is_empty());
+    let FixedVersions {
+        other_ecosystem, ..
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert!(other_ecosystem.is_empty());
 
     let doc = libpq_shaped_doc(serde_json::json!({
         "applicability": "evaluated",
         "matched_identity": {"kind": "isbn", "value": "x"}
     }));
-    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    let FixedVersions {
+        other_ecosystem, ..
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
     // An identity kind this version does not know is no identity at all.
-    assert_eq!(upstream, vec![on_npm("1.8.10")]);
+    assert_eq!(other_ecosystem, vec![on_npm("1.8.10")]);
 }
 
 #[test]
@@ -642,8 +685,10 @@ fn plain_osv_documents_keep_the_name_match() {
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         None
     );
-    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
-    assert_eq!(upstream, vec![on_npm("1.8.10")]);
+    let FixedVersions {
+        other_ecosystem, ..
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert_eq!(other_ecosystem, vec![on_npm("1.8.10")]);
 }
 
 #[test]
@@ -677,12 +722,14 @@ fn combined_matches_keep_identity_and_applicability_together() {
     assert_eq!(
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::Unevaluated,
+            match_confidence: MatchConfidence::Unevaluated,
             matched_identity: Some(purl_identity("pkg:npm/libpq")),
         })
     );
-    let FixedVersions { upstream, .. } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
-    assert_eq!(upstream, vec![on_npm("1.8.10")]);
+    let FixedVersions {
+        other_ecosystem, ..
+    } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
+    assert_eq!(other_ecosystem, vec![on_npm("1.8.10")]);
 
     // CPE-only matches stay CPE, and an empty array reads like no array.
     let doc = libpq_shaped_doc(serde_json::json!({
@@ -694,7 +741,7 @@ fn combined_matches_keep_identity_and_applicability_together() {
     assert_eq!(
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::Evaluated,
+            match_confidence: MatchConfidence::Evaluated,
             matched_identity: Some(cpe_identity("cpe:b")),
         })
     );
@@ -707,20 +754,20 @@ fn combined_matches_keep_identity_and_applicability_together() {
     assert_eq!(
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::Evaluated,
+            match_confidence: MatchConfidence::Evaluated,
             matched_identity: Some(cpe_identity("cpe:b")),
         })
     );
     assert!(
         fixed_versions(&doc, &conda_name("libpq"), "conda-forge")
-            .upstream
+            .other_ecosystem
             .is_empty()
     );
     let doc = libpq_shaped_doc(serde_json::json!({"applicability": "evaluated", "matches": []}));
     assert_eq!(
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::Evaluated,
+            match_confidence: MatchConfidence::Evaluated,
             matched_identity: None,
         })
     );
@@ -738,13 +785,13 @@ fn equally_applicable_matches_preserve_cpe_identity_in_both_orders() {
         assert_eq!(
             basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
             Some(BasiliskMatch {
-                applicability: MatchApplicability::Evaluated,
+                match_confidence: MatchConfidence::Evaluated,
                 matched_identity: Some(cpe_identity("cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*")),
             })
         );
         assert!(
             fixed_versions(&doc, &conda_name("libpq"), "conda-forge")
-                .upstream
+                .other_ecosystem
                 .is_empty(),
             "a CPE match must not inherit the same-name npm package's fix"
         );
@@ -773,10 +820,10 @@ fn purl_keys_ignore_version_qualifiers_subpath_and_case() {
 fn applicability_serializes_kebab_case_and_orders_by_confidence() {
     assert_eq!(
         serde_json::to_value([
-            MatchApplicability::Unspecified,
-            MatchApplicability::VersionUnbounded,
-            MatchApplicability::Unevaluated,
-            MatchApplicability::Evaluated,
+            MatchConfidence::Unspecified,
+            MatchConfidence::VersionUnbounded,
+            MatchConfidence::Unevaluated,
+            MatchConfidence::Evaluated,
         ])
         .unwrap(),
         serde_json::json!([
@@ -786,13 +833,11 @@ fn applicability_serializes_kebab_case_and_orders_by_confidence() {
             "evaluated"
         ])
     );
-    assert!(MatchApplicability::Evaluated > MatchApplicability::Unevaluated);
-    assert!(MatchApplicability::Unevaluated > MatchApplicability::VersionUnbounded);
-    assert!(MatchApplicability::VersionUnbounded > MatchApplicability::Unspecified);
+    assert!(MatchConfidence::Evaluated > MatchConfidence::Unevaluated);
+    assert!(MatchConfidence::Unevaluated > MatchConfidence::VersionUnbounded);
+    assert!(MatchConfidence::VersionUnbounded > MatchConfidence::Unspecified);
     // `unspecified` is never something basilisk says.
-    assert!(
-        serde_json::from_value::<MatchApplicability>(serde_json::json!("unspecified")).is_err()
-    );
+    assert!(serde_json::from_value::<MatchConfidence>(serde_json::json!("unspecified")).is_err());
 }
 
 #[test]
@@ -815,17 +860,19 @@ fn merged_form_keeps_fix_metadata_top_level_and_tolerates_null_comparator() {
     assert_eq!(
         basilisk_match(&doc, &conda_name("libpq"), "conda-forge"),
         Some(BasiliskMatch {
-            applicability: MatchApplicability::VersionUnbounded,
+            match_confidence: MatchConfidence::VersionUnbounded,
             matched_identity: Some(cpe_identity("cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*")),
         })
     );
     let FixedVersions {
         same_ecosystem: fixed,
-        upstream,
+        other_ecosystem,
+        upstream_releases,
     } = fixed_versions(&doc, &conda_name("libpq"), "conda-forge");
     assert!(fixed.is_empty());
+    assert!(other_ecosystem.is_empty());
     assert_eq!(
-        upstream,
-        vec![project_release("16.1", CondaPublication::NotPublished)]
+        upstream_releases,
+        vec![project_release("16.1", CondaForgeBuild::Missing)]
     );
 }
