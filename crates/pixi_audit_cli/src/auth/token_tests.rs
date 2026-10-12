@@ -93,9 +93,14 @@ async fn environment_token_is_sent_to_the_configured_origin_only() {
 }
 
 #[tokio::test]
-async fn environment_token_takes_precedence_over_the_shared_login() {
+async fn environment_token_takes_precedence_over_the_stored_api_token() {
     let store = storage();
-    store.store("prefix.dev", &grant()).unwrap();
+    store
+        .store(
+            "api.basilisk.prefix.dev",
+            &Authentication::BearerToken(format!("bsk_{}", "A".repeat(40))),
+        )
+        .unwrap();
     let url = Url::parse(DEFAULT_BASILISK_URL).unwrap();
     let (http, seen) = capture_client(&url, Some(store), Some(BSK), StatusCode::OK);
     http.post(url).send().await.unwrap();

@@ -27,6 +27,17 @@ pub(super) struct BasiliskToken {
     origin: Origin,
 }
 
+impl BasiliskToken {
+    fn parse(token: String, origin: Origin) -> miette::Result<Self> {
+        if !looks_like_basilisk_token(&token) {
+            miette::bail!(
+                "Invalid Basilisk API token (expected `bsk_` followed by 40 alphanumeric characters)"
+            );
+        }
+        Ok(Self { token, origin })
+    }
+}
+
 impl std::fmt::Debug for BasiliskToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BasiliskToken")
@@ -67,23 +78,13 @@ pub(super) fn resolve_basilisk_token(
         if value.is_empty() {
             return Ok(None);
         }
-        if !looks_like_basilisk_token(&value) {
-            miette::bail!(
-                "{TOKEN_ENV_VAR} is not a Basilisk API token (expected `bsk_` followed by 40 alphanumeric characters)"
-            );
-        }
+        let token = BasiliskToken::parse(value, origin)?;
         if !token_transport_allowed(base_url) {
             miette::bail!(
                 "{TOKEN_ENV_VAR} is set but the audit API URL is not HTTPS (or local HTTP); refusing to send the token"
             );
         }
-        return Ok(Some((
-            BasiliskToken {
-                token: value,
-                origin,
-            },
-            TokenSource::Environment,
-        )));
+        return Ok(Some((token, TokenSource::Environment)));
     }
     let Some(storage) = storage else {
         return Ok(None);
@@ -95,15 +96,9 @@ pub(super) fn resolve_basilisk_token(
         return Ok(None);
     };
     match storage.get(host) {
-        Ok(Some(Authentication::BearerToken(value))) if looks_like_basilisk_token(&value) => {
-            Ok(Some((
-                BasiliskToken {
-                    token: value,
-                    origin,
-                },
-                TokenSource::AuthStore,
-            )))
-        }
+        Ok(Some(Authentication::BearerToken(value))) => Ok(BasiliskToken::parse(value, origin)
+            .ok()
+            .map(|token| (token, TokenSource::AuthStore))),
         _ => Ok(None),
     }
 }
