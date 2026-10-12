@@ -72,7 +72,7 @@ fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) 
                 if !warned.swap(true, Ordering::Relaxed) {
                     eprintln!(
                         "Warning: Saved prefix.dev login has no Basilisk audience or has an invalid token; \
-                         continuing anonymously. Run `pixi auth login prefix.dev` with a compatible Pixi version to log in again."
+                         continuing anonymously. Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASE_URL}` to log in again."
                     );
                 }
                 false
@@ -174,7 +174,7 @@ impl Middleware for AnonymousRetry {
             if !self.warned.swap(true, Ordering::Relaxed) {
                 eprintln!(
                     "Warning: Basilisk rejected the saved login; retrying anonymously. \
-                     Run `pixi auth login prefix.dev` to log in again."
+                     Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASE_URL}` to log in again."
                 );
             }
             retry.headers_mut().remove(AUTHORIZATION);

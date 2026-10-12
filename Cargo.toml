@@ -41,8 +41,7 @@ pixi_audit = { path = "crates/pixi_audit", version = "0.1.2" }
 # same type `pixi_audit` exposes.
 rattler_lock = { version = "0.31", default-features = false }
 rattler_conda_types = "0.48"
-# Temporary credential-reuse API from conda/rattler#2920; replace with a release.
-rattler_networking = { git = "https://github.com/conda/rattler", rev = "4c8fe3359b6ac03df7faa04f23e3ddbb1ec7cd0f" }
+rattler_networking = "0.34"
 # Same middleware crate pixi uses (its workspace renames `astral-reqwest-middleware`
 # to `reqwest-middleware`), so the `ClientWithMiddleware` type identity unifies
 # when pixi consumes these crates.

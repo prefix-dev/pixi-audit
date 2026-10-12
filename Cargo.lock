@@ -2863,8 +2863,9 @@ dependencies = [
 
 [[package]]
 name = "rattler_networking"
-version = "0.33.1"
-source = "git+https://github.com/conda/rattler?rev=4c8fe3359b6ac03df7faa04f23e3ddbb1ec7cd0f#4c8fe3359b6ac03df7faa04f23e3ddbb1ec7cd0f"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5ec150f3c70c3f04224a1f56d759b9f0a6159ec41ca0c08112091891601ad44"
 dependencies = [
  "ambient-id",
  "apple-native-keyring-store",
@@ -3800,7 +3801,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
