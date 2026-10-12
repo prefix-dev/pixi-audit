@@ -1,20 +1,20 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, Finding, MatchApplicability, PackageEcosystem, PackageId,
-    PackageName, SeverityBand,
+    AuditReport, AuditSummary, Match, MatchConfidence, PackageEcosystem, PackageId, PackageName,
+    SeverityRating,
 };
 
 use super::*;
 
-fn finding(package: &str, id: &str) -> Finding {
-    finding_with_fix(package, id, "conda-forge", &[])
+fn vuln_match(package: &str, id: &str) -> Match {
+    vuln_match_with_fix(package, id, "conda-forge", &[])
 }
 
-fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[&str]) -> Finding {
+fn vuln_match_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[&str]) -> Match {
     let ecosystem = match ecosystem {
         "PyPI" => PackageEcosystem::Pypi,
         _ => PackageEcosystem::CondaForge,
     };
-    Finding {
+    Match {
         package: PackageId {
             name: PackageName::parse(&ecosystem, package).unwrap(),
             version: "1.0".to_string(),
@@ -23,49 +23,53 @@ fn finding_with_fix(package: &str, id: &str, ecosystem: &str, fixed_versions: &[
         environments: vec![],
         id: id.to_string(),
         aliases: vec![],
-        severity: SeverityBand::High,
+        severity: SeverityRating::High,
         cvss_base_score: None,
         fixed_versions: fixed_versions.iter().map(ToString::to_string).collect(),
-        upstream_fixes: vec![],
-        applicability: MatchApplicability::Unspecified,
+        other_ecosystem_fixes: vec![],
+        upstream_releases: vec![],
+        match_confidence: MatchConfidence::Unspecified,
         matched_identity: None,
         summary: None,
         url: None,
         epss: vec![],
-        known_exploited: vec![],
+        kev: vec![],
         risk: pixi_audit::RiskScore::NONE,
-        ignore_reason: None,
+        ignore_mode: None,
     }
 }
 
 #[test]
 fn fixable_package_names_dedupes_and_skips_ignored_and_unfixed() {
-    let mut upstream_only = finding("pillow", "CVE-5");
-    upstream_only.upstream_fixes = vec![pixi_audit::UpstreamFix {
+    let mut fixed_elsewhere = vuln_match("pillow", "CVE-5");
+    fixed_elsewhere.other_ecosystem_fixes = vec![pixi_audit::OtherEcosystemFix {
         version: "10.2.0".to_string(),
-        origin: pixi_audit::UpstreamOrigin::Ecosystem {
-            ecosystem: "PyPI".to_string(),
-        },
+        ecosystem: "PyPI".to_string(),
     }];
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
-            finding_with_fix("openssl", "CVE-2", "conda-forge", &["3.1.2"]),
-            finding_with_fix("zlib", "CVE-3", "conda-forge", &["1.3.1"]),
-            // No fixed release at all, or only upstream: nothing to update to.
-            finding("libexpat", "CVE-4"),
-            upstream_only,
+        matches: vec![
+            vuln_match_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            vuln_match_with_fix("openssl", "CVE-2", "conda-forge", &["3.1.2"]),
+            vuln_match_with_fix("zlib", "CVE-3", "conda-forge", &["1.3.1"]),
+            // No fixed release at all, or only elsewhere: nothing to update to.
+            vuln_match("libexpat", "CVE-4"),
+            fixed_elsewhere,
         ],
-        ignored: vec![finding_with_fix("curl", "CVE-6", "conda-forge", &["8.0"])],
+        ignored: vec![vuln_match_with_fix(
+            "curl",
+            "CVE-6",
+            "conda-forge",
+            &["8.0"],
+        )],
         summary: AuditSummary::default(),
         ..Default::default()
     };
-    assert_eq!(fixable_package_names(&report), vec!["openssl", "zlib"]);
+    assert_eq!(report.fixable_package_names(), vec!["openssl", "zlib"]);
 }
 
 #[test]
 fn empty_report_yields_no_names() {
-    assert!(fixable_package_names(&AuditReport::default()).is_empty());
+    assert!(AuditReport::default().fixable_package_names().is_empty());
 }
 
 #[test]
@@ -94,10 +98,10 @@ openssl = { version = ">=1", build = "*_0" }
     )
     .unwrap();
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
-            finding_with_fix("requests", "PYSEC-1", "PyPI", &["2.9.0"]),
-            finding_with_fix("requests", "PYSEC-2", "PyPI", &["2.10.0"]),
+        matches: vec![
+            vuln_match_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            vuln_match_with_fix("requests", "PYSEC-1", "PyPI", &["2.9.0"]),
+            vuln_match_with_fix("requests", "PYSEC-2", "PyPI", &["2.10.0"]),
         ],
         ..Default::default()
     };
@@ -150,7 +154,12 @@ requests = { version = ">=2", extras = ["socks"] }
     )
     .unwrap();
     let report = AuditReport {
-        vulnerabilities: vec![finding_with_fix("Requests", "PYSEC-1", "PyPI", &["2.33.0"])],
+        matches: vec![vuln_match_with_fix(
+            "Requests",
+            "PYSEC-1",
+            "PyPI",
+            &["2.33.0"],
+        )],
         ..Default::default()
     };
 
@@ -191,9 +200,9 @@ pypi-dependencies = {
     )
     .unwrap();
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
-            finding_with_fix("requests", "PYSEC-1", "PyPI", &["2.33.0"]),
+        matches: vec![
+            vuln_match_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            vuln_match_with_fix("requests", "PYSEC-1", "PyPI", &["2.33.0"]),
         ],
         ..Default::default()
     };
@@ -232,7 +241,7 @@ requests = ">=1,<2"
     )
     .unwrap();
     let report = AuditReport {
-        vulnerabilities: vec![finding_with_fix(
+        matches: vec![vuln_match_with_fix(
             "requests",
             "PYSEC-1",
             "PyPI",
@@ -264,15 +273,15 @@ requests = "*"
     .unwrap();
     // "10.0" sorts before "9.0" as text; typed comparison must pick 10.0 as
     // the lowest fix above the locked 9.5, and ignore the junk entry.
-    let mut finding = finding_with_fix(
+    let mut vuln_match = vuln_match_with_fix(
         "requests",
         "PYSEC-1",
         "PyPI",
         &["not-a-version", "10.0", "11.0"],
     );
-    finding.package.version = "9.5".to_string();
+    vuln_match.package.version = "9.5".to_string();
     let report = AuditReport {
-        vulnerabilities: vec![finding],
+        matches: vec![vuln_match],
         ..Default::default()
     };
 
@@ -283,7 +292,7 @@ requests = "*"
 }
 
 #[test]
-fn manifest_keys_match_findings_under_ecosystem_normalization() {
+fn manifest_keys_match_vulnerabilities_under_ecosystem_normalization() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("pixi.toml");
     std::fs::write(
@@ -300,12 +309,12 @@ zope__interface = ">=0.5"
 "#,
     )
     .unwrap();
-    // Findings carry normalized names; the manifest spells them differently.
+    // Vulnerability matches carry normalized names; the manifest spells them differently.
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
-            finding_with_fix("ruamel-yaml", "PYSEC-1", "PyPI", &["1.18.7"]),
-            finding_with_fix("zope-interface", "PYSEC-2", "PyPI", &["6.0"]),
+        matches: vec![
+            vuln_match_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            vuln_match_with_fix("ruamel-yaml", "PYSEC-1", "PyPI", &["1.18.7"]),
+            vuln_match_with_fix("zope-interface", "PYSEC-2", "PyPI", &["6.0"]),
         ],
         ..Default::default()
     };
@@ -344,11 +353,11 @@ urllib3 = ">1.0,!=1.5"
     )
     .unwrap();
     let report = AuditReport {
-        vulnerabilities: vec![
-            finding_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
-            finding_with_fix("zlib", "CVE-2", "conda-forge", &["1.3"]),
-            finding_with_fix("requests", "PYSEC-1", "PyPI", &["2.10.0"]),
-            finding_with_fix("urllib3", "PYSEC-2", "PyPI", &["2.0"]),
+        matches: vec![
+            vuln_match_with_fix("openssl", "CVE-1", "conda-forge", &["3.1.1"]),
+            vuln_match_with_fix("zlib", "CVE-2", "conda-forge", &["1.3"]),
+            vuln_match_with_fix("requests", "PYSEC-1", "PyPI", &["2.10.0"]),
+            vuln_match_with_fix("urllib3", "PYSEC-2", "PyPI", &["2.0"]),
         ],
         ..Default::default()
     };
@@ -388,7 +397,7 @@ requests = ">=1,<1.5"
 "#;
     std::fs::write(&manifest, content).unwrap();
     let report = AuditReport {
-        vulnerabilities: vec![finding_with_fix(
+        matches: vec![vuln_match_with_fix(
             "requests",
             "PYSEC-1",
             "PyPI",

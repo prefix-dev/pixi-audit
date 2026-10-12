@@ -27,3 +27,27 @@ jobs:
         run: |
           cargo check --workspace --no-default-features --all-targets
           cargo test -p pixi_audit --no-default-features
+
+  release-config:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      # Exercise release validation before merging, without publishing or tagging.
+      - name: Check release configuration
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release
+          dry_run: "true"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Check release PR generation
+        run: release-plz update
+        env:
+          GIT_TOKEN: ${{ github.token }}

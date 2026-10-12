@@ -1,12 +1,12 @@
 use pixi_audit::{
-    AuditReport, AuditSummary, EpssScore, Finding, IgnoreReason, KnownExploited,
-    MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageId,
-    PackageName, RansomwareCampaignUse, RiskScore, SeverityBand,
+    AuditReport, AuditSummary, EpssScore, IgnoreMode, KevEntry, Match, MatchConfidence,
+    MatchedIdentity, MatchedIdentityKind, PackageEcosystem, PackageId, PackageName,
+    RansomwareCampaignUse, RiskScore, SeverityRating,
 };
 
-use super::{LockfileSource, SarifLog};
+use super::{LockFileSource, SarifLog};
 
-const LOCKFILE: &str = "version: 6
+const LOCK_FILE: &str = "version: 6
 environments:
   default:
     channels:
@@ -19,8 +19,8 @@ packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/openssl-3.1.0-hd590300_3.conda
 ";
 
-fn finding(id: &str, severity: SeverityBand) -> Finding {
-    Finding {
+fn vuln_match(id: &str, severity: SeverityRating) -> Match {
+    Match {
         package: PackageId {
             name: PackageName::conda("openssl").unwrap(),
             version: "3.1.0".to_string(),
@@ -32,8 +32,9 @@ fn finding(id: &str, severity: SeverityBand) -> Finding {
         severity,
         cvss_base_score: Some(9.8),
         fixed_versions: vec!["3.1.1".to_string()],
-        upstream_fixes: vec![],
-        applicability: MatchApplicability::Unspecified,
+        other_ecosystem_fixes: vec![],
+        upstream_releases: vec![],
+        match_confidence: MatchConfidence::Unspecified,
         matched_identity: None,
         summary: Some("Buffer overflow in openssl".to_string()),
         url: Some(format!("https://osv.dev/{id}")),
@@ -43,7 +44,7 @@ fn finding(id: &str, severity: SeverityBand) -> Finding {
             percentile: 0.9,
             date: "2026-09-01".to_string(),
         }],
-        known_exploited: vec![KnownExploited {
+        kev: vec![KevEntry {
             cve: id.to_string(),
             vendor_project: "OpenSSL".to_string(),
             product: "OpenSSL".to_string(),
@@ -55,7 +56,7 @@ fn finding(id: &str, severity: SeverityBand) -> Finding {
             notes: String::new(),
         }],
         risk: RiskScore::NONE,
-        ignore_reason: None,
+        ignore_mode: None,
     }
 }
 
@@ -64,25 +65,25 @@ fn finding(id: &str, severity: SeverityBand) -> Finding {
 fn log(report: &AuditReport) -> (serde_json::Value, String) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("pixi.lock");
-    let lockfile = LockfileSource {
+    let lock_file = LockFileSource {
         path: &path,
-        contents: LOCKFILE,
+        contents: LOCK_FILE,
     };
-    let log = serde_json::to_value(SarifLog::from_report(report, &lockfile)).unwrap();
+    let log = serde_json::to_value(SarifLog::from_report(report, &lock_file)).unwrap();
     (log, path.to_string_lossy().replace('\\', "/"))
 }
 
 #[test]
 fn one_rule_per_vulnerability_and_package_with_github_properties() {
-    let mut scored = finding("CVE-2026-0001", SeverityBand::Critical);
+    let mut scored = vuln_match("CVE-2026-0001", SeverityRating::Critical);
     scored.risk = RiskScore::compute(
         scored.severity,
         scored.cvss_base_score,
         &scored.epss,
-        &scored.known_exploited,
+        &scored.kev,
     );
     let report = AuditReport {
-        vulnerabilities: vec![scored],
+        matches: vec![scored],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -130,26 +131,29 @@ fn one_rule_per_vulnerability_and_package_with_github_properties() {
     assert!(text.contains("Fix: fixed in 3.1.1"), "{text}");
     assert!(text.contains(&format!("Lock file: {uri}")), "{text}");
     // No basilisk match metadata: the rows are there but empty.
-    assert!(text.contains("\nMatch: \nMatched identity: \n"), "{text}");
+    assert!(
+        text.contains("\nMatch confidence: \nMatched identity: \n"),
+        "{text}"
+    );
 }
 
 #[test]
 fn weak_matches_and_identities_are_reported() {
-    let mut unbounded = finding("CVE-2022-25852", SeverityBand::High);
+    let mut unbounded = vuln_match("CVE-2022-25852", SeverityRating::High);
     unbounded.fixed_versions = vec![];
-    unbounded.applicability = MatchApplicability::VersionUnbounded;
+    unbounded.match_confidence = MatchConfidence::VersionUnbounded;
     unbounded.matched_identity = Some(MatchedIdentity {
         kind: MatchedIdentityKind::Cpe,
         value: "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*".to_string(),
     });
-    let mut evaluated = finding("CVE-2026-0001", SeverityBand::Critical);
-    evaluated.applicability = MatchApplicability::Evaluated;
+    let mut evaluated = vuln_match("CVE-2026-0001", SeverityRating::Critical);
+    evaluated.match_confidence = MatchConfidence::Evaluated;
     evaluated.matched_identity = Some(MatchedIdentity {
         kind: MatchedIdentityKind::Purl,
         value: "pkg:npm/openssl".to_string(),
     });
     let report = AuditReport {
-        vulnerabilities: vec![unbounded, evaluated],
+        matches: vec![unbounded, evaluated],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 2,
@@ -163,7 +167,7 @@ fn weak_matches_and_identities_are_reported() {
     let unbounded = &run["tool"]["driver"]["rules"][0]["help"]["text"];
     let unbounded = unbounded.as_str().unwrap();
     assert!(
-        unbounded.contains("\nMatch: no version limits\n"),
+        unbounded.contains("\nMatch confidence: no version limits\n"),
         "{unbounded}"
     );
     assert!(
@@ -173,7 +177,7 @@ fn weak_matches_and_identities_are_reported() {
     assert_eq!(
         run["results"][0]["message"]["text"],
         "CVE-2022-25852: high vulnerability in conda-forge package openssl 3.1.0. \
-         no known fixed version. match: no version limits"
+         no known fixed version. confidence: no version limits"
     );
 
     let evaluated = run["tool"]["driver"]["rules"][1]["help"]["text"]
@@ -187,16 +191,16 @@ fn weak_matches_and_identities_are_reported() {
 
 #[test]
 fn results_point_at_the_package_line_and_carry_suppressions() {
-    let mut ignored = finding("CVE-2026-0002", SeverityBand::Medium);
-    ignored.ignore_reason = Some(IgnoreReason::UntilFixed);
+    let mut ignored = vuln_match("CVE-2026-0002", SeverityRating::Medium);
+    ignored.ignore_mode = Some(IgnoreMode::UntilFixed);
     ignored.fixed_versions = vec![];
-    let mut pypi = finding("GHSA-1", SeverityBand::Low);
+    let mut pypi = vuln_match("GHSA-1", SeverityRating::Low);
     pypi.package.name = PackageName::pypi("ruamel-yaml").unwrap();
     pypi.package.version = "0.18.6".to_string();
     pypi.package.ecosystem = PackageEcosystem::Pypi;
     pypi.cvss_base_score = None;
     let report = AuditReport {
-        vulnerabilities: vec![finding("CVE-2026-0001", SeverityBand::High), pypi],
+        matches: vec![vuln_match("CVE-2026-0001", SeverityRating::High), pypi],
         ignored: vec![ignored],
         summary: AuditSummary {
             audited: 2,
@@ -238,10 +242,10 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
         serde_json::json!(["pkg:pypi/ruamel-yaml@0.18.6"])
     );
 
-    let suppressed = &results[2];
-    assert_eq!(suppressed["level"], "warning");
+    let ignored_result = &results[2];
+    assert_eq!(ignored_result["level"], "warning");
     assert_eq!(
-        suppressed["suppressions"],
+        ignored_result["suppressions"],
         serde_json::json!([{
             "kind": "external",
             "justification": "ignored until a fix is released"
@@ -251,10 +255,10 @@ fn results_point_at_the_package_line_and_carry_suppressions() {
 
 #[test]
 fn a_package_missing_from_the_lock_file_text_falls_back_to_line_1() {
-    let mut elsewhere = finding("CVE-2026-0003", SeverityBand::Low);
+    let mut elsewhere = vuln_match("CVE-2026-0003", SeverityRating::Low);
     elsewhere.package.version = "9.9.9".to_string();
     let report = AuditReport {
-        vulnerabilities: vec![elsewhere],
+        matches: vec![elsewhere],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -275,11 +279,11 @@ fn artifact_uri_is_relative_to_the_git_repository_root() {
     std::fs::create_dir(repository.path().join(".git")).unwrap();
     let nested = repository.path().join("apps").join("web");
     std::fs::create_dir_all(&nested).unwrap();
-    let lockfile = nested.join("pixi.lock");
-    std::fs::write(&lockfile, LOCKFILE).unwrap();
+    let lock_file = nested.join("pixi.lock");
+    std::fs::write(&lock_file, LOCK_FILE).unwrap();
 
     let report = AuditReport {
-        vulnerabilities: vec![finding("CVE-2026-0001", SeverityBand::High)],
+        matches: vec![vuln_match("CVE-2026-0001", SeverityRating::High)],
         summary: AuditSummary {
             audited: 1,
             vulnerable: 1,
@@ -289,9 +293,9 @@ fn artifact_uri_is_relative_to_the_git_repository_root() {
     };
     let log = serde_json::to_value(SarifLog::from_report(
         &report,
-        &LockfileSource {
-            path: &lockfile,
-            contents: LOCKFILE,
+        &LockFileSource {
+            path: &lock_file,
+            contents: LOCK_FILE,
         },
     ))
     .unwrap();
@@ -309,12 +313,12 @@ fn artifact_uri_is_relative_to_the_git_repository_root() {
     // Outside any repository and the working directory, the path is used
     // as given.
     let elsewhere = tempfile::tempdir().unwrap();
-    let lockfile = elsewhere.path().join("pixi.lock");
+    let lock_file = elsewhere.path().join("pixi.lock");
     let log = serde_json::to_value(SarifLog::from_report(
         &report,
-        &LockfileSource {
-            path: &lockfile,
-            contents: LOCKFILE,
+        &LockFileSource {
+            path: &lock_file,
+            contents: LOCK_FILE,
         },
     ))
     .unwrap();
@@ -322,7 +326,7 @@ fn artifact_uri_is_relative_to_the_git_repository_root() {
         ["uri"]
         .as_str()
         .unwrap();
-    assert_eq!(uri, lockfile.to_string_lossy().replace('\\', "/"));
+    assert_eq!(uri, lock_file.to_string_lossy().replace('\\', "/"));
 }
 
 #[test]

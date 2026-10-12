@@ -1,5 +1,5 @@
 //! `pixi audit ignore`: records ignore rules in the workspace manifest's
-//! `[tool.pixi-audit]` table, so a suppression lives next to the code it
+//! `[tool.pixi-audit]` table, so an ignore rule lives next to the code it
 //! covers instead of in a CI script.
 
 use std::path::PathBuf;
@@ -7,10 +7,17 @@ use std::path::PathBuf;
 use clap::Args;
 use jiff::civil::Date;
 use miette::{Context, IntoDiagnostic, miette};
-use pixi_audit::IgnoreScope;
-use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value};
+use pixi_audit::{
+    IgnoreRule, IgnoreScope,
+    config::{IgnoreEntry, IgnoreList, IgnoreTable},
+};
+use serde::{Deserialize, Serialize, de::IntoDeserializer};
+use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
-use crate::config;
+use crate::{
+    config,
+    workspace::{self, Manifest},
+};
 
 #[derive(Debug, Args)]
 pub struct IgnoreArgs {
@@ -19,10 +26,10 @@ pub struct IgnoreArgs {
     #[arg(required_unless_present = "package", value_name = "ID")]
     pub ids: Vec<String>,
 
-    /// Limit the rule to this package, or ignore every finding in it
+    /// Limit the rule to this package, or ignore every vulnerability match in it
     #[arg(long, value_name = "NAME")]
     pub package: Option<String>,
-    /// Match findings from this ecosystem (conda-forge or PyPI)
+    /// Match vulnerabilities from this ecosystem (conda-forge or PyPI)
     #[arg(long, value_name = "ECOSYSTEM")]
     pub ecosystem: Option<String>,
 
@@ -32,20 +39,20 @@ pub struct IgnoreArgs {
 
     /// Match installed versions no newer than this one
     #[arg(long, value_name = "VERSION")]
-    pub max_affected_version: Option<String>,
+    pub up_to_version: Option<String>,
 
     /// Ignore only while no fixed release is known
     #[arg(long)]
     pub until_fixed: bool,
 
-    /// Why the finding is ignored; recorded next to the id
+    /// Why the vulnerability is ignored; recorded next to the id
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
     /// Last day the rule applies (YYYY-MM-DD). After it the audit reports
-    /// the finding again and warns about the expired rule.
+    /// the vulnerability match again and warns about the expired rule.
     #[arg(long, value_name = "DATE", value_parser = parse_date)]
-    pub until: Option<Date>,
+    pub expired_at: Option<Date>,
 
     /// Manifest to edit. Discovered from the current directory when
     /// omitted.
@@ -59,90 +66,65 @@ fn parse_date(text: &str) -> Result<Date, String> {
 }
 
 pub fn run(args: IgnoreArgs) -> miette::Result<()> {
-    if let Some(until) = args.until
-        && until < config::today()
+    if let Some(expired_at) = args.expired_at
+        && expired_at < config::today()
     {
-        return Err(miette!("--until {until} is in the past"));
+        return Err(miette!("--expired-at {expired_at} is in the past"));
     }
-    let manifest = match args.manifest {
-        Some(path) => path,
+    let mut manifest = match args.manifest {
+        Some(path) => Manifest::load(&path)?,
         None => {
             let cwd = std::env::current_dir()
                 .into_diagnostic()
                 .wrap_err("cannot determine the current directory")?;
-            config::discover_workspace(&cwd)?.ok_or_else(|| {
+            let path = workspace::discover_workspace(&cwd)?.ok_or_else(|| {
                 miette!("no pixi workspace found; pass --manifest or run inside a pixi workspace")
-            })?
+            })?;
+            Manifest::load(&path)?
         }
     };
-
-    let content = std::fs::read_to_string(&manifest)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read manifest '{}'", manifest.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("'{}' is not valid TOML", manifest.display()))?;
 
     let list = if args.until_fixed {
         IgnoreList::UntilFixed
     } else {
-        IgnoreList::Always
+        IgnoreList::Permanent
     };
     let scope = IgnoreScope {
         package: args.package,
         ecosystem: args.ecosystem,
         version: args.version,
-        max_affected_version: args.max_affected_version,
+        up_to_version: args.up_to_version,
     };
     let outcome = add_rules(
-        &mut document,
+        &mut manifest.document,
         list,
         &args.ids,
         &scope,
         args.reason.as_deref(),
-        args.until,
+        args.expired_at,
     )?;
     if !outcome.added.is_empty() {
-        std::fs::write(&manifest, document.to_string())
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to update manifest '{}'", manifest.display()))?;
+        manifest.save()?;
     }
 
     for rule in &outcome.added {
         eprintln!(
             "Ignoring {rule}{} in '{}'",
             match list {
-                IgnoreList::Always => "",
+                IgnoreList::Permanent => "",
                 IgnoreList::UntilFixed => " until a fix is released",
             },
-            manifest.display()
+            manifest.path.display()
         );
     }
     for rule in &outcome.existing {
         eprintln!(
             "note: {rule} is already listed under '{}' in [tool.pixi-audit] of '{}'",
             list.key(),
-            manifest.display()
+            manifest.path.display()
         );
     }
     Ok(())
-}
-
-/// The two ignore lists of `[tool.pixi-audit]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IgnoreList {
-    Always,
-    UntilFixed,
-}
-
-impl IgnoreList {
-    pub fn key(self) -> &'static str {
-        match self {
-            IgnoreList::Always => "ignore",
-            IgnoreList::UntilFixed => "ignore-until-fixed",
-        }
-    }
 }
 
 /// Which rules a call recorded and which were already listed, as labels
@@ -153,7 +135,7 @@ pub struct Outcome {
     pub existing: Vec<String>,
 }
 
-/// What one rule suppresses, with identifiers lowercased for comparison.
+/// What one rule ignores, with identifiers lowercased for comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuleKey {
     id: Option<String>,
@@ -167,8 +149,7 @@ impl RuleKey {
             scope: IgnoreScope {
                 package: scope.package.as_deref().map(str::to_lowercase),
                 ecosystem: scope.ecosystem.as_deref().map(str::to_lowercase),
-                version: scope.version.clone(),
-                max_affected_version: scope.max_affected_version.clone(),
+                ..scope.clone()
             },
         }
     }
@@ -186,10 +167,12 @@ pub fn add_rules(
     ids: &[String],
     scope: &IgnoreScope,
     reason: Option<&str>,
-    until: Option<Date>,
+    expired_at: Option<Date>,
 ) -> miette::Result<Outcome> {
     scope.validate().map_err(|error| miette!("{error}"))?;
-    let package = scope.package.as_deref();
+    if ids.is_empty() && scope.package.is_none() {
+        return Err(miette!("an ignore rule needs an id or a package"));
+    }
     let table = audit_table(document)?;
     let item = table
         .entry(list.key())
@@ -197,6 +180,7 @@ pub fn add_rules(
     let array = item
         .as_array_mut()
         .ok_or_else(|| miette!("'{}' in [tool.pixi-audit] is not an array", list.key()))?;
+    let existing_keys: Vec<RuleKey> = array.iter().filter_map(entry_key).collect();
 
     let targets: Vec<Option<&str>> = if ids.is_empty() {
         vec![None]
@@ -207,21 +191,15 @@ pub fn add_rules(
     let mut added_keys: Vec<RuleKey> = Vec::new();
     for id in targets {
         let key = RuleKey::new(id, scope);
-        let label = match (id, package) {
-            (Some(id), Some(package)) => format!("{id} in package '{package}'"),
-            (Some(id), None) => id.to_string(),
-            (None, Some(package)) => format!("package '{package}'"),
-            (None, None) => return Err(miette!("an ignore rule needs an id or a package")),
-        };
-        let listed = array
-            .iter()
-            .filter_map(entry_key)
-            .any(|existing| existing == key);
+        let rule = IgnoreRule::new(id.map(str::to_string), scope.clone(), list.until_fixed())
+            .map_err(|error| miette!("{error}"))?;
+        let label = rule.to_string();
+        let listed = existing_keys.contains(&key);
         if listed || added_keys.contains(&key) {
             outcome.existing.push(label);
             continue;
         }
-        array.push(rule_value(id, scope, reason, until));
+        array.push(rule_value(id, scope, reason, expired_at)?);
         added_keys.push(key);
         outcome.added.push(label);
     }
@@ -246,42 +224,13 @@ fn audit_table(document: &mut DocumentMut) -> miette::Result<&mut Table> {
         .ok_or_else(|| miette!("[tool.pixi-audit] in the manifest is not a table"))
 }
 
-/// What an ignore list entry suppresses, for both the bare and table
+/// What an ignore list entry ignores, for both the bare and table
 /// forms. Entries of another shape are skipped here; the config loader
 /// reports them.
 fn entry_key(entry: &Value) -> Option<RuleKey> {
-    match entry {
-        Value::String(id) => Some(RuleKey::new(Some(id.value()), &IgnoreScope::default())),
-        Value::InlineTable(rule) => Some(RuleKey {
-            id: rule
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_lowercase),
-            scope: IgnoreScope {
-                package: rule
-                    .get("package")
-                    .and_then(Value::as_str)
-                    .map(str::to_lowercase),
-                ecosystem: rule
-                    .get("ecosystem")
-                    .and_then(Value::as_str)
-                    .map(str::to_lowercase),
-                version: rule
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                max_affected_version: rule
-                    .get("max-affected-version")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            },
-        }),
-        Value::Integer(_)
-        | Value::Float(_)
-        | Value::Boolean(_)
-        | Value::Datetime(_)
-        | Value::Array(_) => None,
-    }
+    let entry = IgnoreEntry::deserialize(entry.clone().into_deserializer()).ok()?;
+    let rule = entry.resolved(false).ok()?;
+    Some(RuleKey::new(rule.id(), rule.scope()))
 }
 
 /// A bare id when there is nothing else to record, otherwise an inline
@@ -290,38 +239,26 @@ fn rule_value(
     id: Option<&str>,
     scope: &IgnoreScope,
     reason: Option<&str>,
-    until: Option<Date>,
-) -> Value {
-    if let Some(id) = id
+    expired_at: Option<Date>,
+) -> miette::Result<Value> {
+    let entry = if let Some(id) = id
         && scope.is_empty()
         && reason.is_none()
-        && until.is_none()
+        && expired_at.is_none()
     {
-        return Value::from(id);
-    }
-    let mut rule = InlineTable::new();
-    if let Some(id) = id {
-        rule.insert("id", Value::from(id));
-    }
-    if let Some(package) = scope.package.as_deref() {
-        rule.insert("package", Value::from(package));
-    }
-    if let Some(ecosystem) = scope.ecosystem.as_deref() {
-        rule.insert("ecosystem", Value::from(ecosystem));
-    }
-    if let Some(version) = scope.version.as_deref() {
-        rule.insert("version", Value::from(version));
-    }
-    if let Some(version) = scope.max_affected_version.as_deref() {
-        rule.insert("max-affected-version", Value::from(version));
-    }
-    if let Some(reason) = reason {
-        rule.insert("reason", Value::from(reason));
-    }
-    if let Some(until) = until {
-        rule.insert("until", Value::from(until.to_string()));
-    }
-    Value::InlineTable(rule)
+        IgnoreEntry::Id(id.to_string())
+    } else {
+        IgnoreEntry::Rule(IgnoreTable {
+            id: id.map(str::to_string),
+            scope: scope.clone(),
+            reason: reason.map(str::to_string),
+            expired_at: expired_at.map(|date| toml::Value::String(date.to_string())),
+        })
+    };
+    entry
+        .serialize(toml_edit::ser::ValueSerializer::new())
+        .into_diagnostic()
+        .wrap_err("failed to serialize ignore rule")
 }
 
 #[cfg(test)]

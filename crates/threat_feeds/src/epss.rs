@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer};
 use url::Url;
 
 use super::{ThreatFeedError, http};
-use crate::threat::EpssScore;
+use crate::EpssScore;
 
 /// The default EPSS API instance (FIRST).
 pub const DEFAULT_EPSS_BASE_URL: &str = "https://api.first.org";

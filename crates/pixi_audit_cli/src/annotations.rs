@@ -1,10 +1,10 @@
 //! GitHub Actions workflow commands. Written to stderr on a runner, they
-//! surface every finding as an annotation on the job and on the pull
+//! surface every vulnerability match as an annotation on the job and on the pull
 //! request's changed files, without touching the report on stdout.
 
 use std::fmt::Write as _;
 
-use pixi_audit::{AuditReport, Finding};
+use pixi_audit::{AuditReport, Match};
 
 /// The annotation level, chosen by whether the audit fails the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,46 +28,46 @@ pub fn on_github_actions() -> bool {
 }
 
 /// One workflow command per vulnerability, each on its own line.
-pub fn github_annotations(report: &AuditReport, level_for: impl Fn(&Finding) -> Level) -> String {
+pub fn github_annotations(report: &AuditReport, level_for: impl Fn(&Match) -> Level) -> String {
     let mut out = String::new();
-    for finding in &report.vulnerabilities {
+    for vuln_match in &report.matches {
         writeln!(
             out,
             "::{} title={}::{}",
-            level_for(finding).command(),
+            level_for(vuln_match).command(),
             escape_property(&format!(
                 "{} in {} {}",
-                finding.id, finding.package.name, finding.package.version
+                vuln_match.id, vuln_match.package.name, vuln_match.package.version
             )),
-            escape_data(&message(finding))
+            escape_data(&message(vuln_match))
         )
         .unwrap();
     }
     out
 }
 
-fn message(finding: &Finding) -> String {
-    let fix = crate::render::fix_summary(finding);
-    let match_note = crate::render::match_note(finding)
+fn message(vuln_match: &Match) -> String {
+    let fix = crate::render::fix_summary(vuln_match);
+    let confidence_note = crate::render::confidence_note(vuln_match)
         .map(|note| format!(", {note}"))
         .unwrap_or_default();
-    let mut text = format!("{} severity", finding.severity);
-    if let Some(risk) = crate::render::risk_label(finding.risk) {
+    let mut text = format!("{} severity", vuln_match.severity);
+    if let Some(risk) = crate::render::risk_label(vuln_match.risk) {
         text.push_str(&format!(", risk {risk}"));
     }
-    if !finding.known_exploited.is_empty() {
+    if !vuln_match.kev.is_empty() {
         text.push_str(", known exploited");
     }
     text.push_str(&format!(
-        ", {fix}{match_note} ({}; {})",
-        finding.package.ecosystem,
-        finding.environments.join(", ")
+        ", {fix}{confidence_note} ({}; {})",
+        vuln_match.package.ecosystem,
+        vuln_match.environments.join(", ")
     ));
-    if let Some(summary) = &finding.summary {
+    if let Some(summary) = &vuln_match.summary {
         text.push_str(": ");
         text.push_str(summary);
     }
-    if let Some(url) = &finding.url {
+    if let Some(url) = &vuln_match.url {
         text.push(' ');
         text.push_str(url);
     }
@@ -90,15 +90,15 @@ fn escape_property(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use pixi_audit::{
-        AuditSummary, MatchApplicability, PackageEcosystem, PackageId, PackageName, SeverityBand,
+        AuditSummary, MatchConfidence, PackageEcosystem, PackageId, PackageName, SeverityRating,
     };
 
     use super::*;
 
     #[test]
-    fn one_command_per_finding_with_escaped_title() {
+    fn one_command_per_match_with_escaped_title() {
         let report = AuditReport {
-            vulnerabilities: vec![Finding {
+            matches: vec![Match {
                 package: PackageId {
                     name: PackageName::conda("openssl").unwrap(),
                     version: "3.1.0".to_string(),
@@ -107,18 +107,19 @@ mod tests {
                 environments: vec!["default".to_string()],
                 id: "CVE-2026-1".to_string(),
                 aliases: vec![],
-                severity: SeverityBand::High,
+                severity: SeverityRating::High,
                 cvss_base_score: None,
                 fixed_versions: vec!["3.1.1".to_string()],
-                upstream_fixes: vec![],
-                applicability: MatchApplicability::Unspecified,
+                other_ecosystem_fixes: vec![],
+                upstream_releases: vec![],
+                match_confidence: MatchConfidence::Unspecified,
                 matched_identity: None,
                 summary: Some("100% broken\nreally".to_string()),
                 url: Some("https://osv.dev/CVE-2026-1".to_string()),
                 epss: vec![],
-                known_exploited: vec![],
+                kev: vec![],
                 risk: pixi_audit::RiskScore::NONE,
-                ignore_reason: None,
+                ignore_mode: None,
             }],
             summary: AuditSummary {
                 audited: 1,
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn weak_matches_are_noted_in_the_message() {
         let mut report = AuditReport {
-            vulnerabilities: vec![Finding {
+            matches: vec![Match {
                 package: PackageId {
                     name: PackageName::conda("libpq").unwrap(),
                     version: "16.0".to_string(),
@@ -147,37 +148,38 @@ mod tests {
                 environments: vec!["default".to_string()],
                 id: "CVE-2022-25852".to_string(),
                 aliases: vec![],
-                severity: SeverityBand::High,
+                severity: SeverityRating::High,
                 cvss_base_score: None,
                 fixed_versions: vec![],
-                upstream_fixes: vec![],
-                applicability: MatchApplicability::VersionUnbounded,
+                other_ecosystem_fixes: vec![],
+                upstream_releases: vec![],
+                match_confidence: MatchConfidence::VersionUnbounded,
                 matched_identity: None,
                 summary: None,
                 url: None,
                 epss: vec![],
-                known_exploited: vec![],
+                kev: vec![],
                 risk: pixi_audit::RiskScore::NONE,
-                ignore_reason: None,
+                ignore_mode: None,
             }],
             ..Default::default()
         };
         assert_eq!(
             github_annotations(&report, |_| Level::Warning),
             "::warning title=CVE-2022-25852 in libpq 16.0::high severity, no known fixed \
-             version, match: no version limits (conda-forge; default)\n"
+             version, confidence: no version limits (conda-forge; default)\n"
         );
-        report.vulnerabilities[0].applicability = MatchApplicability::Unevaluated;
+        report.matches[0].match_confidence = MatchConfidence::Unevaluated;
         assert!(
             github_annotations(&report, |_| Level::Warning)
-                .contains(", match: version not checked (")
+                .contains(", confidence: version not checked (")
         );
     }
 
     #[test]
     fn risk_and_kev_are_mentioned_when_present() {
         let mut report = AuditReport::default();
-        let mut finding = Finding {
+        let mut vuln_match = Match {
             package: PackageId {
                 name: PackageName::conda("openssl").unwrap(),
                 version: "3.1.0".to_string(),
@@ -186,16 +188,17 @@ mod tests {
             environments: vec!["default".to_string()],
             id: "CVE-2026-1".to_string(),
             aliases: vec![],
-            severity: SeverityBand::High,
+            severity: SeverityRating::High,
             cvss_base_score: None,
             fixed_versions: vec![],
-            upstream_fixes: vec![],
-            applicability: MatchApplicability::Unspecified,
+            other_ecosystem_fixes: vec![],
+            upstream_releases: vec![],
+            match_confidence: MatchConfidence::Unspecified,
             matched_identity: None,
             summary: None,
             url: None,
             epss: vec![],
-            known_exploited: vec![pixi_audit::KnownExploited {
+            kev: vec![pixi_audit::KevEntry {
                 cve: "CVE-2026-1".to_string(),
                 vendor_project: String::new(),
                 product: String::new(),
@@ -207,15 +210,15 @@ mod tests {
                 notes: String::new(),
             }],
             risk: pixi_audit::RiskScore::NONE,
-            ignore_reason: None,
+            ignore_mode: None,
         };
-        finding.risk = pixi_audit::RiskScore::compute(
-            finding.severity,
+        vuln_match.risk = pixi_audit::RiskScore::compute(
+            vuln_match.severity,
             None,
-            &finding.epss,
-            &finding.known_exploited,
+            &vuln_match.epss,
+            &vuln_match.kev,
         );
-        report.vulnerabilities.push(finding);
+        report.matches.push(vuln_match);
         assert_eq!(
             github_annotations(&report, |_| Level::Error),
             "::error title=CVE-2026-1 in openssl 3.1.0::high severity, risk 78.8, known exploited, \

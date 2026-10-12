@@ -67,19 +67,55 @@ fn ignore_scope_validates_versions_for_the_selected_ecosystem() {
             ..IgnoreScope::default()
         };
         assert_eq!(scope.validate().is_ok(), valid, "{scope:?}");
-        scope.max_affected_version = scope.version.take();
+        scope.up_to_version = scope.version.take();
         assert_eq!(scope.validate().is_ok(), valid, "{scope:?}");
     }
 }
 
+fn scope_matches(scope: &IgnoreScope, package: &PackageId) -> bool {
+    let locked = package.parsed_version().ok();
+    ScopeMatcher::parse(scope)
+        .unwrap()
+        .matches(package, locked.as_ref())
+}
+
+#[test]
+fn unqualified_scope_compares_under_the_package_ecosystem() {
+    // Not the first version parser that accepts the bound: `1.0foo` is a
+    // conda version but not a PEP 440 one.
+    let mut package = PackageId {
+        name: PackageName::conda("openssl").unwrap(),
+        version: "1.0foo".into(),
+        ecosystem: PackageEcosystem::CondaForge,
+    };
+    let mut scope = IgnoreScope {
+        version: Some("1.0foo".into()),
+        up_to_version: Some("1.0foo".into()),
+        ..IgnoreScope::default()
+    };
+    assert!(scope_matches(&scope, &package));
+    package.ecosystem = PackageEcosystem::Pypi;
+    assert!(!scope_matches(&scope, &package));
+    package.version = "1.0".into();
+    scope.version = Some("1.0.0".into());
+    scope.up_to_version = Some("1.0rc1".into());
+    assert!(!scope_matches(&scope, &package));
+    scope.up_to_version = Some("1.0".into());
+    assert!(scope_matches(&scope, &package));
+    package.ecosystem = PackageEcosystem::Other("custom".into());
+    assert!(!scope_matches(&scope, &package));
+    package.version = "not a version".into();
+    assert!(scope_matches(&IgnoreScope::default(), &package));
+}
+
 #[test]
 fn severity_band_round_trips_through_its_name() {
-    for band in SeverityBand::ALL {
-        assert_eq!(band.name().parse::<SeverityBand>(), Ok(band));
-        assert_eq!(band.to_string(), band.name());
+    for rating in SeverityRating::ALL {
+        assert_eq!(rating.name().parse::<SeverityRating>(), Ok(rating));
+        assert_eq!(rating.to_string(), rating.name());
     }
-    assert!("HIGH".parse::<SeverityBand>().is_err());
-    assert!("severe".parse::<SeverityBand>().is_err());
+    assert!("HIGH".parse::<SeverityRating>().is_err());
+    assert!("severe".parse::<SeverityRating>().is_err());
 }
 
 #[test]
@@ -124,25 +160,28 @@ fn severity(kind: &str, score: &str) -> crate::types::OsvSeverity {
 fn severity_band_from_cvss_vector() {
     // CVSS:3.1 9.8 => critical
     assert_eq!(
-        SeverityBand::from_severities(&[severity(
+        SeverityRating::from_severities(&[severity(
             "CVSS_V3",
             "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
         )]),
-        SeverityBand::Critical
+        SeverityRating::Critical
     );
     // Unparsable => unknown
-    assert_eq!(SeverityBand::from_severities(&[]), SeverityBand::Unknown);
+    assert_eq!(
+        SeverityRating::from_severities(&[]),
+        SeverityRating::Unknown
+    );
 }
 
 #[test]
 fn severity_band_accepts_nvd_style_type_labels() {
     // basilisk's NVD ingestion labels entries "CVSS_V3.1" / "CVSS_V3.0".
     assert_eq!(
-        SeverityBand::from_severities(&[severity(
+        SeverityRating::from_severities(&[severity(
             "CVSS_V3.1",
             "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"
         )]),
-        SeverityBand::High
+        SeverityRating::High
     );
 }
 
@@ -150,11 +189,11 @@ fn severity_band_accepts_nvd_style_type_labels() {
 fn severity_band_from_cvss_v4() {
     // CVSS:4.0 9.3 => critical
     assert_eq!(
-        SeverityBand::from_severities(&[severity(
+        SeverityRating::from_severities(&[severity(
             "CVSS_V4",
             "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
         )]),
-        SeverityBand::Critical
+        SeverityRating::Critical
     );
 }
 
@@ -162,16 +201,16 @@ fn severity_band_from_cvss_v4() {
 fn severity_band_from_cvss_v2() {
     // Known NVD base scores: 7.5 => high, 4.3 => medium.
     assert_eq!(
-        SeverityBand::from_severities(&[severity("CVSS_V2.0", "AV:N/AC:L/Au:N/C:P/I:P/A:P")]),
-        SeverityBand::High
+        SeverityRating::from_severities(&[severity("CVSS_V2.0", "AV:N/AC:L/Au:N/C:P/I:P/A:P")]),
+        SeverityRating::High
     );
     assert_eq!(
-        SeverityBand::from_severities(&[severity("CVSS_V2.0", "AV:N/AC:M/Au:N/C:P/I:N/A:N")]),
-        SeverityBand::Medium
+        SeverityRating::from_severities(&[severity("CVSS_V2.0", "AV:N/AC:M/Au:N/C:P/I:N/A:N")]),
+        SeverityRating::Medium
     );
     assert_eq!(
-        SeverityBand::from_severities(&[severity("CVSS_V2.0", "AV:L/AC:H/Au:N/C:N/I:P/A:N")]),
-        SeverityBand::Low
+        SeverityRating::from_severities(&[severity("CVSS_V2.0", "AV:L/AC:H/Au:N/C:N/I:P/A:N")]),
+        SeverityRating::Low
     );
 }
 
@@ -180,19 +219,19 @@ fn cvss_v2_has_no_critical_band() {
     // v2's qualitative scale tops out at "high" (7.0-10.0); a 10.0 v2-only
     // advisory must not be promoted to critical.
     assert_eq!(
-        SeverityBand::from_severities(&[severity("CVSS_V2.0", "AV:N/AC:L/Au:N/C:C/I:C/A:C")]),
-        SeverityBand::High
+        SeverityRating::from_severities(&[severity("CVSS_V2.0", "AV:N/AC:L/Au:N/C:C/I:C/A:C")]),
+        SeverityRating::High
     );
 }
 
 #[test]
 fn highest_band_across_mixed_severity_entries_wins() {
     assert_eq!(
-        SeverityBand::from_severities(&[
+        SeverityRating::from_severities(&[
             severity("CVSS_V2.0", "AV:N/AC:M/Au:N/C:P/I:N/A:N"), // medium
             severity("CVSS_V3.1", "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), // critical
         ]),
-        SeverityBand::Critical
+        SeverityRating::Critical
     );
 }
 

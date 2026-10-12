@@ -5,29 +5,28 @@ use std::path::Path;
 use std::process::Command;
 
 use miette::{IntoDiagnostic, WrapErr, miette};
-use pixi_audit::{AuditReport, FixStatus};
-use toml_edit::{DocumentMut, Item, TableLike};
+use pixi_audit::AuditReport;
 
-use crate::workspace::ResolvedTargets;
+use crate::workspace::{Manifest, ResolvedTargets};
 
 mod constraint;
 
 /// Runs the whole `--fix` flow on top of `before`, the report of the
 /// current lock file: raises manifest constraints, runs `pixi update` for
 /// the fixable packages, then calls `reaudit` for the report of the
-/// updated lock file. Returns `before` untouched when no finding has a
+/// updated lock file. Returns `before` untouched when no vulnerability match has a
 /// fixed release to move to.
 pub async fn apply(
     targets: &ResolvedTargets,
     before: AuditReport,
     reaudit: impl AsyncFn() -> miette::Result<AuditReport>,
 ) -> miette::Result<AuditReport> {
-    let names = fixable_package_names(&before);
+    let names = before.fixable_package_names();
     if names.is_empty() {
-        if !before.vulnerabilities.is_empty() {
+        if !before.matches.is_empty() {
             eprintln!(
                 "fixed: no fixed release is known for the vulnerable packages \
-                 (fixes may exist only upstream); skipping `pixi update`"
+                 (fixes may exist only elsewhere); skipping `pixi update`"
             );
         }
         return Ok(before);
@@ -35,7 +34,7 @@ pub async fn apply(
     let manifest = targets.manifest.as_deref().ok_or_else(|| {
         miette!(
             "--fix requires a pixi workspace (no pixi.toml/pyproject.toml next to '{}')",
-            targets.lockfile.display()
+            targets.lock_file.display()
         )
     })?;
 
@@ -57,23 +56,6 @@ pub async fn apply(
     Ok(after)
 }
 
-/// Distinct names of packages that have a fixed release in their own
-/// ecosystem among the report's non-ignored findings, in first-appearance
-/// order. Upstream-only fixes cannot be installed, so they do not count.
-pub(crate) fn fixable_package_names(report: &AuditReport) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for finding in &report.vulnerabilities {
-        if finding.fix_status() != FixStatus::Available {
-            continue;
-        }
-        let name = finding.package.name.to_string();
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
-}
-
 /// Raise matching direct dependency constraints in a Pixi manifest to the
 /// lowest fixed version newer than each vulnerable locked version.
 ///
@@ -83,43 +65,22 @@ pub(crate) fn fixable_package_names(report: &AuditReport) -> Vec<String> {
 /// and URL dependencies without a version are left untouched. The original
 /// TOML formatting and comments are retained by `toml_edit`.
 fn bump_manifest_constraints(manifest: &Path, report: &AuditReport) -> miette::Result<usize> {
-    let fixes = constraint::plan_fixed_versions(report);
+    let fixes = constraint::FixPlan::from_report(report);
     if fixes.is_empty() {
         return Ok(0);
     }
 
-    let content = std::fs::read_to_string(manifest)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read manifest '{}'", manifest.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("'{}' is not valid TOML", manifest.display()))?;
-
-    let root: &mut dyn TableLike =
-        if manifest.file_name().and_then(|name| name.to_str()) == Some("pyproject.toml") {
-            document
-                .get_mut("tool")
-                .and_then(Item::as_table_like_mut)
-                .and_then(|tool| tool.get_mut("pixi"))
-                .and_then(Item::as_table_like_mut)
-                .ok_or_else(|| miette!("'{}' has no [tool.pixi] table", manifest.display()))?
-        } else {
-            document.as_table_mut()
-        };
-
-    let changed = constraint::update_manifest_dependencies(root, &fixes);
+    let mut manifest = Manifest::load(manifest)?;
+    let changed = fixes.apply_to_manifest(manifest.pixi_table_mut()?);
     if changed > 0 {
-        std::fs::write(manifest, document.to_string())
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to update manifest '{}'", manifest.display()))?;
+        manifest.save()?;
     }
     Ok(changed)
 }
 
 /// Runs `pixi update --manifest-path <manifest> <names...>`. pixi's output
 /// is relayed to our stderr so stdout stays reserved for the report.
-fn run_pixi_update(manifest: &Path, names: &[String]) -> miette::Result<()> {
+fn run_pixi_update(manifest: &Path, names: &[&str]) -> miette::Result<()> {
     let output = Command::new("pixi")
         .arg("update")
         .arg("--manifest-path")

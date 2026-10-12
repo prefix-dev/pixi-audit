@@ -1,59 +1,42 @@
 # pixi-audit
 
-`pixi-audit` checks the packages in a [`pixi.lock`](https://pixi.sh/latest/workspace/lockfile/) for known vulnerabilities. It audits conda-forge packages with [Basilisk](https://github.com/prefix-dev/basilisk) and PyPI packages with [OSV](https://osv.dev).
+Audit [Pixi](https://pixi.sh) lock files for known vulnerabilities. `pixi-audit` checks conda-forge packages with [Basilisk](https://github.com/prefix-dev/basilisk) and PyPI packages with [OSV](https://osv.dev).
 
-It works as both a `pixi audit` extension and a standalone CLI.
+It runs as a `pixi audit` extension or a standalone `pixi-audit` command.
 
-## Install
+## Installation
 
-From a local checkout, Pixi can build and install the extension directly:
+From a local checkout:
 
 ```console
 pixi global install --path .
 ```
 
-Or install it with Cargo:
+Or with Cargo:
 
 ```console
 cargo install --path crates/pixi_audit_cli --locked
 ```
 
-Both commands install `pixi-audit`. Pixi discovers executables named `pixi-<command>` as extensions, so these are equivalent:
+## Usage
 
-```console
-pixi audit --help
-pixi-audit --help
-```
-
-## Use
-
-Run the command inside a Pixi workspace to discover its manifest and lock file:
+Audit the current workspace or a specific lock file:
 
 ```console
 pixi audit
-```
-
-You can also pass a lock file explicitly:
-
-```console
 pixi audit path/to/pixi.lock
 ```
 
-Filter by environment or platform when a lock file contains more than you want to check:
+Limit the audit to an environment or platform:
 
 ```console
-pixi audit \
-  --environment production \
-  --platform linux-64
+pixi audit --environment production --platform linux-64
 ```
-
-Unknown environment and platform names are errors. A typo should not produce an empty, clean-looking audit.
 
 ### Authenticate in CI with a Basilisk API token
 
-Auditing remains public and does not require login. To attribute audits to
-your account, for example from CI, generate a user API token under
-**Settings → API tokens** on the Basilisk explorer and expose it as
+Auditing remains public and does not require login. Generate a user API token
+under **Settings → API tokens** on the Basilisk explorer and expose it as
 `PIXI_AUDIT_TOKEN`:
 
 ```yaml
@@ -65,213 +48,125 @@ your account, for example from CI, generate a user API token under
 
 The token is sent as `Authorization: Bearer` to the configured Basilisk origin
 only, never to OSV, EPSS, KEV, or package channels, and only over HTTPS (or
-plain HTTP to `localhost`). A value that is not a Basilisk token (`bsk_`
-followed by 40 alphanumeric characters) is an error rather than a silent
-anonymous audit, so a misconfigured secret fails the job. Tokens act as their
-owner with the owner's current Basilisk permissions; revoking a token on the
-Settings page takes effect immediately, and the audit then fails with HTTP 401
-instead of falling back to a public audit.
+local HTTP). A value that is not a Basilisk token (`bsk_` followed by 40
+alphanumeric characters) is an error rather than a silent anonymous audit.
+If the server rejects the token with HTTP 401, the audit fails instead of
+retrying anonymously.
 
-Outside CI, the same token can be stored for the audit host with
+Outside CI, store the token with
 `pixi auth login api.basilisk.prefix.dev --token bsk_…`. Only a credential
-stored for the *exact* audit host with the token shape is used; wildcard
-`*.prefix.dev` channel credentials are never sent to the audit API. When both
-are present, `PIXI_AUDIT_TOKEN` wins, and a configured token skips `--login`.
+stored for the exact audit host with the token shape is used; wildcard
+`*.prefix.dev` channel credentials are never sent. `PIXI_AUDIT_TOKEN` takes
+precedence over a stored API token, and API tokens take precedence over the
+shared Pixi login.
 
-### Optional Basilisk sign-in
+### Ignore known vulnerability matches
 
-To explicitly obtain a Basilisk-specific prefix.dev token:
-
-```console
-pixi audit --login
-```
-
-The existing Rattler OAuth flow obtains the token, the CLI stores it under an
-isolated issuer/client/audience key, and middleware reuses or refreshes it on
-later audits. Package-channel credentials are never used or overwritten.
-Missing credentials and login or refresh failures allow anonymous auditing.
-
-Normal audits never initiate login. `--login` requires an interactive terminal
-and is skipped whenever `CI` is set. Custom Basilisk origins stay anonymous
-unless a Basilisk API token is configured for them.
-The dedicated Basilisk client disables redirects; credentials are never sent
-to OSV, EPSS, or KEV services. Reports contain no tokens.
-
-`--offline` stops the command before any login, refresh, audit, threat-feed
-request, or `--fix` update. It exits with code `2`: cached threat feeds alone
-cannot provide an up-to-date vulnerability audit.
-
-### Ignore known findings
-
-Ignore an advisory by its vulnerability ID or one of its aliases:
+Ignore an advisory by ID or alias for one run:
 
 ```console
-pixi audit --ignore CVE-2026-1234
+pixi audit --ignore CVE-2023-0464
 ```
 
-Ignored findings stay visible in the report. If you only want to ignore an advisory until a fix exists, use:
+Ignore a vulnerability match until a fix is known, or ignore all vulnerability matches without a known fix:
 
 ```console
-pixi audit --ignore-until-fixed CVE-2026-7777
+pixi audit --ignore-until-fixed CVE-2023-0464
+pixi audit --ignore-unfixed
 ```
 
-The finding returns as soon as either an ecosystem-specific or upstream fix is known.
+These vulnerability matches return when a fix becomes known in the package's ecosystem, another ecosystem, or an upstream release. Ignored vulnerability matches remain in the report.
 
-To apply that to every finding at once, so CI only fails on what can be acted on today, use `--ignore-unfixed` or set `ignore-unfixed = true` in the manifest. Unfixed findings stay listed in the ignored section and come back the moment a fix is published.
-
-An ignore rule that matches no finding produces a warning on stderr, so suppressions left behind after an upgrade stand out. The JSON report lists them under `unmatched_ignores`.
-
-Record rules in the manifest with `pixi audit ignore` instead of repeating them on the command line:
+Save rules in the workspace manifest:
 
 ```console
-pixi audit ignore CVE-2026-1234 --reason "only reachable through the TLS backend, which we do not ship"
-pixi audit ignore --until-fixed CVE-2026-7777
+pixi audit ignore CVE-2023-0464 --reason "Not affected in this deployment"
+pixi audit ignore CVE-2023-0464 --until-fixed
+pixi audit ignore CVE-2023-0464 --expired-at 2026-12-01
 ```
 
-This appends to `ignore` or `ignore-until-fixed` in `[tool.pixi-audit]`, keeps the file's formatting, and leaves rules that are already listed alone. `--until 2026-12-01` records the last day the rule applies; after that the finding is reported again and the audit warns about the expired rule. `--package` scopes a rule to one package, or ignores every finding in it when no id is given:
+Limit a rule to a package, ecosystem, or installed version:
 
 ```console
-pixi audit ignore --package vendored-thing --reason "never runs, only shipped for its data files"
-pixi audit ignore CVE-2026-1234 --package requests
+pixi audit ignore CVE-2023-0464 --package openssl
+pixi audit ignore CVE-2023-0464 --package openssl --ecosystem conda-forge --version 3.1.0
 ```
 
-Use `--ecosystem conda-forge` or `--ecosystem PyPI` to avoid suppressing the same package in both sources. `--version` matches one installed version; `--max-affected-version` caps the affected range:
+Use `--up-to-version` instead of `--version` to match versions up to a limit. Ecosystems are `conda-forge` and `PyPI`.
+
+Omit the ID to ignore all vulnerability matches for a package:
 
 ```console
-pixi audit ignore CVE-2026-1234 --package torch --ecosystem conda-forge --version 1.13.1
+pixi audit ignore --package vendored-thing --reason "Only used for its data files"
 ```
 
-Scoped rules that no longer match a finding appear in `unmatched_ignores`.
-
-Package names are matched under their ecosystem's rules, so `Ruamel.YAML` finds `ruamel-yaml` on PyPI. In the manifest an entry is either a bare id or a table with an `id`, a `package`, or both, optionally scoped by `ecosystem`, `version`, or `max-affected-version`:
-
-```toml
-[tool.pixi-audit]
-ignore = [
-  "CVE-2023-0464",
-  { id = "CVE-2026-1234", reason = "only reachable through the TLS backend", until = "2026-12-01" },
-  { package = "vendored-thing", reason = "never runs, only shipped for its data files" },
-]
-```
-
-Keep `until` quoted in both `pixi.toml` and `pyproject.toml` so pixi can parse the manifest.
+Expired rules and rules that match no vulnerabilities produce warnings.
 
 ### Set a severity threshold
 
-Use `--severity` to fail only on findings at or above a given level:
+Fail only on vulnerability matches at or above a severity rating:
 
 ```console
-pixi audit --severity high
+pixi audit --fail-on high
 ```
 
-Accepted values are `low`, `medium`, `high`, and `critical`. Severity comes from the advisory's CVSS vectors, for conda-forge and PyPI packages alike. Findings without a parsable vector have unknown severity and still fail the audit.
+Ratings are `low`, `medium`, `high`, and `critical`. Vulnerability matches with unknown severity still fail the audit.
 
-To report conda-forge findings without letting them fail the audit, use:
+Report an ecosystem's vulnerability matches without letting them fail the audit:
 
 ```console
-pixi audit --warn-only conda-forge
+pixi audit --warn-only-ecosystem conda-forge
 ```
 
-Without `--warn-only`, findings from both ecosystems can fail the audit. Repeat the option to make more ecosystems warning-only; all findings remain in the report.
+### Rank vulnerability matches by risk
 
-### Rank findings by risk
+The default table sorts by risk, combining severity, [EPSS](https://www.first.org/epss/) exploitation probability, and [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) data. Risk affects ordering, not exit codes.
 
-Each finding carries the same threat data [grype](https://github.com/anchore/grype) reports:
+Sort by another column or explain the scores:
 
-- **EPSS**: the percentile rank among scored CVEs followed by the probability that the CVE is exploited within 30 days.
-- **KEV**: whether the CVE is listed in CISA's Known Exploited Vulnerabilities catalog, and whether it is known to be used in ransomware campaigns.
-- **Risk**: a 0-100 finding prioritization score computed as `min(threat × severity × boost, 1) × 100`. Threat is 1.0 for a KEV-listed finding and otherwise uses the highest EPSS probability among its CVEs. Severity uses an internal band weight, averaged with the mean CVSS base score when available. The boost is 1.05 for KEV entries and 1.1 for known ransomware use.
+```console
+pixi audit --sort-by severity
+pixi audit --explain
+```
 
-Risk orders individual findings from highest to lowest priority. The table shows EPSS with percentile first and risk columns by default. A finding in the KEV catalog reads `81.4 (kev)` in the risk column, or `(kev, ransomware)`. Sort by another column with `--sort-by`. The `risk`, `severity`, `epss`, and `kev` fields sort highest first and break ties the way grype does. Threat data never changes the exit code. Use `--severity` for that.
-
-If a feed cannot be reached, the audit still completes. Findings are reported without that data and a warning goes to stderr.
-
-The assessment's **CISA KEV matches** count is the number of distinct CVEs among active findings with confirmed exploitation in the wild. Repeated occurrences of the same CVE count once. A zero is shown only after the catalog loaded successfully. Otherwise the count is `n/a`.
+If threat data is unavailable, the audit continues with a warning.
 
 ### Update vulnerable dependencies
 
-`--fix` raises matching direct dependency constraints to the lowest known compatible fixed version, runs `pixi update`, and audits the updated lock file again:
+Update dependencies and audit again:
 
 ```console
 pixi audit --fix
 ```
 
-Existing upper bounds are preserved. Transitive dependencies and Git, path, or URL dependencies without a version are left alone. `pixi update` only runs when at least one finding has a fixed release in its own ecosystem. Fixes that exist only upstream are reported but cannot be installed.
-
-When vulnerabilities are found, human-readable reports include an assessment of the highest finding prioritization score, CISA KEV matches, critical or high findings, and fix availability. Every human-readable report ends with a next-steps section tailored to its results. It prioritizes KEV matches, identifies candidate updates, distinguishes upstream-only fixes from findings with no known fix, and calls out unchecked packages. After `--fix`, it reports remaining work without recommending another blind attempt.
+This raises direct dependency constraints to known compatible fixed versions and runs `pixi update`, preserving existing upper bounds. It does not rewrite transitive dependency constraints. Fixes available only elsewhere are reported but cannot be installed.
 
 ### Choose an output format
 
-The default report puts packages from unsupported sources first, then shows a short status block followed by one row per finding:
+Use the default table, group vulnerability matches by package, or export JSON or SARIF:
 
 ```console
- Unchecked (1) — no vulnerability database for these sources
-
-    Name      Version  Source    Environments
- C  samtools  1.19     bioconda  default
-
- ✔ Audited pixi.lock                 [312 packages audited, 1 unchecked]
- ✔ Scanned for vulnerabilities       [3 vulnerability matches]
-   ├── by severity: 1 critical, 0 high, 1 medium, 0 low, 1 unknown
-   └── by status:   2 fixed, 1 not-fixed, 0 ignored
-
-    Name      Version  Fixed in  Vulnerability        Severity  EPSS         Risk  Environments
- C  openssl   3.1.0    3.1.1     CVE-2023-0464        Critical  88th · 3.7%  3.5   default, prod
- C  openssl   3.1.0              CVE-2023-2975        Medium    47th · 0.6%  0.3   default, prod
- P  requests  2.32.0   2.32.4    GHSA-9hjg-9r4m-mvj7  Medium    57th · 0.9%  0.5   default
-
- ✖ 3 vulnerabilities in 2 package(s) (312 audited, 0 ignored, 1 unchecked)
-
- Assessment
-   • Highest finding prioritization score:  3.5 / 100
-   • CISA KEV matches:                      0 CVEs
-   • Critical/high findings:                1
-   • Fix available in audited ecosystem:    2 of 3 vulnerabilities across 2 audited packages
-   • Fix only upstream:                     0 vulnerabilities
-   • No known fix:                          1 vulnerability
-
- Next steps
-   • Re-run this audit with `--fix` to ask pixi to update 2 package names. Fixed releases in the audited ecosystem are available for 2 vulnerabilities.
-   • 1 vulnerability has no known fix. Remove, replace, or mitigate the affected dependencies. Use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.
-   • Review 1 unchecked package. Its source is not covered by the configured vulnerability databases.
-
- Add `--explain` for scoring and report definitions.
-```
-
-As in `pixi lock`, a green `C` marks a conda package and a blue `P` a PyPI package. Without colors the marker reads `(conda)` or `(pypi)`. The marker has its own column, so names stay aligned, and rows that repeat the package above are dimmed. Rows are sorted by risk. `--sort-by` picks another column, and `--fields` picks which columns to show and in what order, as in `pixi list`:
-
-```console
-pixi audit --sort-by name --fields name,version,vulnerability,fixed-in,url
-```
-
-Available fields are `name`, `version`, `fixed-in`, `kind`, `source`, `vulnerability`, `severity`, `epss`, `risk`, `kev`, `environments`, `aliases`, `summary`, `url`, `ignored`, and `match`. Kind and source are off by default: the `C`/`P` marker already tells conda-forge and PyPI apart, and those are the only sources that are audited today. Unchecked packages keep a Source column, since the channel is what explains why they were skipped. An empty *Fixed in* cell means no fixed release is known. When a fix exists but not as a release in the audited ecosystem, the cell says where: `PyPI: 1.2.3` names the ecosystem that has it, `upstream: 1.2.3` means the project released it but conda-forge has no build yet, and `upstream: 1.2.3 (unconfirmed)` means basilisk could not tell whether conda-forge has a build. In JSON these appear under `upstream_fixes`, each with its `origin`.
-
-A fix in another ecosystem is only reported when it belongs to the package Basilisk matched: the entry whose package URL Basilisk recorded as the matched identity. An advisory matched through a CPE name never contributes fixes from other ecosystems, so conda-forge `libpq` does not inherit a fix from the npm package of the same name. Documents without a matched identity fall back to matching by name, but only when Basilisk evaluated the affected versions.
-
-When Basilisk combines matches, applicability and identity come from the same match. The strongest applicability wins; ties prefer a package URL, then a CPE, then no identity. An equally applicable match without an identity cannot discard a known CPE and enable unrelated same-name fixes.
-
-Basilisk's *applicability* describes how the advisory matched the installed version. `affects version` means the version matches the advisory's affected version data, `version not checked` means Basilisk could not evaluate it, and `no version limits` means the advisory gave no usable version bounds. The default table flags the latter two by the advisory ID. The `match` column, grouped output, GitHub annotations, and SARIF use these labels. JSON keeps the source values in `applicability`: `evaluated`, `unevaluated`, and `version-unbounded`.
-
-On a terminal the table is colored and advisory IDs link to their advisory pages. When stdout is piped or `NO_COLOR` is set, the same table is written as plain text at full width, so nothing is clipped in logs. Set `CLICOLOR_FORCE=1` to keep colors in CI logs that render them.
-
-Add `--explain` to the table or grouped format for a context-aware explanation of the terms present in that report:
-
-```console
-pixi audit --explain
-pixi audit --format grouped --explain
-```
-
-Compact human-readable reports include a short `--explain` hint. With the option enabled, a context-aware **How this report works** section follows **Next steps**. It presents short, aligned definitions under Counts, Threat signals, Prioritization, Fixes, and Coverage. Terms use a separate color from their definitions, and Formula is nested under Risk. `--explain` is rejected with JSON and SARIF so machine-readable output stays unchanged.
-
-`--format grouped` prints findings grouped per package instead, and `--format json` (or `--json`) writes the report as pretty-printed JSON:
-
-```console
+pixi audit
+pixi audit --format by-package
 pixi audit --json > audit-report.json
+pixi audit --format sarif > pixi-audit.sarif
 ```
 
-Progress and diagnostics go to stderr. The report goes to stdout, so redirecting or piping JSON is safe.
+Choose table columns and their order:
 
-`--format sarif` writes a [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) log with one rule per vulnerability and package and one result per finding, located at the package's line in `pixi.lock` with the path relative to the repository root. Ignored findings are included as suppressed results. GitHub code scanning derives its severity label from the CVSS score in each rule:
+```console
+pixi audit --sort-by name --columns name,version,vulnerability,fixed-in,url
+```
+
+An empty *Fixed in* cell means no fix is known; fixes available only in another ecosystem or an upstream release are labeled. Add `--explain` to table or by-package output for definitions.
+
+Reports go to stdout; progress and diagnostics go to stderr. Piped output is plain text; use `CLICOLOR_FORCE=1` to keep colors in CI logs.
+
+Run `pixi audit --help` for all options and columns.
+
+### Use in GitHub Actions
+
+Vulnerability matches are emitted as workflow annotations. To upload a SARIF report to GitHub code scanning, add these steps after installing the extension:
 
 ```yaml
 - run: pixi audit --format sarif > pixi-audit.sarif
@@ -281,91 +176,83 @@ Progress and diagnostics go to stderr. The report goes to stdout, so redirecting
     sarif_file: pixi-audit.sarif
 ```
 
-### Continuous integration
-
-Inside GitHub Actions, every active finding is also emitted as a [workflow command](https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions) on stderr. Findings that meet the severity threshold and are not marked `--warn-only` are errors. Other findings are warnings and stay in the report.
+The upload requires `security-events: write` permission. Ignored vulnerability matches are included as SARIF suppressions.
 
 ## Configuration
 
-Keep recurring audit settings in the workspace manifest:
+Store recurring settings in `pixi.toml` or `pyproject.toml`:
 
 ```toml
 [tool.pixi-audit]
-ignore = ["CVE-2023-0464"]
+fail-on = "high"
+ignore-unfixed = true
 ignore-until-fixed = ["CVE-2026-7777"]
-severity = "high"
+ignore = [
+  "CVE-2023-0464",
+  { id = "CVE-2026-1234", reason = "Not affected in this deployment", expired-at = "2026-12-01" },
+  { package = "vendored-thing", reason = "Only used for its data files" },
+]
 ```
 
-Command-line ignore lists are combined with the manifest values. A command-line severity overrides the configured value.
+Rules can also specify `ecosystem`, `version`, or `up-to-version`. Keep dates quoted. Command-line `--fail-on` overrides the manifest; ignore lists are combined.
 
 ## Exit codes
 
 | Code | Meaning |
 | ---: | --- |
-| `0` | The audit completed without actionable vulnerabilities |
-| `1` | The audit found actionable vulnerabilities |
+| `0` | No vulnerability matches fail the audit |
+| `1` | At least one vulnerability match fails the audit |
 | `2` | The audit could not run |
 
 ## Coverage
 
-Packages are deduplicated across the selected environments and platforms. Withdrawn advisories are skipped.
+Packages are deduplicated across selected environments and platforms. Withdrawn advisories are skipped. Packages from channels other than conda-forge and source dependencies are reported as not audited, not safe.
 
-Conda-forge packages are checked against Basilisk. PyPI packages are checked directly against OSV. Packages from bioconda, custom channels, and source dependencies are reported as unchecked instead of being treated as safe.
+Override service endpoints with these environment variables:
 
-The default endpoints are:
+| Variable | Default |
+| --- | --- |
+| `PIXI_AUDIT_BASILISK_URL` | `https://api.basilisk.prefix.dev` |
+| `PIXI_AUDIT_OSV_URL` | `https://api.osv.dev` |
+| `PIXI_AUDIT_EPSS_BASE_URL` | `https://api.first.org` |
+| `PIXI_AUDIT_KEV_URL` | `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` |
 
-- `https://api.basilisk.prefix.dev` for conda-forge packages
-- `https://api.osv.dev` for PyPI packages
-- `https://api.first.org` for EPSS scores
-- `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` for the KEV catalog
+`PIXI_AUDIT_TOKEN`, or an API token stored for the custom host, can authenticate
+against a custom `PIXI_AUDIT_BASILISK_URL`. The shared production Pixi login is
+never forwarded to custom origins.
 
-Override them with `PIXI_AUDIT_BASE_URL`, `PIXI_AUDIT_PYPI_BASE_URL`, `PIXI_AUDIT_EPSS_BASE_URL`, and `PIXI_AUDIT_KEV_URL` respectively. Each HTTP request has a 30-second timeout.
-
-Authentication uses Rattler's standard credential storage. `RATTLER_AUTH_FILE`
-selects an explicit credential file; without it, the standard storage backends
-apply. `CI` disables interactive audit login whenever it is present.
-`PIXI_AUDIT_BASE_URL` must be HTTP(S), without credentials, query parameters,
-or a fragment. Changing it to another origin never forwards the production
-Basilisk audience token or starts a login for that origin; a `PIXI_AUDIT_TOKEN`,
-or a token stored for the custom host, is sent to that origin, so a staging or
-self-hosted Basilisk can authenticate CI the same way.
-
-EPSS and KEV responses are cached under `pixi-audit/http-cache` in the pixi cache directory (`PIXI_CACHE_DIR`, else `RATTLER_CACHE_DIR`, else `rattler/cache` in the platform's cache directory), so the KEV catalog is revalidated instead of downloaded again on every run.
+Requests time out after 30 seconds. EPSS and KEV responses are cached in the Pixi cache directory.
 
 ## Rust crates
 
-The workspace contains three crates:
+- `pixi_audit_cli`: CLI and report rendering.
+- `pixi_audit`: vulnerability database selection, lock file auditing, report assembly, ignore rules, risk scoring, and `AuditReport` types.
+- `osv_protocol`: serializable OSV wire types, without an HTTP client.
+- `osv_client`: OSV HTTP client with ordered batching, pagination, and document fetching.
+- `threat_feeds`: EPSS and KEV clients, catalogs, and records, independent of audit reports.
+- `pixi_audit_test_support`: shared mock services for workspace tests. Dev-only, unpublished, and never depends on `pixi_audit`.
 
-- `pixi_audit_cli` provides the `pixi-audit` executable and report rendering.
-- `pixi_audit` reads lock files, queries the audit services, and builds an `AuditReport`.
-- `osv_protocol` contains serializable types for OSV-compatible clients and servers.
+The HTTP clients take a caller-configured `reqwest_middleware::ClientWithMiddleware` and do not choose TLS, timeouts, caching, or authentication. `BasiliskClient` and `OsvDevClient` remain distinct types in `pixi_audit`. `threat_feeds` shares the send/status/JSON path through `osv_client::http`.
 
-The `pixi_audit` crate enables `rattler_lock` support by default. To try it with the included example lock file:
+Use `pixi_audit::audit` to run an audit and `pixi_audit::types` for OSV wire types. The reusable `[tool.pixi-audit]` schema, including ignore entries and expiry handling, lives in `pixi_audit::config`; the CLI owns manifest I/O and warnings. `IgnoreSpec` takes one list of parsed `IgnoreRule`s plus `ignore_unfixed`. `AuditReport::fixable_package_names()` returns distinct borrowed names with an installable fix, excluding ignored vulnerability matches and those with fixes only elsewhere.
+
+The library enables `rattler_lock` support by default. Try the example:
 
 ```console
-cargo run -p pixi_audit --example audit_lockfile -- \
-  crates/pixi_audit/examples/pixi.lock
+cargo run -p pixi_audit --example audit_lock_file -- crates/pixi_audit/examples/pixi.lock
 ```
 
 ## Development
-
-Pixi installs the pinned Rust toolchain and the compilers needed by `pixi-build-rust`:
 
 ```console
 pixi install
 pixi run check
 ```
 
-`pixi run check` runs formatting, Clippy, the workspace tests, and the no-default-features checks from CI. Tests use local mock HTTP servers and do not need credentials.
+`check` runs formatting, Clippy, workspace tests, and no-default-features checks. Tests use shared local mock servers and need no credentials; ignore and alias-merging tests run pure report assembly without a server.
 
-Install the current checkout with Cargo through the Pixi environment using:
-
-```console
-pixi run install
-```
-
-Release automation and trusted-publisher setup are documented in [RELEASING.md](RELEASING.md).
+Install the current checkout with `pixi run install`. See [RELEASING.md](RELEASING.md) for release instructions.
 
 ## License
 
-BSD-3-Clause. See [LICENSE](LICENSE).
+[BSD-3-Clause](LICENSE).

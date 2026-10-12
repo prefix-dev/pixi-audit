@@ -6,14 +6,12 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
+use threat_feeds::{EpssScore, KevEntry};
+
 use crate::{
-    threat::{EpssScore, KnownExploited, RiskScore, ThreatDataStatus},
+    threat::{RiskScore, ThreatDataStatus},
     types::OsvSeverity,
 };
-
-// Keep the established `pixi_audit::report::audit` path while the engine
-// lives in its own module.
-pub use crate::audit::audit;
 
 /// Where a locked package comes from, for vulnerability-query purposes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -229,7 +227,7 @@ pub struct AuditPackage {
     /// `None` when the version could not be determined (e.g. an unresolved
     /// conda source package). Such packages are never queried — a
     /// version-less OSV query matches every version ever affected — and are
-    /// always reported as unchecked.
+    /// always reported as not audited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub ecosystem: PackageEcosystem,
@@ -247,9 +245,16 @@ pub struct PackageId {
     pub ecosystem: PackageEcosystem,
 }
 
+impl PackageId {
+    /// The locked version, parsed with the package's ecosystem rules.
+    pub fn parsed_version(&self) -> Result<PackageVersion, ParsePackageVersionError> {
+        PackageVersion::parse(&self.ecosystem, &self.version)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum SeverityBand {
+pub enum SeverityRating {
     Unknown,
     Low,
     Medium,
@@ -257,52 +262,52 @@ pub enum SeverityBand {
     Critical,
 }
 
-impl SeverityBand {
-    /// Every band, least severe first.
-    pub const ALL: [SeverityBand; 5] = [
-        SeverityBand::Unknown,
-        SeverityBand::Low,
-        SeverityBand::Medium,
-        SeverityBand::High,
-        SeverityBand::Critical,
+impl SeverityRating {
+    /// Every rating, least severe first.
+    pub const ALL: [SeverityRating; 5] = [
+        SeverityRating::Unknown,
+        SeverityRating::Low,
+        SeverityRating::Medium,
+        SeverityRating::High,
+        SeverityRating::Critical,
     ];
 
-    /// The band's lowercase name, as used in JSON output and on the command
+    /// The rating's lowercase name, as used in JSON output and on the command
     /// line.
     pub fn name(self) -> &'static str {
         match self {
-            SeverityBand::Critical => "critical",
-            SeverityBand::High => "high",
-            SeverityBand::Medium => "medium",
-            SeverityBand::Low => "low",
-            SeverityBand::Unknown => "unknown",
+            SeverityRating::Critical => "critical",
+            SeverityRating::High => "high",
+            SeverityRating::Medium => "medium",
+            SeverityRating::Low => "low",
+            SeverityRating::Unknown => "unknown",
         }
     }
 
-    /// The highest CVSS band across the document's severity entries.
+    /// The highest CVSS rating across the document's severity entries.
     /// Understands the type labels basilisk emits: `CVSS_V3`/`CVSS_V3.0`/
     /// `CVSS_V3.1` (OSV and NVD sources), `CVSS_V4`, and `CVSS_V2.0`.
-    /// Bands follow basilisk: critical >= 9.0, high >= 7.0, medium >= 4.0.
+    /// Ratings follow basilisk: critical >= 9.0, high >= 7.0, medium >= 4.0.
     pub fn from_severities(severities: &[OsvSeverity]) -> Self {
         severities
             .iter()
             .filter_map(parse_base_score)
             .map(|(version, score)| match version {
                 CvssVersion::V3 | CvssVersion::V4 => Self::from_score(score),
-                // CVSS v2's qualitative scale has no critical band
+                // CVSS v2's qualitative scale has no critical rating
                 // (high is 7.0-10.0), so cap the mapping there.
-                CvssVersion::V2 => Self::from_score(score).min(SeverityBand::High),
+                CvssVersion::V2 => Self::from_score(score).min(SeverityRating::High),
             })
             .max()
-            .unwrap_or(SeverityBand::Unknown)
+            .unwrap_or(SeverityRating::Unknown)
     }
 
     fn from_score(score: f64) -> Self {
         match score {
-            s if s >= 9.0 => SeverityBand::Critical,
-            s if s >= 7.0 => SeverityBand::High,
-            s if s >= 4.0 => SeverityBand::Medium,
-            _ => SeverityBand::Low,
+            s if s >= 9.0 => SeverityRating::Critical,
+            s if s >= 7.0 => SeverityRating::High,
+            s if s >= 4.0 => SeverityRating::Medium,
+            _ => SeverityRating::Low,
         }
     }
 }
@@ -348,63 +353,62 @@ pub fn mean_cvss_base_score(severities: &[OsvSeverity]) -> Option<f64> {
     }
 }
 
-impl std::fmt::Display for SeverityBand {
+impl std::fmt::Display for SeverityRating {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("'{0}' is not a severity band")]
-pub struct ParseSeverityBandError(String);
+#[error("'{0}' is not a severity rating")]
+pub struct ParseSeverityRatingError(String);
 
-/// Parses the exact lowercase band names produced by [`SeverityBand::name`].
-impl FromStr for SeverityBand {
-    type Err = ParseSeverityBandError;
+/// Parses the exact lowercase rating names produced by [`SeverityRating::name`].
+impl FromStr for SeverityRating {
+    type Err = ParseSeverityRatingError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .into_iter()
-            .find(|band| band.name() == s)
-            .ok_or_else(|| ParseSeverityBandError(s.to_string()))
+            .find(|rating| rating.name() == s)
+            .ok_or_else(|| ParseSeverityRatingError(s.to_string()))
     }
 }
 
-/// Which suppression list put a finding into the ignored bucket.
+/// Which ignore rule put a vulnerability match into the ignored section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum IgnoreReason {
-    /// Listed in the unconditional ignore list.
-    Always,
-    /// Listed in the ignore-until-fixed list and no fix is known yet. The
-    /// finding resurfaces once any fixed version (own ecosystem or
-    /// upstream) is published.
+pub enum IgnoreMode {
+    /// Matched an unconditional ignore rule.
+    Permanent,
+    /// Matched an until-fixed rule (or `ignore_unfixed`) with no fix known
+    /// yet. The vulnerability match resurfaces once any fixed version (own ecosystem
+    /// or elsewhere) is published.
     UntilFixed,
 }
 
-/// Suppression lists applied during an audit. Ids/aliases match
-/// case-insensitively; `ignore` wins when an id appears in both lists.
+/// Ignore rules applied during an audit. Ids/aliases match
+/// case-insensitively; unconditional rules win over until-fixed rules.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IgnoreSpec<'a> {
-    /// Always suppress these vulnerability ids/aliases.
-    pub ignore: &'a [String],
-    /// Suppress these only while no fixed release is known.
-    pub ignore_until_fixed: &'a [String],
-    /// Rules scoped by package, ecosystem or installed version.
-    pub package_rules: &'a [PackageIgnore],
-    /// Suppress every finding for which no fixed release is known, as if
-    /// each were listed in `ignore_until_fixed`.
+    /// Rules optionally scoped by package, ecosystem or installed version.
+    pub rules: &'a [IgnoreRule],
+    /// Ignore every vulnerability match for which no fixed release is known.
     pub ignore_unfixed: bool,
 }
 
-/// Package, ecosystem and installed-version predicates shared by ignore rules.
+/// Package, ecosystem and installed-version predicates shared by ignore
+/// rules, as written in the configuration.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IgnoreScope {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ecosystem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(rename = "max-affected-version")]
-    pub max_affected_version: Option<String>,
+    #[serde(rename = "up-to-version", skip_serializing_if = "Option::is_none")]
+    pub up_to_version: Option<String>,
 }
 
 impl IgnoreScope {
@@ -412,107 +416,244 @@ impl IgnoreScope {
         self.package.is_none()
             && self.ecosystem.is_none()
             && self.version.is_none()
-            && self.max_affected_version.is_none()
+            && self.up_to_version.is_none()
     }
 
-    pub fn validate(&self) -> Result<(), String> {
-        let ecosystem = self.ecosystem.as_deref();
-        if let Some(ecosystem) = ecosystem
-            && !ecosystem.eq_ignore_ascii_case("conda-forge")
-            && !ecosystem.eq_ignore_ascii_case("pypi")
-        {
-            return Err(format!(
-                "unsupported ecosystem '{}' (expected conda-forge or PyPI)",
-                ecosystem.to_ascii_lowercase()
-            ));
-        }
-        for version in [
-            self.version.as_deref(),
-            self.max_affected_version.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let valid = match ecosystem {
-                Some(value) if value.eq_ignore_ascii_case("conda-forge") => {
-                    PackageVersion::parse(&PackageEcosystem::CondaForge, version).is_ok()
-                }
-                Some(_) => PackageVersion::parse(&PackageEcosystem::Pypi, version).is_ok(),
-                None => {
-                    PackageVersion::parse(&PackageEcosystem::CondaForge, version).is_ok()
-                        || PackageVersion::parse(&PackageEcosystem::Pypi, version).is_ok()
-                }
-            };
-            if !valid {
-                return Err(format!(
-                    "invalid version '{version}' for the selected ecosystem"
-                ));
-            }
-        }
-        Ok(())
+    /// Checks that the ecosystem is supported and every version bound
+    /// parses for it.
+    pub fn validate(&self) -> Result<(), InvalidIgnoreScope> {
+        ScopeMatcher::parse(self).map(drop)
     }
+}
 
-    /// Whether `package` falls under this scope.
-    pub fn matches(&self, package: &PackageId) -> bool {
-        if !self
-            .package
-            .as_ref()
-            .is_none_or(|name| package.name.matches(name))
-            || !self.ecosystem.as_ref().is_none_or(|ecosystem| {
-                package
-                    .ecosystem
-                    .osv_ecosystem()
-                    .eq_ignore_ascii_case(ecosystem)
+/// Why an [`IgnoreScope`] cannot be applied.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum InvalidIgnoreScope {
+    #[error("unsupported ecosystem '{0}' (expected conda-forge or PyPI)")]
+    UnsupportedEcosystem(String),
+    #[error("invalid version '{0}' for the selected ecosystem")]
+    InvalidVersion(String),
+}
+
+/// An [`IgnoreScope`] parsed for matching: the ecosystem resolved and every
+/// version bound parsed once.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ScopeMatcher {
+    package: Option<String>,
+    ecosystem: Option<PackageEcosystem>,
+    version: Option<VersionBound>,
+    up_to_version: Option<VersionBound>,
+}
+
+impl ScopeMatcher {
+    fn parse(scope: &IgnoreScope) -> Result<Self, InvalidIgnoreScope> {
+        let ecosystem = scope
+            .ecosystem
+            .as_deref()
+            .map(|ecosystem| {
+                if ecosystem.eq_ignore_ascii_case("conda-forge") {
+                    Ok(PackageEcosystem::CondaForge)
+                } else if ecosystem.eq_ignore_ascii_case("pypi") {
+                    Ok(PackageEcosystem::Pypi)
+                } else {
+                    Err(InvalidIgnoreScope::UnsupportedEcosystem(
+                        ecosystem.to_ascii_lowercase(),
+                    ))
+                }
             })
-        {
+            .transpose()?;
+        let bound = |version: &Option<String>| {
+            version
+                .as_deref()
+                .map(|version| VersionBound::parse(ecosystem.as_ref(), version))
+                .transpose()
+        };
+        Ok(Self {
+            package: scope.package.clone(),
+            version: bound(&scope.version)?,
+            up_to_version: bound(&scope.up_to_version)?,
+            ecosystem,
+        })
+    }
+
+    /// Whether `package`, whose locked version parsed as `locked`, falls
+    /// under this scope. A version-bounded scope never matches a package
+    /// whose version does not parse (`locked` is `None`).
+    fn matches(&self, package: &PackageId, locked: Option<&PackageVersion>) -> bool {
+        let other_package = self
+            .package
+            .as_deref()
+            .is_some_and(|name| !package.name.matches(name));
+        let other_ecosystem = self
+            .ecosystem
+            .as_ref()
+            .is_some_and(|ecosystem| *ecosystem != package.ecosystem);
+        if other_package || other_ecosystem {
             return false;
         }
-        if self.version.is_none() && self.max_affected_version.is_none() {
+        if self.version.is_none() && self.up_to_version.is_none() {
             return true;
         }
-        let Ok(locked) = PackageVersion::parse(&package.ecosystem, &package.version) else {
+        let Some(locked) = locked else {
             return false;
         };
-        self.version.as_deref().is_none_or(|version| {
-            PackageVersion::parse(&package.ecosystem, version).is_ok_and(|bound| locked == bound)
-        }) && self.max_affected_version.as_deref().is_none_or(|version| {
-            PackageVersion::parse(&package.ecosystem, version).is_ok_and(|bound| {
+        self.version
+            .as_ref()
+            .is_none_or(|bound| bound.compare(locked) == Some(Ordering::Equal))
+            && self.up_to_version.as_ref().is_none_or(|bound| {
                 matches!(
-                    locked.partial_cmp(&bound),
+                    bound.compare(locked),
                     Some(Ordering::Less | Ordering::Equal)
                 )
             })
+    }
+}
+
+/// A version bound of an ignore rule, parsed with each version scheme the
+/// rule applies to. A rule without an ecosystem keeps both parses, so every
+/// package is compared under its own ecosystem's rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VersionBound {
+    conda: Option<rattler_conda_types::Version>,
+    pypi: Option<uv_pep440::Version>,
+}
+
+impl VersionBound {
+    fn parse(ecosystem: Option<&PackageEcosystem>, text: &str) -> Result<Self, InvalidIgnoreScope> {
+        let bound = match ecosystem {
+            Some(PackageEcosystem::CondaForge) => Self {
+                conda: text.parse().ok(),
+                pypi: None,
+            },
+            Some(PackageEcosystem::Pypi) => Self {
+                conda: None,
+                pypi: text.parse().ok(),
+            },
+            // Unqualified; a scope never names another ecosystem.
+            Some(PackageEcosystem::Other(_)) | None => Self {
+                conda: text.parse().ok(),
+                pypi: text.parse().ok(),
+            },
+        };
+        if bound.conda.is_none() && bound.pypi.is_none() {
+            return Err(InvalidIgnoreScope::InvalidVersion(text.to_string()));
+        }
+        Ok(bound)
+    }
+
+    /// How `locked` compares with the bound, or `None` when the bound has
+    /// no parse in `locked`'s ecosystem.
+    fn compare(&self, locked: &PackageVersion) -> Option<Ordering> {
+        match locked {
+            PackageVersion::Conda(version) => self.conda.as_ref().map(|bound| version.cmp(bound)),
+            PackageVersion::Pypi(version) => self.pypi.as_ref().map(|bound| version.cmp(bound)),
+        }
+    }
+}
+
+/// An ignore rule optionally scoped to package, ecosystem and locked
+/// version. Its scope is parsed on construction, so matching never
+/// re-parses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoreRule {
+    id: Option<String>,
+    scope: IgnoreScope,
+    until_fixed: bool,
+    matcher: ScopeMatcher,
+}
+
+impl IgnoreRule {
+    pub fn new(
+        id: Option<String>,
+        scope: IgnoreScope,
+        until_fixed: bool,
+    ) -> Result<Self, InvalidIgnoreScope> {
+        let matcher = ScopeMatcher::parse(&scope)?;
+        Ok(Self {
+            id,
+            scope,
+            until_fixed,
+            matcher,
         })
     }
-}
 
-/// A suppression optionally scoped to package, ecosystem and locked version.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct PackageIgnore {
-    pub id: Option<String>,
-    pub scope: IgnoreScope,
-    /// Suppress only while no fixed release is known.
-    pub until_fixed: bool,
-}
+    /// An unscoped vulnerability id or alias, preserved as written.
+    pub fn from_id(id: String, until_fixed: bool) -> Self {
+        Self {
+            id: Some(id),
+            scope: IgnoreScope::default(),
+            until_fixed,
+            matcher: ScopeMatcher::default(),
+        }
+    }
 
-impl PackageIgnore {
-    pub fn applies_to(&self, finding: &Finding) -> bool {
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// The scope as written.
+    pub fn scope(&self) -> &IgnoreScope {
+        &self.scope
+    }
+
+    /// Whether the rule ignores only while no fixed release is known.
+    pub fn until_fixed(&self) -> bool {
+        self.until_fixed
+    }
+
+    pub(crate) fn needs_locked_version(&self) -> bool {
+        self.matcher.version.is_some() || self.matcher.up_to_version.is_some()
+    }
+
+    /// Whether the rule ignores `vuln_match`, whose locked version parsed
+    /// as `locked`.
+    pub(crate) fn applies_to(&self, vuln_match: &Match, locked: Option<&PackageVersion>) -> bool {
         (self.id.is_some() || self.scope.package.is_some())
             && self.id.as_ref().is_none_or(|id| {
-                std::iter::once(&finding.id)
-                    .chain(&finding.aliases)
+                std::iter::once(&vuln_match.id)
+                    .chain(&vuln_match.aliases)
                     .any(|candidate| candidate.eq_ignore_ascii_case(id))
             })
-            && self.scope.matches(&finding.package)
+            && self.matcher.matches(&vuln_match.package, locked)
     }
 }
 
-/// What basilisk knows about a conda-forge build of a fixed release.
+/// The rule as written, e.g. `CVE-1 in package 'openssl' in version '3.1.0'`.
+impl std::fmt::Display for IgnoreRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scope = &self.scope;
+        let parts = [
+            (None, self.id.as_deref()),
+            (Some("package"), scope.package.as_deref()),
+            (Some("ecosystem"), scope.ecosystem.as_deref()),
+            (Some("version"), scope.version.as_deref()),
+            (Some("up to version"), scope.up_to_version.as_deref()),
+        ];
+        let mut separator = "";
+        for (label, value) in parts {
+            let Some(value) = value else {
+                continue;
+            };
+            f.write_str(separator)?;
+            match label {
+                Some(label) => write!(f, "{label} '{value}'")?,
+                None => f.write_str(value)?,
+            }
+            separator = " in ";
+        }
+        Ok(())
+    }
+}
+
+/// Whether conda-forge has a build of a fixed release, as basilisk reports
+/// it. Deserialized from basilisk's `conda_publication` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "kebab-case", deserialize = "snake_case"))]
-pub enum CondaPublication {
-    Published,
-    NotPublished,
+pub enum CondaForgeBuild {
+    #[serde(rename(deserialize = "published"))]
+    Available,
+    #[serde(rename(deserialize = "not_published"))]
+    Missing,
     Unknown,
 }
 
@@ -520,8 +661,8 @@ pub enum CondaPublication {
 /// Orders matches by specificity so the maximum is the strongest one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all(serialize = "kebab-case", deserialize = "snake_case"))]
-pub enum MatchApplicability {
-    /// Basilisk recorded no applicability: PyPI findings, and documents
+pub enum MatchConfidence {
+    /// Basilisk recorded no applicability: PyPI vulnerability matches, and documents
     /// whose conda-forge entry carries no basilisk metadata.
     #[serde(skip_deserializing)]
     Unspecified,
@@ -554,68 +695,66 @@ pub struct MatchedIdentity {
     pub value: String,
 }
 
-/// Where a fix exists when it is not a release in the audited ecosystem.
+/// A fixed release of the same package in another ecosystem, such as the
+/// PyPI release of a package audited from conda-forge. Informative only: it
+/// may not be installable for the audited package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "origin", rename_all = "kebab-case")]
-pub enum UpstreamOrigin {
-    /// The same package has a fixed release in another ecosystem, such as
-    /// the PyPI release of a package audited from conda-forge.
-    Ecosystem { ecosystem: String },
-    /// The project itself released the fix. This comes from advisories
-    /// matched by CPE, where no ecosystem is involved; `conda_publication`
-    /// says whether basilisk could find a conda-forge build of it, and is
-    /// never `Published` here since that counts as a fixed version.
-    Project { conda_publication: CondaPublication },
+pub struct OtherEcosystemFix {
+    pub version: String,
+    pub ecosystem: String,
 }
 
-/// A fix that exists somewhere other than the audited ecosystem.
-/// Informative only: it may not be installable for the audited package.
+/// A fix the project itself released, known from advisories matched by
+/// CPE, where no ecosystem is involved. `conda_forge_build` is never
+/// `Available` here, since that counts as a fixed version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UpstreamFix {
+pub struct UpstreamRelease {
     pub version: String,
-    #[serde(flatten)]
-    pub origin: UpstreamOrigin,
+    pub conda_forge_build: CondaForgeBuild,
 }
 
 /// One (package, vulnerability) pair.
 #[derive(Debug, Clone, Serialize)]
-pub struct Finding {
+pub struct Match {
     /// Serialized as the top-level `package`, `version`, and `ecosystem`.
     #[serde(flatten)]
     pub package: PackageId,
     pub environments: Vec<String>,
     pub id: String,
     pub aliases: Vec<String>,
-    pub severity: SeverityBand,
+    pub severity: SeverityRating,
     /// Mean CVSS base score across the advisory's parsable severity entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cvss_base_score: Option<f64>,
     /// Fixed versions in the package's own ecosystem.
     pub fixed_versions: Vec<String>,
-    /// Fixes known outside the package's own ecosystem, each with where it
-    /// exists. Informative only; `--fix` cannot install these.
-    pub upstream_fixes: Vec<UpstreamFix>,
+    /// Fixed releases of the same package in other ecosystems.
+    /// Informative only; `--fix` cannot install these.
+    pub other_ecosystem_fixes: Vec<OtherEcosystemFix>,
+    /// Fixes the project released upstream without a conda-forge build.
+    /// Informative only; `--fix` cannot install these.
+    pub upstream_releases: Vec<UpstreamRelease>,
     /// How confidently basilisk matched the advisory to the package.
-    /// `Unspecified` for PyPI findings and documents without metadata.
-    pub applicability: MatchApplicability,
+    /// `Unspecified` for PyPI vulnerability matches and documents without metadata.
+    pub match_confidence: MatchConfidence,
     /// The identifier basilisk matched the advisory through, when known.
     pub matched_identity: Option<MatchedIdentity>,
     pub summary: Option<String>,
     pub url: Option<String>,
-    /// EPSS records for the finding's CVE ids, sorted by CVE.
+    /// EPSS records for the vulnerability match's CVE ids, sorted by CVE.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub epss: Vec<EpssScore>,
-    /// KEV catalog entries for the finding's CVE ids.
+    /// KEV catalog entries for the vulnerability match's CVE ids.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub known_exploited: Vec<KnownExploited>,
+    pub kev: Vec<KevEntry>,
     pub risk: RiskScore,
-    /// Set only on findings in the ignored bucket.
+    /// Set only on vulnerability matches in the ignored section.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ignore_reason: Option<IgnoreReason>,
+    pub ignore_mode: Option<IgnoreMode>,
 }
 
-impl Finding {
-    /// The finding's CVE ids: its own id and any CVE alias, deduplicated
+impl Match {
+    /// The vulnerability match's CVE ids: its own id and any CVE alias, deduplicated
     /// case-insensitively and upper-cased.
     pub fn cve_ids(&self) -> Vec<String> {
         let mut cves: Vec<String> = std::iter::once(&self.id)
@@ -628,28 +767,45 @@ impl Finding {
         cves
     }
 
-    /// Where the finding's fix stands.
-    pub fn fix_status(&self) -> FixStatus {
+    /// Where the vulnerability match's fix stands.
+    pub fn fix_availability(&self) -> FixAvailability {
         if !self.fixed_versions.is_empty() {
-            FixStatus::Available
-        } else if !self.upstream_fixes.is_empty() {
-            FixStatus::UpstreamOnly
+            FixAvailability::Available
+        } else if !self.other_ecosystem_fixes.is_empty() || !self.upstream_releases.is_empty() {
+            FixAvailability::ElsewhereOnly
         } else {
-            FixStatus::Unfixed
+            FixAvailability::None
         }
+    }
+
+    /// The lowest fixed release newer than the locked version, or `None`
+    /// when there is none or the locked version does not parse. OSV can
+    /// publish fixed events for several release branches; the lowest newer
+    /// one avoids forcing the highest (and potentially incompatible) major
+    /// release. Fixed versions that do not parse are skipped rather than
+    /// compared as text.
+    pub fn lowest_fixed_version(&self) -> Option<PackageVersion> {
+        let locked = self.package.parsed_version().ok()?;
+        self.fixed_versions
+            .iter()
+            .filter_map(|fixed| PackageVersion::parse(&self.package.ecosystem, fixed).ok())
+            .filter(|fixed| *fixed > locked)
+            // All parsed in the package's ecosystem, so they are mutually
+            // comparable.
+            .reduce(|lowest, fixed| if fixed < lowest { fixed } else { lowest })
     }
 }
 
-/// Where a finding's fix stands, from [`Finding::fix_status`].
+/// Where a vulnerability match's fix stands, from [`Match::fix_availability`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FixStatus {
+pub enum FixAvailability {
     /// A fixed release exists in the package's own ecosystem.
     Available,
     /// Fixes exist only outside the package's own ecosystem, so they may
     /// not be installable for it.
-    UpstreamOnly,
+    ElsewhereOnly,
     /// No fix is known anywhere.
-    Unfixed,
+    None,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -658,42 +814,57 @@ pub struct AuditSummary {
     pub audited: usize,
     pub vulnerable: usize,
     pub ignored: usize,
-    pub unchecked: usize,
+    pub not_audited: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AuditReport {
-    pub vulnerabilities: Vec<Finding>,
-    pub ignored: Vec<Finding>,
-    pub unchecked: Vec<AuditPackage>,
+    pub matches: Vec<Match>,
+    pub ignored: Vec<Match>,
+    pub not_audited: Vec<AuditPackage>,
     pub summary: AuditSummary,
-    /// Ignore ids and scoped rules that matched no finding. An expired
+    /// Ignore ids and scoped rules that matched no vulnerability. An expired
     /// package or version exception remains visible after an upgrade.
-    pub unmatched_ignores: Vec<String>,
+    pub unused_ignores: Vec<String>,
     pub threat_data: ThreatDataStatus,
 }
 
 impl AuditReport {
-    /// Orders the vulnerable and ignored findings by `strategy`.
-    pub fn sort(&mut self, strategy: SortStrategy) {
-        self.vulnerabilities.sort_by(|a, b| strategy.compare(a, b));
-        self.ignored.sort_by(|a, b| strategy.compare(a, b));
+    /// Distinct package names with an installable fix among non-ignored
+    /// vulnerability matches, in first-appearance order. Fixes elsewhere do not count.
+    pub fn fixable_package_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        for vuln_match in &self.matches {
+            if vuln_match.fix_availability() == FixAvailability::Available {
+                let name = vuln_match.package.name.as_str();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// Orders the vulnerable and ignored vulnerability matches by `key`.
+    pub fn sort(&mut self, key: SortKey) {
+        self.matches.sort_by(|a, b| key.compare(a, b));
+        self.ignored.sort_by(|a, b| key.compare(a, b));
     }
 }
 
-/// How findings are ordered in a report. Every strategy is a total order:
+/// How vulnerability matches are ordered in a report. Every key is a total order:
 /// after its primary key it falls through the remaining keys so equal
-/// findings keep a stable, predictable order.
+/// vulnerability matches keep a stable, predictable order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SortStrategy {
+pub enum SortKey {
     /// Highest [`RiskScore`] first.
     #[default]
     Risk,
-    /// Highest [`SeverityBand`] first.
+    /// Highest [`SeverityRating`] first.
     Severity,
     /// Highest EPSS percentile first.
     Epss,
-    /// KEV-listed findings first.
+    /// KEV-listed vulnerability matches first.
     Kev,
     /// Package name, version, and ecosystem.
     Package,
@@ -701,36 +872,34 @@ pub enum SortStrategy {
     Vulnerability,
 }
 
-impl SortStrategy {
-    pub const ALL: [SortStrategy; 6] = [
-        SortStrategy::Risk,
-        SortStrategy::Severity,
-        SortStrategy::Epss,
-        SortStrategy::Kev,
-        SortStrategy::Package,
-        SortStrategy::Vulnerability,
+impl SortKey {
+    pub const ALL: [SortKey; 6] = [
+        SortKey::Risk,
+        SortKey::Severity,
+        SortKey::Epss,
+        SortKey::Kev,
+        SortKey::Package,
+        SortKey::Vulnerability,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            SortStrategy::Risk => "risk",
-            SortStrategy::Severity => "severity",
-            SortStrategy::Epss => "epss",
-            SortStrategy::Kev => "kev",
-            SortStrategy::Package => "package",
-            SortStrategy::Vulnerability => "vulnerability",
+            SortKey::Risk => "risk",
+            SortKey::Severity => "severity",
+            SortKey::Epss => "epss",
+            SortKey::Kev => "kev",
+            SortKey::Package => "package",
+            SortKey::Vulnerability => "vulnerability",
         }
     }
 
-    pub fn compare(self, a: &Finding, b: &Finding) -> Ordering {
-        type Key = fn(&Finding, &Finding) -> Ordering;
+    pub fn compare(self, a: &Match, b: &Match) -> Ordering {
+        type Key = fn(&Match, &Match) -> Ordering;
         let keys: &[Key] = match self {
-            SortStrategy::Risk => &[by_risk, by_severity, by_epss_percentile, by_package, by_id],
-            SortStrategy::Severity => {
-                &[by_severity, by_risk, by_epss_percentile, by_package, by_id]
-            }
-            SortStrategy::Epss => &[by_epss_percentile, by_risk, by_severity, by_package, by_id],
-            SortStrategy::Kev => &[
+            SortKey::Risk => &[by_risk, by_severity, by_epss_percentile, by_package, by_id],
+            SortKey::Severity => &[by_severity, by_risk, by_epss_percentile, by_package, by_id],
+            SortKey::Epss => &[by_epss_percentile, by_risk, by_severity, by_package, by_id],
+            SortKey::Kev => &[
                 by_kev,
                 by_risk,
                 by_severity,
@@ -738,8 +907,8 @@ impl SortStrategy {
                 by_package,
                 by_id,
             ],
-            SortStrategy::Package => &[by_package, by_id, by_risk, by_severity, by_epss_percentile],
-            SortStrategy::Vulnerability => {
+            SortKey::Package => &[by_package, by_id, by_risk, by_severity, by_epss_percentile],
+            SortKey::Vulnerability => {
                 &[by_id, by_risk, by_severity, by_epss_percentile, by_package]
             }
         };
@@ -750,40 +919,40 @@ impl SortStrategy {
     }
 }
 
-impl std::fmt::Display for SortStrategy {
+impl std::fmt::Display for SortKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
     }
 }
 
-impl FromStr for SortStrategy {
+impl FromStr for SortKey {
     type Err = String;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
-        SortStrategy::ALL
+        SortKey::ALL
             .into_iter()
-            .find(|strategy| strategy.name() == name)
+            .find(|key| key.name() == name)
             .ok_or_else(|| {
-                let options: Vec<&str> = SortStrategy::ALL.iter().map(|s| s.name()).collect();
+                let options: Vec<&str> = SortKey::ALL.iter().map(|s| s.name()).collect();
                 format!(
-                    "'{name}' is not a sort strategy (expected one of {})",
+                    "'{name}' is not a sort key (expected one of {})",
                     options.join(", ")
                 )
             })
     }
 }
 
-fn by_risk(a: &Finding, b: &Finding) -> Ordering {
+fn by_risk(a: &Match, b: &Match) -> Ordering {
     b.risk.cmp(&a.risk)
 }
 
-fn by_severity(a: &Finding, b: &Finding) -> Ordering {
+fn by_severity(a: &Match, b: &Match) -> Ordering {
     b.severity.cmp(&a.severity)
 }
 
-fn by_epss_percentile(a: &Finding, b: &Finding) -> Ordering {
-    let percentile = |finding: &Finding| {
-        finding
+fn by_epss_percentile(a: &Match, b: &Match) -> Ordering {
+    let percentile = |vuln_match: &Match| {
+        vuln_match
             .epss
             .iter()
             .max_by(|left, right| left.epss.total_cmp(&right.epss))
@@ -793,12 +962,12 @@ fn by_epss_percentile(a: &Finding, b: &Finding) -> Ordering {
     percentile(b).total_cmp(&percentile(a))
 }
 
-fn by_kev(a: &Finding, b: &Finding) -> Ordering {
-    b.known_exploited.len().cmp(&a.known_exploited.len())
+fn by_kev(a: &Match, b: &Match) -> Ordering {
+    b.kev.len().cmp(&a.kev.len())
 }
 
 /// By spelling, not by [`PackageName`]'s ecosystem-first derive.
-fn by_package(a: &Finding, b: &Finding) -> Ordering {
+fn by_package(a: &Match, b: &Match) -> Ordering {
     let (a, b) = (&a.package, &b.package);
     a.name
         .as_str()
@@ -807,7 +976,7 @@ fn by_package(a: &Finding, b: &Finding) -> Ordering {
         .then_with(|| a.ecosystem.cmp(&b.ecosystem))
 }
 
-fn by_id(a: &Finding, b: &Finding) -> Ordering {
+fn by_id(a: &Match, b: &Match) -> Ordering {
     a.id.cmp(&b.id)
 }
 

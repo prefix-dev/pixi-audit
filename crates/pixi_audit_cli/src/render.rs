@@ -4,9 +4,9 @@ use std::fmt::Write as _;
 use console::style;
 use iocraft::prelude::Weight;
 use pixi_audit::{
-    AuditReport, CondaPublication, EpssScore, Finding, FixStatus, IgnoreReason, KnownExploited,
-    MatchApplicability, PackageEcosystem, PackageId, RansomwareCampaignUse, RiskScore,
-    SeverityBand, ThreatSourceStatus, UpstreamFix, UpstreamOrigin,
+    AuditReport, CondaForgeBuild, EpssScore, FixAvailability, IgnoreMode, KevEntry, Match,
+    MatchConfidence, OtherEcosystemFix, PackageEcosystem, PackageId, RansomwareCampaignUse,
+    RiskScore, SeverityRating, ThreatSourceStatus, UpstreamRelease,
 };
 use supports_hyperlinks::Stream;
 
@@ -75,14 +75,14 @@ impl From<RenderOptions> for GuidanceOptions {
 
 pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
     let mut out = String::new();
-    if !report.unchecked.is_empty() {
+    if !report.not_audited.is_empty() {
         writeln!(
             out,
-            "{} package(s) could not be checked:",
-            report.unchecked.len()
+            "{} package(s) could not be audited:",
+            report.not_audited.len()
         )
         .unwrap();
-        for package in &report.unchecked {
+        for package in &report.not_audited {
             writeln!(
                 out,
                 "  {} {} ({}) — {}",
@@ -97,24 +97,24 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
     }
 
     let columns = ThreatColumns::for_report(report);
-    for group in grouped(&report.vulnerabilities) {
+    for group in grouped(&report.matches) {
         writeln!(out, "{}", group.header).unwrap();
-        for finding in group.members {
-            let id = finding_id(finding, options);
-            let severity = severity_cell(finding.severity)
+        for vuln_match in group.members {
+            let id = match_id(vuln_match, options);
+            let severity = severity_cell(vuln_match.severity)
                 .map(|cell| format!("  {cell}"))
                 .unwrap_or_default();
             writeln!(
                 out,
                 "  {id}{severity}{}{}{}",
-                columns.cells(finding),
-                fix_note(finding),
-                match_note(finding)
+                columns.cells(vuln_match),
+                fix_note(vuln_match),
+                confidence_note(vuln_match)
                     .map(|note| format!("  {}", style(note).dim()))
                     .unwrap_or_default()
             )
             .unwrap();
-            if let Some(url) = &finding.url
+            if let Some(url) = &vuln_match.url
                 && !options.hyperlinks
             {
                 writeln!(out, "  {}", style(url).dim()).unwrap();
@@ -124,16 +124,21 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
     }
 
     if !report.ignored.is_empty() {
-        writeln!(out, "Ignored {} finding(s):", report.ignored.len()).unwrap();
-        for finding in &report.ignored {
-            let marker = match finding.ignore_reason {
-                Some(IgnoreReason::UntilFixed) => " — until a fix is released",
-                Some(IgnoreReason::Always) | None => "",
+        writeln!(
+            out,
+            "Ignored {} vulnerability match(es):",
+            report.ignored.len()
+        )
+        .unwrap();
+        for vuln_match in &report.ignored {
+            let marker = match vuln_match.ignore_mode {
+                Some(IgnoreMode::UntilFixed) => " — until a fix is released",
+                Some(IgnoreMode::Permanent) | None => "",
             };
             writeln!(
                 out,
                 "  {} ({} {}){marker}",
-                finding.id, finding.package.name, finding.package.version
+                vuln_match.id, vuln_match.package.name, vuln_match.package.version
             )
             .unwrap();
         }
@@ -142,26 +147,25 @@ pub fn render_human(report: &AuditReport, options: RenderOptions) -> String {
 
     let summary = &report.summary;
     if summary.vulnerable > 0 {
-        let packages: BTreeSet<&PackageId> =
-            report.vulnerabilities.iter().map(|f| &f.package).collect();
+        let packages: BTreeSet<&PackageId> = report.matches.iter().map(|f| &f.package).collect();
         writeln!(
             out,
-            "{} vulnerabilities in {} package(s) ({} audited, {} ignored, {} unchecked)",
+            "{} vulnerabilities in {} package(s) ({} audited, {} ignored, {} not audited)",
             style(summary.vulnerable).red().bold(),
             packages.len(),
             summary.audited,
             summary.ignored,
-            summary.unchecked
+            summary.not_audited
         )
         .unwrap();
     } else {
         writeln!(
             out,
-            "{} ({} audited, {} ignored, {} unchecked)",
+            "{} ({} audited, {} ignored, {} not audited)",
             style("No vulnerabilities found").green(),
             summary.audited,
             summary.ignored,
-            summary.unchecked
+            summary.not_audited
         )
         .unwrap();
     }
@@ -226,68 +230,72 @@ pub(crate) struct Guidance {
     highest_risk: Option<String>,
     kev: KevSummary,
     severe: usize,
-    fixable_findings: usize,
+    fixable_matches: usize,
     audited_packages_with_fixes: usize,
     update_targets: usize,
-    upstream_only: usize,
-    unfixed: usize,
+    elsewhere_only: usize,
+    no_fix: usize,
     ignored: usize,
-    unchecked: usize,
+    not_audited: usize,
     total: usize,
 }
 
 impl Guidance {
     pub(crate) fn for_report(report: &AuditReport) -> Self {
-        let findings = &report.vulnerabilities;
-        let highest_risk = findings
+        let matches = &report.matches;
+        let highest_risk = matches
             .iter()
-            .map(|finding| finding.risk)
+            .map(|vuln_match| vuln_match.risk)
             .max()
             .and_then(risk_label);
-        let known_exploited = findings
+        let kev_cves = matches
             .iter()
-            .flat_map(|finding| &finding.known_exploited)
+            .flat_map(|vuln_match| &vuln_match.kev)
             .map(|entry| entry.cve.as_str())
             .collect::<BTreeSet<_>>()
             .len();
         let kev = match &report.threat_data.kev {
-            ThreatSourceStatus::Loaded { .. } => KevSummary::Loaded(known_exploited),
+            ThreatSourceStatus::Loaded { .. } => KevSummary::Loaded(kev_cves),
             ThreatSourceStatus::Failed { .. } => KevSummary::Unavailable,
             ThreatSourceStatus::Disabled => KevSummary::NotChecked,
         };
-        let severe = findings
+        let severe = matches
             .iter()
-            .filter(|finding| {
+            .filter(|vuln_match| {
                 matches!(
-                    finding.severity,
-                    SeverityBand::Critical | SeverityBand::High
+                    vuln_match.severity,
+                    SeverityRating::Critical | SeverityRating::High
                 )
             })
             .count();
-        let fix_count =
-            |status: FixStatus| findings.iter().filter(|f| f.fix_status() == status).count();
-        let fixable_findings = fix_count(FixStatus::Available);
-        let audited_packages_with_fixes = findings
+        let fix_count = |status: FixAvailability| {
+            matches
+                .iter()
+                .filter(|m| m.fix_availability() == status)
+                .count()
+        };
+        let fixable_matches = fix_count(FixAvailability::Available);
+        let audited_packages_with_fixes = matches
             .iter()
-            .filter(|finding| finding.fix_status() == FixStatus::Available)
-            .map(|finding| &finding.package)
+            .filter(|vuln_match| vuln_match.fix_availability() == FixAvailability::Available)
+            .map(|vuln_match| &vuln_match.package)
             .collect::<BTreeSet<_>>()
             .len();
-        let upstream_only = fix_count(FixStatus::UpstreamOnly);
-        let unfixed = fix_count(FixStatus::Unfixed);
+        let elsewhere_only = fix_count(FixAvailability::ElsewhereOnly);
+        let no_fix = fix_count(FixAvailability::None);
 
         Self {
             highest_risk,
             kev,
             severe,
-            fixable_findings,
+            fixable_matches,
             audited_packages_with_fixes,
-            update_targets: crate::fix::fixable_package_names(report).len(),
-            upstream_only,
-            unfixed,
+            update_targets: report.fixable_package_names().len(),
+            elsewhere_only,
+            no_fix,
             ignored: report.ignored.len(),
-            unchecked: report.unchecked.len(),
-            total: findings.len(),
+            not_audited: report.not_audited.len(),
+            total: matches.len(),
         }
     }
 
@@ -310,14 +318,17 @@ impl Guidance {
             KevSummary::NotChecked => "n/a — CISA KEV catalog not checked".to_string(),
         };
         vec![
-            assessment_line("Highest finding prioritization score:", highest_risk),
+            assessment_line("Highest risk score:", highest_risk),
             assessment_line("CISA KEV matches:", kev),
-            assessment_line("Critical/high findings:", self.severe.to_string()),
+            assessment_line(
+                "Critical/high vulnerability matches:",
+                self.severe.to_string(),
+            ),
             assessment_line(
                 "Fix available in audited ecosystem:",
                 format!(
                     "{} of {} across {}",
-                    self.fixable_findings,
+                    self.fixable_matches,
                     count(self.total, "vulnerability", "vulnerabilities"),
                     count(
                         self.audited_packages_with_fixes,
@@ -327,12 +338,12 @@ impl Guidance {
                 ),
             ),
             assessment_line(
-                "Fix only upstream:",
-                count(self.upstream_only, "vulnerability", "vulnerabilities"),
+                "Fix only elsewhere:",
+                count(self.elsewhere_only, "vulnerability", "vulnerabilities"),
             ),
             assessment_line(
                 "No known fix:",
-                count(self.unfixed, "vulnerability", "vulnerabilities"),
+                count(self.no_fix, "vulnerability", "vulnerabilities"),
             ),
         ]
     }
@@ -344,15 +355,19 @@ impl Guidance {
     ) -> Vec<String> {
         let mut lines = Vec::new();
         if self.total == 0 {
-            if self.ignored == 0 && self.unchecked == 0 {
-                lines.push("None. No vulnerabilities were found in checked packages.".to_string());
+            if self.ignored == 0 && self.not_audited == 0 {
+                lines.push("None. No vulnerabilities were found in audited packages.".to_string());
                 return lines;
             }
-            lines.push("No active vulnerabilities were found in checked packages.".to_string());
+            lines.push("No active vulnerabilities were found in audited packages.".to_string());
             if self.ignored > 0 {
                 lines.push(format!(
                     "Review {} periodically.",
-                    count(self.ignored, "ignored finding", "ignored findings")
+                    count(
+                        self.ignored,
+                        "ignored vulnerability match",
+                        "ignored vulnerability matches"
+                    )
                 ));
             }
         } else {
@@ -364,27 +379,27 @@ impl Guidance {
                     count(number, "CISA KEV match", "CISA KEV matches")
                 ));
             }
-            if self.fixable_findings > 0 {
+            if self.fixable_matches > 0 {
                 if fix_attempted {
-                    let (fix, verb) = if self.fixable_findings == 1 {
+                    let (fix, verb) = if self.fixable_matches == 1 {
                         ("a fix", "remains")
                     } else {
                         ("fixes", "remain")
                     };
                     lines.push(format!(
                         "`--fix` completed, but {} with {fix} in the audited ecosystem {verb}. Review dependency constraints and pixi's solver output.",
-                        count(self.fixable_findings, "vulnerability", "vulnerabilities")
+                        count(self.fixable_matches, "vulnerability", "vulnerabilities")
                     ));
                 } else if manifest_available {
                     lines.push(format!(
                         "Re-run this audit with `--fix` to ask pixi to update {}. Fixed releases in the audited ecosystem are available for {}.",
                         count(self.update_targets, "package name", "package names"),
-                        count(self.fixable_findings, "vulnerability", "vulnerabilities")
+                        count(self.fixable_matches, "vulnerability", "vulnerabilities")
                     ));
                 } else {
                     lines.push(format!(
                         "Fixed releases in the audited ecosystem are available for {} across {}, but `--fix` requires a `pixi.toml` or `pyproject.toml` next to the audited lock file. Run the same audit with `--fix` from the workspace that owns this lock file.",
-                        count(self.fixable_findings, "vulnerability", "vulnerabilities"),
+                        count(self.fixable_matches, "vulnerability", "vulnerabilities"),
                         count(
                             self.audited_packages_with_fixes,
                             "audited package",
@@ -393,37 +408,37 @@ impl Guidance {
                     ));
                 }
             }
-            if self.upstream_only > 0 {
-                let (fix, pronoun) = if self.upstream_only == 1 {
+            if self.elsewhere_only > 0 {
+                let (fix, pronoun) = if self.elsewhere_only == 1 {
                     ("a fix", "it")
                 } else {
                     ("fixes", "them")
                 };
                 lines.push(format!(
-                    "{} {} {fix} only upstream. `--fix` cannot install {pronoun}. Wait for an ecosystem build or change dependency source.",
+                    "{} {} {fix} only elsewhere. `--fix` cannot install {pronoun}. Wait for an ecosystem build or change dependency source.",
                     count(
-                        self.upstream_only,
+                        self.elsewhere_only,
                         "vulnerability",
                         "vulnerabilities"
                     ),
-                    if self.upstream_only == 1 { "has" } else { "have" }
+                    if self.elsewhere_only == 1 { "has" } else { "have" }
                 ));
             }
-            if self.unfixed > 0 {
+            if self.no_fix > 0 {
                 lines.push(format!(
                     "{} {} no known fix. Remove, replace, or mitigate the affected dependencies. Use `pixi audit ignore <ID> --until-fixed` only after accepting the risk.",
-                    count(self.unfixed, "vulnerability", "vulnerabilities"),
-                    if self.unfixed == 1 { "has" } else { "have" }
+                    count(self.no_fix, "vulnerability", "vulnerabilities"),
+                    if self.no_fix == 1 { "has" } else { "have" }
                 ));
             }
         }
-        if self.unchecked > 0 {
-            lines.push(if self.unchecked == 1 {
-                "Review 1 unchecked package. Its source is not covered by the configured vulnerability databases.".to_string()
+        if self.not_audited > 0 {
+            lines.push(if self.not_audited == 1 {
+                "Review 1 package that was not audited. Its source is not covered by the configured vulnerability databases.".to_string()
             } else {
                 format!(
-                    "Review {} unchecked packages. Their sources are not covered by the configured vulnerability databases.",
-                    self.unchecked
+                    "Review {} packages that were not audited. Their sources are not covered by the configured vulnerability databases.",
+                    self.not_audited
                 )
             });
         }
@@ -435,10 +450,10 @@ impl Guidance {
             title: "Counts",
             entries: vec![
                 ExplanationEntry::new("Package", "One locked name, version, and source."),
-                ExplanationEntry::new("Finding", "One vulnerability record affecting a package."),
+                ExplanationEntry::new("Vulnerability match", "One advisory affecting a package."),
                 ExplanationEntry::new(
                     "CVE IDs",
-                    "Standard vulnerability IDs. One finding can reference several.",
+                    "Standard vulnerability IDs. One vulnerability match can reference several.",
                 ),
             ],
         }];
@@ -457,9 +472,9 @@ impl Guidance {
                 ),
             ];
             if report
-                .vulnerabilities
+                .matches
                 .iter()
-                .any(|finding| !finding.known_exploited.is_empty())
+                .any(|vuln_match| !vuln_match.kev.is_empty())
             {
                 threat.push(ExplanationEntry::new(
                     "Markers",
@@ -467,16 +482,16 @@ impl Guidance {
                 ));
             }
             sections.push(ExplanationSection {
-                title: "Threat signals",
+                title: "Threat data",
                 entries: threat,
             });
 
             sections.push(ExplanationSection {
-                title: "Prioritization",
+                title: "Risk",
                 entries: vec![
                     ExplanationEntry::new(
                         "Risk",
-                        "A 0–100 score for ordering individual findings.",
+                        "A 0–100 score for ordering individual vulnerability matches.",
                     ),
                     ExplanationEntry::child(
                         "Formula",
@@ -497,11 +512,11 @@ impl Guidance {
                 title: "Fixes",
                 entries: vec![
                     ExplanationEntry::new(
-                        "Ecosystem fix",
+                        "Fix available",
                         "A fixed release exists for the audited package source. The `Fixed in` column lists it.",
                     ),
                     ExplanationEntry::new(
-                        "Fix only upstream",
+                        "Fix only elsewhere",
                         "A fix exists elsewhere. `--fix` cannot install it.",
                     ),
                     ExplanationEntry::new(
@@ -523,18 +538,18 @@ impl Guidance {
                 "Excluded from active totals and the failure decision. The package is not patched.",
             ));
         }
-        if self.unchecked > 0 {
+        if self.not_audited > 0 {
             coverage.push(ExplanationEntry::new(
-                "Unchecked",
+                "Not audited",
                 "The package source lacks vulnerability database coverage. Safety is unknown.",
             ));
         }
 
-        let findings = report.vulnerabilities.iter().chain(report.ignored.iter());
-        let (version_unbounded, unevaluated) = findings.fold((false, false), |state, finding| {
+        let matches = report.matches.iter().chain(report.ignored.iter());
+        let (version_unbounded, unevaluated) = matches.fold((false, false), |state, vuln_match| {
             (
-                state.0 || finding.applicability == MatchApplicability::VersionUnbounded,
-                state.1 || finding.applicability == MatchApplicability::Unevaluated,
+                state.0 || vuln_match.match_confidence == MatchConfidence::VersionUnbounded,
+                state.1 || vuln_match.match_confidence == MatchConfidence::Unevaluated,
             )
         });
         if version_unbounded {
@@ -551,7 +566,7 @@ impl Guidance {
         }
         if !coverage.is_empty() {
             sections.push(ExplanationSection {
-                title: "Coverage",
+                title: "Ignored and not audited",
                 entries: coverage,
             });
         }
@@ -572,17 +587,17 @@ fn render_guidance(out: &mut String, report: &AuditReport, options: GuidanceOpti
     let guidance = Guidance::for_report(report);
     let assessment = guidance.assessment_lines();
     if !assessment.is_empty() {
-        writeln!(out, "\n{}", style("Assessment").bold()).unwrap();
+        writeln!(out, "\n{}", style("Overview").bold()).unwrap();
         for line in assessment {
             writeln!(out, "  • {line}").unwrap();
         }
     }
-    writeln!(out, "\n{}", style("Next steps").bold()).unwrap();
+    writeln!(out, "\n{}", style("Recommendations").bold()).unwrap();
     for line in guidance.next_step_lines(options.fix_attempted, options.manifest_available) {
         writeln!(out, "  • {line}").unwrap();
     }
     if options.explain {
-        writeln!(out, "\n{}", style("How this report works").bold()).unwrap();
+        writeln!(out, "\n{}", style("Definitions").bold()).unwrap();
         for section in guidance.explanation_sections(report) {
             let width = section.label_width();
             writeln!(out, "\n  {}", style(section.title).bold()).unwrap();
@@ -607,31 +622,31 @@ fn render_guidance(out: &mut String, report: &AuditReport, options: GuidanceOpti
     }
 }
 
-/// The findings for one locked package, under a shared header.
+/// The vulnerability matches for one locked package, under a shared header.
 struct Group<'a> {
     key: &'a PackageId,
     header: String,
-    members: Vec<&'a Finding>,
+    members: Vec<&'a Match>,
 }
 
-/// Groups findings by package in first-appearance order, which keeps the
+/// Groups vulnerability matches by package in first-appearance order, which keeps the
 /// most severe packages first since the report is sorted by severity.
-fn grouped(findings: &[Finding]) -> Vec<Group<'_>> {
+fn grouped(matches: &[Match]) -> Vec<Group<'_>> {
     let mut groups: Vec<Group<'_>> = Vec::new();
-    for finding in findings {
-        let key = &finding.package;
+    for vuln_match in matches {
+        let key = &vuln_match.package;
         match groups.iter_mut().find(|group| group.key == key) {
-            Some(group) => group.members.push(finding),
+            Some(group) => group.members.push(vuln_match),
             None => groups.push(Group {
                 key,
                 header: format!(
                     "{} {} ({}) — {}",
-                    style(&finding.package.name).bold(),
-                    finding.package.version,
-                    finding.package.ecosystem,
-                    finding.environments.join(", ")
+                    style(&vuln_match.package.name).bold(),
+                    vuln_match.package.version,
+                    vuln_match.package.ecosystem,
+                    vuln_match.environments.join(", ")
                 ),
-                members: vec![finding],
+                members: vec![vuln_match],
             }),
         }
     }
@@ -640,23 +655,23 @@ fn grouped(findings: &[Finding]) -> Vec<Group<'_>> {
 
 /// The advisory ID, wrapped in an OSC 8 hyperlink to its advisory page when
 /// the terminal renders those.
-fn finding_id(finding: &Finding, options: RenderOptions) -> String {
-    match (&finding.url, options.hyperlinks) {
-        (Some(url), true) => format!("\x1b]8;;{url}\x1b\\{}\x1b]8;;\x1b\\", finding.id),
-        (Some(_), false) | (None, _) => finding.id.clone(),
+fn match_id(vuln_match: &Match, options: RenderOptions) -> String {
+    match (&vuln_match.url, options.hyperlinks) {
+        (Some(url), true) => format!("\x1b]8;;{url}\x1b\\{}\x1b]8;;\x1b\\", vuln_match.id),
+        (Some(_), false) | (None, _) => vuln_match.id.clone(),
     }
 }
 
 /// A fixed-width severity label in the table's palette, or `None` for
 /// unknown severity, which the grouped report leaves blank rather than
 /// shouting "UNKNOWN".
-fn severity_cell(band: SeverityBand) -> Option<String> {
-    if band == SeverityBand::Unknown {
+fn severity_cell(rating: SeverityRating) -> Option<String> {
+    if rating == SeverityRating::Unknown {
         return None;
     }
-    let text = format!("{:<8}", band.name().to_uppercase());
-    let mut styled = style(text).color256(table::field::severity_palette_index(band));
-    if table::field::severity_weight(band) == Weight::Bold {
+    let text = format!("{:<8}", rating.name().to_uppercase());
+    let mut styled = style(text).color256(table::column::severity_palette_index(rating));
+    if table::column::severity_weight(rating) == Weight::Bold {
         styled = styled.bold();
     }
     Some(styled.to_string())
@@ -684,22 +699,22 @@ impl ThreatColumns {
         }
     }
 
-    fn cells(self, finding: &Finding) -> String {
+    fn cells(self, vuln_match: &Match) -> String {
         let mut cells = String::new();
         if self.risk {
-            let label = risk_label(finding.risk).unwrap_or_else(|| "n/a".to_string());
+            let label = risk_label(vuln_match.risk).unwrap_or_else(|| "n/a".to_string());
             cells.push_str(&format!("  risk {label:>5}"));
-            if let Some(kev) = kev_label(&finding.known_exploited) {
+            if let Some(kev) = kev_label(&vuln_match.kev) {
                 cells.push_str(&format!(
                     " {}",
                     style(format!("({kev})"))
-                        .color256(table::field::KEV_PALETTE_INDEX)
+                        .color256(table::column::KEV_PALETTE_INDEX)
                         .bold()
                 ));
             }
         }
         if self.epss {
-            let label = epss_label(&finding.epss).unwrap_or_else(|| "n/a".to_string());
+            let label = epss_label(&vuln_match.epss).unwrap_or_else(|| "n/a".to_string());
             cells.push_str(&format!("  epss {label}"));
         }
         cells
@@ -762,8 +777,8 @@ fn ordinal(number: u32) -> String {
 }
 
 /// `kev`, or `kev, ransomware` when any entry reports ransomware use;
-/// `None` for findings outside the catalog.
-pub fn kev_label(entries: &[KnownExploited]) -> Option<&'static str> {
+/// `None` for vulnerability matches outside the catalog.
+pub fn kev_label(entries: &[KevEntry]) -> Option<&'static str> {
     if entries.is_empty() {
         return None;
     }
@@ -773,85 +788,121 @@ pub fn kev_label(entries: &[KnownExploited]) -> Option<&'static str> {
     Some(if ransomware { "kev, ransomware" } else { "kev" })
 }
 
-fn fix_note(finding: &Finding) -> String {
-    match finding.fix_status() {
-        FixStatus::Available => format!("  fixed in: {}", finding.fixed_versions.join(", ")),
-        FixStatus::UpstreamOnly => format!(
+fn fix_note(vuln_match: &Match) -> String {
+    match vuln_match.fix_availability() {
+        FixAvailability::Available => {
+            format!("  fixed in: {}", vuln_match.fixed_versions.join(", "))
+        }
+        FixAvailability::ElsewhereOnly => format!(
             "  fix released elsewhere: {}",
-            describe_upstream_fixes(finding)
+            describe_fixes_elsewhere(vuln_match)
         ),
-        FixStatus::Unfixed => "  no known fixed version".to_string(),
+        FixAvailability::None => "  no known fixed version".to_string(),
     }
 }
 
 /// Describe the advisory's version match in human-readable output.
-pub fn match_note(finding: &Finding) -> Option<&'static str> {
-    match finding.applicability {
-        MatchApplicability::VersionUnbounded => Some("match: no version limits"),
-        MatchApplicability::Unevaluated => Some("match: version not checked"),
-        MatchApplicability::Evaluated => Some("match: affects version"),
-        MatchApplicability::Unspecified
-            if finding.package.ecosystem == PackageEcosystem::CondaForge =>
+pub fn confidence_note(vuln_match: &Match) -> Option<&'static str> {
+    match vuln_match.match_confidence {
+        MatchConfidence::VersionUnbounded => Some("confidence: no version limits"),
+        MatchConfidence::Unevaluated => Some("confidence: version not checked"),
+        MatchConfidence::Evaluated => Some("confidence: affects version"),
+        MatchConfidence::Unspecified
+            if vuln_match.package.ecosystem == PackageEcosystem::CondaForge =>
         {
             Some("match details unavailable")
         }
-        MatchApplicability::Unspecified => None,
+        MatchConfidence::Unspecified => None,
     }
 }
 
-/// Every upstream fix of a finding spelled out, `; `-separated.
-pub fn describe_upstream_fixes(finding: &Finding) -> String {
-    finding
-        .upstream_fixes
+/// Every fix outside the audited ecosystem spelled out, `; `-separated:
+/// other-ecosystem fixes first, then upstream releases.
+pub fn describe_fixes_elsewhere(vuln_match: &Match) -> String {
+    vuln_match
+        .other_ecosystem_fixes
         .iter()
-        .map(describe_upstream_fix)
+        .map(describe_other_ecosystem_fix)
+        .chain(
+            vuln_match
+                .upstream_releases
+                .iter()
+                .map(describe_upstream_release),
+        )
         .collect::<Vec<_>>()
         .join("; ")
 }
 
-/// One upstream fix in a sentence: where it exists and what that means for
-/// the audited package.
-pub fn describe_upstream_fix(fix: &UpstreamFix) -> String {
-    match &fix.origin {
-        UpstreamOrigin::Ecosystem { ecosystem } => format!("{} on {ecosystem}", fix.version),
-        UpstreamOrigin::Project { conda_publication } => match conda_publication {
-            CondaPublication::NotPublished => {
-                format!("{} released upstream, no conda-forge build", fix.version)
-            }
-            CondaPublication::Unknown => format!(
-                "{} released upstream, conda-forge build unconfirmed",
-                fix.version
-            ),
-            CondaPublication::Published => format!("{} released upstream", fix.version),
-        },
-    }
+/// An other-ecosystem fix in a sentence: `3.2.0 on PyPI`.
+pub fn describe_other_ecosystem_fix(fix: &OtherEcosystemFix) -> String {
+    format!("{} on {}", fix.version, fix.ecosystem)
 }
 
-/// One upstream fix as a short table label: `PyPI: 3.2.0`,
-/// `upstream: 2.8.2`, or `upstream: 2.8.2 (unconfirmed)` when basilisk
-/// could not tell whether conda-forge has a build.
-pub fn upstream_fix_label(fix: &UpstreamFix) -> String {
-    match &fix.origin {
-        UpstreamOrigin::Ecosystem { ecosystem } => format!("{ecosystem}: {}", fix.version),
-        UpstreamOrigin::Project { conda_publication } => match conda_publication {
-            CondaPublication::Unknown => format!("upstream: {} (unconfirmed)", fix.version),
-            CondaPublication::NotPublished | CondaPublication::Published => {
-                format!("upstream: {}", fix.version)
-            }
-        },
-    }
-}
-
-/// Where a finding's fix stands, as a sentence fragment: `fixed in 3.1.1`,
-/// `fix released elsewhere: ...`, or `no known fixed version`.
-pub fn fix_summary(finding: &Finding) -> String {
-    match finding.fix_status() {
-        FixStatus::Available => format!("fixed in {}", finding.fixed_versions.join(", ")),
-        FixStatus::UpstreamOnly => format!(
-            "fix released elsewhere: {}",
-            describe_upstream_fixes(finding)
+/// An upstream release in a sentence, with what basilisk knows about a
+/// conda-forge build of it.
+pub fn describe_upstream_release(release: &UpstreamRelease) -> String {
+    match release.conda_forge_build {
+        CondaForgeBuild::Missing => {
+            format!(
+                "{} released upstream, no conda-forge build",
+                release.version
+            )
+        }
+        CondaForgeBuild::Unknown => format!(
+            "{} released upstream, conda-forge build unconfirmed",
+            release.version
         ),
-        FixStatus::Unfixed => "no known fixed version".to_string(),
+        CondaForgeBuild::Available => format!("{} released upstream", release.version),
+    }
+}
+
+/// Every fix outside the audited ecosystem as a short table label:
+/// `PyPI: 3.2.0`, `upstream: 2.8.2`, or `upstream: 2.8.2 (unconfirmed)`
+/// when basilisk could not tell whether conda-forge has a build.
+pub fn fix_elsewhere_labels(vuln_match: &Match) -> Vec<String> {
+    vuln_match
+        .other_ecosystem_fixes
+        .iter()
+        .map(other_ecosystem_fix_label)
+        .chain(
+            vuln_match
+                .upstream_releases
+                .iter()
+                .map(upstream_release_label),
+        )
+        .collect()
+}
+
+/// An other-ecosystem fix as a short table label: `PyPI: 3.2.0`.
+pub fn other_ecosystem_fix_label(fix: &OtherEcosystemFix) -> String {
+    format!("{}: {}", fix.ecosystem, fix.version)
+}
+
+/// An upstream release as a short table label: `upstream: 2.8.2`, with
+/// `(unconfirmed)` when basilisk could not tell whether conda-forge has a
+/// build.
+pub fn upstream_release_label(release: &UpstreamRelease) -> String {
+    match release.conda_forge_build {
+        CondaForgeBuild::Unknown => format!("upstream: {} (unconfirmed)", release.version),
+        CondaForgeBuild::Missing | CondaForgeBuild::Available => {
+            format!("upstream: {}", release.version)
+        }
+    }
+}
+
+/// Where a vulnerability match's fix stands, as a sentence fragment:
+/// `fixed in 3.1.1`, `fix released elsewhere: ...`, or
+/// `no known fixed version`.
+pub fn fix_summary(vuln_match: &Match) -> String {
+    match vuln_match.fix_availability() {
+        FixAvailability::Available => {
+            format!("fixed in {}", vuln_match.fixed_versions.join(", "))
+        }
+        FixAvailability::ElsewhereOnly => format!(
+            "fix released elsewhere: {}",
+            describe_fixes_elsewhere(vuln_match)
+        ),
+        FixAvailability::None => "no known fixed version".to_string(),
     }
 }
 

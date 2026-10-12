@@ -1,15 +1,15 @@
 use std::collections::{BTreeSet, HashMap};
 
-use crate::report::Finding;
+use crate::report::Match;
 
 /// Coalesces documents by id or alias within one queried package.
 /// An alias may connect two groups only after both have been seen.
-pub(super) struct FindingGroups {
-    groups: Vec<Finding>,
+pub(super) struct MatchGroups {
+    groups: Vec<Match>,
     by_id: HashMap<String, usize>,
 }
 
-impl FindingGroups {
+impl MatchGroups {
     pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
             groups: Vec::with_capacity(capacity),
@@ -17,13 +17,13 @@ impl FindingGroups {
         }
     }
 
-    pub(super) fn push(&mut self, finding: Finding) {
-        let matches: BTreeSet<usize> = finding
+    pub(super) fn push(&mut self, vuln_match: Match) {
+        let matches: BTreeSet<usize> = vuln_match
             .ids()
             .filter_map(|id| self.by_id.get(&id.to_ascii_lowercase()).copied())
             .collect();
         let index = if let Some(&index) = matches.first() {
-            self.groups[index].merge_from(finding);
+            self.groups[index].merge_from(vuln_match);
             // Removing from the end leaves the surviving group at `index`.
             for other in matches.into_iter().skip(1).rev() {
                 let previous = self.groups.swap_remove(other);
@@ -37,7 +37,7 @@ impl FindingGroups {
             index
         } else {
             let index = self.groups.len();
-            self.groups.push(finding);
+            self.groups.push(vuln_match);
             index
         };
         for id in self.groups[index].ids() {
@@ -45,18 +45,18 @@ impl FindingGroups {
         }
     }
 
-    pub(super) fn into_findings(self) -> impl Iterator<Item = Finding> {
+    pub(super) fn into_matches(self) -> impl Iterator<Item = Match> {
         self.groups.into_iter()
     }
 }
 
-impl Finding {
+impl Match {
     fn ids(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.id.as_str()).chain(self.aliases.iter().map(String::as_str))
     }
 
-    /// Merge another finding for the same package before suppression and threat enrichment.
-    fn merge_from(&mut self, other: Finding) {
+    /// Merge another vulnerability match for the same package before ignores and threat data are applied.
+    fn merge_from(&mut self, other: Match) {
         self.aliases.push(other.id);
         self.aliases.extend(other.aliases);
         self.aliases.retain(|id| !id.eq_ignore_ascii_case(&self.id));
@@ -72,12 +72,17 @@ impl Finding {
                 self.fixed_versions.push(fixed);
             }
         }
-        for fixed in other.upstream_fixes {
-            if !self.upstream_fixes.contains(&fixed) {
-                self.upstream_fixes.push(fixed);
+        for fixed in other.other_ecosystem_fixes {
+            if !self.other_ecosystem_fixes.contains(&fixed) {
+                self.other_ecosystem_fixes.push(fixed);
             }
         }
-        self.applicability = self.applicability.min(other.applicability);
+        for release in other.upstream_releases {
+            if !self.upstream_releases.contains(&release) {
+                self.upstream_releases.push(release);
+            }
+        }
+        self.match_confidence = self.match_confidence.min(other.match_confidence);
         if self.matched_identity != other.matched_identity {
             self.matched_identity = None;
         }

@@ -6,10 +6,10 @@ use rattler_lock::{LockFile, LockedPackage};
 use thiserror::Error;
 
 use crate::{
-    client::{AuditError, BasiliskClient, PypiAuditClient},
+    audit::audit,
+    client::{AuditError, BasiliskClient, OsvDevClient},
     report::{
         AuditPackage, AuditReport, IgnoreSpec, InvalidPackageName, PackageEcosystem, PackageName,
-        audit,
     },
     threat::ThreatSources,
 };
@@ -125,10 +125,10 @@ pub fn collect_packages(
 
 /// Audits every package in the lock file (subject to the environment and
 /// platform filters) against the vulnerability database, attaching threat
-/// data from `threat` to the findings.
+/// data from `threat` to the vulnerability matches.
 pub async fn audit_lock_file(
     client: &BasiliskClient,
-    pypi_client: &PypiAuditClient,
+    osv_client: &OsvDevClient,
     lock_file: &LockFile,
     environment_filter: &[String],
     platform_filter: &[String],
@@ -136,13 +136,13 @@ pub async fn audit_lock_file(
     threat: ThreatSources<'_>,
 ) -> Result<AuditReport, LockFileAuditError> {
     let packages = collect_packages(lock_file, environment_filter, platform_filter)?;
-    Ok(audit(client, pypi_client, packages, ignore, threat).await?)
+    Ok(audit(client, osv_client, packages, ignore, threat).await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{basilisk_client, pypi_client as test_pypi_client, spawn_router};
+    use crate::test_support::{basilisk_client, osv_client as test_osv_client, spawn_router};
 
     /// A small but realistic lock file: two environments sharing an openssl
     /// build from conda-forge, plus a bioconda package and a PyPI wheel in
@@ -334,11 +334,11 @@ packages:
             );
         let base = spawn_router(app).await;
         let client = basilisk_client(base.clone());
-        let pypi_client = test_pypi_client(base);
+        let osv_client = test_osv_client(base);
 
         let report = audit_lock_file(
             &client,
-            &pypi_client,
+            &osv_client,
             &fixture(),
             &[],
             &[],
@@ -348,15 +348,15 @@ packages:
         .await
         .unwrap();
 
-        assert_eq!(report.vulnerabilities.len(), 1);
-        let finding = &report.vulnerabilities[0];
-        assert_eq!(finding.package.name.as_str(), "openssl");
-        assert_eq!(finding.id, "BSLK-1");
-        assert_eq!(finding.severity, crate::report::SeverityBand::Critical);
-        assert_eq!(finding.environments, vec!["default", "prod"]);
+        assert_eq!(report.matches.len(), 1);
+        let vuln_match = &report.matches[0];
+        assert_eq!(vuln_match.package.name.as_str(), "openssl");
+        assert_eq!(vuln_match.id, "BSLK-1");
+        assert_eq!(vuln_match.severity, crate::report::SeverityRating::Critical);
+        assert_eq!(vuln_match.environments, vec!["default", "prod"]);
 
-        // samtools (bioconda) is unchecked; requests is audited through OSV.
-        assert_eq!(report.summary.unchecked, 1);
+        // samtools (bioconda) is not audited; requests is audited through OSV.
+        assert_eq!(report.summary.not_audited, 1);
         assert_eq!(report.summary.audited, 2);
     }
 }

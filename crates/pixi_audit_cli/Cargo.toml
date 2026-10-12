@@ -7,7 +7,7 @@ license.workspace = true
 name = "pixi_audit_cli"
 readme.workspace = true
 repository.workspace = true
-version = "0.1.2"
+version = "0.2.0"
 
 # pixi discovers extensions as `pixi-<cmd>` executables on PATH, so the
 # binary name must be `pixi-audit` even though the package is snake_case.
@@ -27,7 +27,6 @@ jiff = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 pixi_audit = { workspace = true }
 rattler_conda_types = { workspace = true }
-rattler = { workspace = true }
 rattler_networking = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 reqwest-middleware = { workspace = true, features = ["json"] }
@@ -36,11 +35,12 @@ serde_json = { workspace = true }
 supports-hyperlinks = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 toml = { workspace = true }
-toml_edit = { workspace = true }
+toml_edit = { workspace = true, features = ["serde"] }
 url = { workspace = true }
 uv-pep440 = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "json"] }
+pixi_audit_test_support = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

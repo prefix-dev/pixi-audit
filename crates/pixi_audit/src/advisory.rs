@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 use crate::{
     report::{
-        CondaPublication, MatchApplicability, MatchedIdentity, MatchedIdentityKind, PackageName,
-        UpstreamFix, UpstreamOrigin,
+        CondaForgeBuild, MatchConfidence, MatchedIdentity, MatchedIdentityKind, OtherEcosystemFix,
+        PackageName, UpstreamRelease,
     },
     types::{OsvAffected, OsvVulnerability},
 };
@@ -13,7 +13,7 @@ use crate::{
 #[derive(Debug, Deserialize)]
 struct BasiliskFixMetadata {
     fix_version: String,
-    conda_publication: CondaPublication,
+    conda_publication: CondaForgeBuild,
 }
 
 /// The `basilisk` block of an affected entry's `database_specific`.
@@ -29,7 +29,7 @@ fn basilisk_fix_metadata(block: &serde_json::Value) -> Option<BasiliskFixMetadat
 /// How basilisk matched an advisory to the queried conda-forge package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BasiliskMatch {
-    pub applicability: MatchApplicability,
+    pub match_confidence: MatchConfidence,
     pub matched_identity: Option<MatchedIdentity>,
 }
 
@@ -40,9 +40,9 @@ impl BasiliskMatch {
     fn from_value(value: &serde_json::Value) -> Self {
         let field = |name: &str| value.get(name).cloned();
         Self {
-            applicability: field("applicability")
+            match_confidence: field("applicability")
                 .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or(MatchApplicability::Unspecified),
+                .unwrap_or(MatchConfidence::Unspecified),
             matched_identity: field("matched_identity")
                 .and_then(|value| serde_json::from_value(value).ok()),
         }
@@ -60,7 +60,7 @@ impl BasiliskMatch {
             .map(Self::from_value)
             .max_by_key(|m| {
                 (
-                    m.applicability,
+                    m.match_confidence,
                     m.matched_identity.is_some(),
                     m.matched_identity
                         .as_ref()
@@ -106,7 +106,7 @@ pub(crate) fn basilisk_match(
         .map(BasiliskMatch::from_block)
 }
 
-/// Which entries in other ecosystems may contribute upstream fixes.
+/// Which entries in other ecosystems may contribute other-ecosystem fixes.
 #[derive(Debug, PartialEq, Eq)]
 enum CrossEcosystemRule {
     /// Any entry naming the same package.
@@ -135,7 +135,7 @@ impl CrossEcosystemRule {
                 kind: MatchedIdentityKind::Cpe,
                 ..
             }) => Self::Nothing,
-            None if basilisk_match.applicability == MatchApplicability::Evaluated => Self::ByName,
+            None if basilisk_match.match_confidence == MatchConfidence::Evaluated => Self::ByName,
             None => Self::Nothing,
         }
     }
@@ -173,10 +173,11 @@ fn purl_key(purl: &str) -> String {
 pub(crate) struct FixedVersions {
     /// Fixes released in the queried ecosystem.
     pub same_ecosystem: Vec<String>,
-    /// Fixes known outside the queried ecosystem, with their origin.
-    /// Informative only: those releases may not exist in the queried
-    /// ecosystem yet.
-    pub upstream: Vec<UpstreamFix>,
+    /// Fixed releases of the same package in other ecosystems. Informative
+    /// only: those releases may not exist in the queried ecosystem yet.
+    pub other_ecosystem: Vec<OtherEcosystemFix>,
+    /// Fixes the project released upstream without a conda-forge build.
+    pub upstream_releases: Vec<UpstreamRelease>,
 }
 
 impl FixedVersions {
@@ -190,16 +191,33 @@ impl FixedVersions {
         }
     }
 
-    /// The first origin reported for a version wins.
-    fn push_upstream(&mut self, version: &str, origin: UpstreamOrigin) {
-        if !self
-            .upstream
+    /// Whether a fix outside the queried ecosystem already lists `version`.
+    fn has_external(&self, version: &str) -> bool {
+        self.other_ecosystem
             .iter()
-            .any(|existing| existing.version == version)
-        {
-            self.upstream.push(UpstreamFix {
+            .any(|fix| fix.version == version)
+            || self
+                .upstream_releases
+                .iter()
+                .any(|release| release.version == version)
+    }
+
+    /// The first fix reported for a version wins.
+    fn push_other_ecosystem(&mut self, version: &str, ecosystem: &str) {
+        if !self.has_external(version) {
+            self.other_ecosystem.push(OtherEcosystemFix {
                 version: version.to_string(),
-                origin,
+                ecosystem: ecosystem.to_string(),
+            });
+        }
+    }
+
+    /// The first fix reported for a version wins.
+    fn push_upstream_release(&mut self, version: &str, conda_forge_build: CondaForgeBuild) {
+        if !self.has_external(version) {
+            self.upstream_releases.push(UpstreamRelease {
+                version: version.to_string(),
+                conda_forge_build,
             });
         }
     }
@@ -227,7 +245,7 @@ fn release_fixed_events(affected: &OsvAffected) -> impl Iterator<Item = &str> {
 /// Package names match under the ecosystem's own normalization, so an
 /// advisory spelling `ruamel.yaml` matches a PyPI query for `ruamel-yaml`.
 ///
-/// Entries in other ecosystems are upstream fixes only when
+/// Entries in other ecosystems contribute other-ecosystem fixes only when
 /// [`CrossEcosystemRule`] admits them: a same-name entry for plain OSV
 /// documents and for matches basilisk evaluated, the entry whose purl
 /// basilisk matched through when it recorded one, and nothing for a CPE
@@ -261,12 +279,7 @@ pub(crate) fn fixed_versions(
         for fixed in release_fixed_events(affected) {
             match other_ecosystem {
                 None => fixes.push_same_ecosystem(fixed),
-                Some(other) => fixes.push_upstream(
-                    fixed,
-                    UpstreamOrigin::Ecosystem {
-                        ecosystem: other.to_string(),
-                    },
-                ),
+                Some(other) => fixes.push_other_ecosystem(fixed, other),
             }
         }
 
@@ -275,22 +288,24 @@ pub(crate) fn fixed_versions(
                 basilisk_block(affected.database_specific.as_ref()).and_then(basilisk_fix_metadata)
         {
             // A CPE-matched fix is the project's own release; only a
-            // published conda-forge build makes it a fixed version here.
+            // conda-forge build makes it a fixed version here.
             match metadata.conda_publication {
-                CondaPublication::Published => fixes.push_same_ecosystem(&metadata.fix_version),
-                conda_publication => fixes.push_upstream(
-                    &metadata.fix_version,
-                    UpstreamOrigin::Project { conda_publication },
-                ),
+                CondaForgeBuild::Available => fixes.push_same_ecosystem(&metadata.fix_version),
+                conda_forge_build => {
+                    fixes.push_upstream_release(&metadata.fix_version, conda_forge_build)
+                }
             }
         }
     }
     // A version already reported as fixed in the package's own ecosystem is
-    // not additionally an "upstream" fix.
+    // not additionally a fix elsewhere.
     let same_ecosystem = &fixes.same_ecosystem;
     fixes
-        .upstream
+        .other_ecosystem
         .retain(|fix| !same_ecosystem.contains(&fix.version));
+    fixes
+        .upstream_releases
+        .retain(|release| !same_ecosystem.contains(&release.version));
     fixes
 }
 

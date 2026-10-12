@@ -1,21 +1,23 @@
 //! The default report: a grype-style status block, then a `pixi list`-style
-//! table with one row per finding, rendered with iocraft.
+//! table with one row per vulnerability match, rendered with iocraft.
 
 use std::io::{self, Write};
 
 use iocraft::prelude::*;
-use pixi_audit::{AuditPackage, AuditReport, Finding, FixStatus, MatchApplicability, SeverityBand};
+use pixi_audit::{
+    AuditPackage, AuditReport, FixAvailability, Match, MatchConfidence, SeverityRating,
+};
 use supports_hyperlinks::Stream;
 
 use super::{
     EXPLAIN_HINT, EXPLANATION_TERM_PALETTE_INDEX, ExplanationSection, Guidance, GuidanceOptions,
 };
 
-pub mod field;
+pub mod column;
 mod grid;
 
-pub use field::{DEFAULT_FIELDS, Field};
-use field::{RowContext, environments_cell, kind_cell, name_cell, severity_color};
+pub use column::{Column, DEFAULT_COLUMNS};
+use column::{RowContext, environments_cell, kind_cell, name_cell, severity_color};
 use grid::{Cell, grid};
 
 /// What the output stream can show.
@@ -41,18 +43,18 @@ impl OutputStyle {
     }
 }
 
-/// Which columns the findings tables show, and in what order the rows come.
+/// Which columns the vulnerability match tables show, and in what order the rows come.
 #[derive(Debug, Clone)]
 pub struct TableLayout {
-    pub fields: Vec<Field>,
-    pub sort_by: Field,
+    pub columns: Vec<Column>,
+    pub sort_by: Column,
 }
 
 impl Default for TableLayout {
     fn default() -> Self {
         Self {
-            fields: DEFAULT_FIELDS.to_vec(),
-            sort_by: Field::Risk,
+            columns: DEFAULT_COLUMNS.to_vec(),
+            sort_by: Column::Risk,
         }
     }
 }
@@ -62,13 +64,13 @@ impl Default for TableLayout {
 /// soft-wraps long rows, which loses alignment but never information.
 pub fn write_table(
     report: &AuditReport,
-    lockfile: &str,
+    lock_file: &str,
     style: OutputStyle,
     layout: &TableLayout,
     options: GuidanceOptions,
     out: impl Write,
 ) -> io::Result<()> {
-    let canvas = build(report, lockfile, style, layout, options).render(None);
+    let canvas = build(report, lock_file, style, layout, options).render(None);
     if style.color {
         canvas.write_ansi(out)
     } else {
@@ -78,10 +80,10 @@ pub fn write_table(
 
 /// Renders the report as unstyled text at natural width, for tests.
 #[cfg(test)]
-pub fn render_table(report: &AuditReport, lockfile: &str, layout: &TableLayout) -> String {
+pub fn render_table(report: &AuditReport, lock_file: &str, layout: &TableLayout) -> String {
     build(
         report,
-        lockfile,
+        lock_file,
         OutputStyle::default(),
         layout,
         GuidanceOptions::default(),
@@ -92,12 +94,12 @@ pub fn render_table(report: &AuditReport, lockfile: &str, layout: &TableLayout) 
 #[cfg(test)]
 pub fn render_table_explained(
     report: &AuditReport,
-    lockfile: &str,
+    lock_file: &str,
     layout: &TableLayout,
 ) -> String {
     build(
         report,
-        lockfile,
+        lock_file,
         OutputStyle::default(),
         layout,
         GuidanceOptions {
@@ -111,12 +113,12 @@ pub fn render_table_explained(
 #[cfg(test)]
 pub fn render_table_after_fix(
     report: &AuditReport,
-    lockfile: &str,
+    lock_file: &str,
     layout: &TableLayout,
 ) -> String {
     build(
         report,
-        lockfile,
+        lock_file,
         OutputStyle::default(),
         layout,
         GuidanceOptions {
@@ -129,7 +131,7 @@ pub fn render_table_after_fix(
 
 fn build(
     report: &AuditReport,
-    lockfile: &str,
+    lock_file: &str,
     style: OutputStyle,
     layout: &TableLayout,
     options: GuidanceOptions,
@@ -141,13 +143,13 @@ fn build(
         .explain
         .then(|| guidance.explanation_sections(report));
     let sections: Vec<AnyElement<'static>> = [
-        unchecked_table(&report.unchecked, style).map(|e| e.into_any()),
-        Some(status_block(report, lockfile).into_any()),
-        findings_table(&report.vulnerabilities, style, layout).map(|e| e.into_any()),
+        not_audited_table(&report.not_audited, style).map(|e| e.into_any()),
+        Some(status_block(report, lock_file).into_any()),
+        matches_table(&report.matches, style, layout).map(|e| e.into_any()),
         ignored_table(&report.ignored, style, layout).map(|e| e.into_any()),
         Some(summary_line(report).into_any()),
-        guidance_section("Assessment", assessment).map(|e| e.into_any()),
-        guidance_section("Next steps", next_steps).map(|e| e.into_any()),
+        guidance_section("Overview", assessment).map(|e| e.into_any()),
+        guidance_section("Recommendations", next_steps).map(|e| e.into_any()),
         (!options.explain)
             .then(|| element! { Text(content: EXPLAIN_HINT, weight: Weight::Light) }.into_any()),
         explanation
@@ -180,13 +182,13 @@ fn build(
 
 const LABEL_WIDTH: usize = 35;
 
-fn status_block(report: &AuditReport, lockfile: &str) -> Element<'static, View> {
+fn status_block(report: &AuditReport, lock_file: &str) -> Element<'static, View> {
     let summary = &report.summary;
     let packages = format!(
         "[{} packages audited{}]",
         summary.audited,
-        if summary.unchecked > 0 {
-            format!(", {} unchecked", summary.unchecked)
+        if summary.not_audited > 0 {
+            format!(", {} not audited", summary.not_audited)
         } else {
             String::new()
         }
@@ -197,18 +199,18 @@ fn status_block(report: &AuditReport, lockfile: &str) -> Element<'static, View> 
         n => format!("[{n} vulnerability matches]"),
     };
 
-    let by_severity = severity_counts(&report.vulnerabilities);
+    let by_severity = severity_counts(&report.matches);
     let fixed = report
-        .vulnerabilities
+        .matches
         .iter()
-        .filter(|f| f.fix_status() == FixStatus::Available)
+        .filter(|f| f.fix_availability() == FixAvailability::Available)
         .count();
-    let not_fixed = report.vulnerabilities.len() - fixed;
-    let weak_matches = weak_match_counts(&report.vulnerabilities);
+    let not_fixed = report.matches.len() - fixed;
+    let weak_matches = weak_confidence_counts(&report.matches);
 
     element! {
         View(flex_direction: FlexDirection::Column) {
-            #(status_line(format!("Audited {lockfile}"), packages))
+            #(status_line(format!("Audited {lock_file}"), packages))
             #(status_line("Scanned for vulnerabilities", matches))
             View {
                 Text(content: "  ├── by severity: ", weight: Weight::Light)
@@ -238,44 +240,44 @@ fn status_line(label: impl Into<String>, detail: String) -> Option<Element<'stat
 
 /// `, 1 unbounded, 2 unevaluated`: the matches basilisk could not pin to
 /// versions, listed only when there are any.
-fn weak_match_counts(findings: &[Finding]) -> String {
+fn weak_confidence_counts(matches: &[Match]) -> String {
     [
-        MatchApplicability::VersionUnbounded,
-        MatchApplicability::Unevaluated,
+        MatchConfidence::VersionUnbounded,
+        MatchConfidence::Unevaluated,
     ]
     .into_iter()
-    .filter_map(|applicability| {
-        let count = findings
+    .filter_map(|confidence| {
+        let count = matches
             .iter()
-            .filter(|f| f.applicability == applicability)
+            .filter(|m| m.match_confidence == confidence)
             .count();
         (count > 0).then(|| {
             format!(
                 ", {count} {}",
-                field::match_label(applicability).unwrap_or_default()
+                column::confidence_label(confidence).unwrap_or_default()
             )
         })
     })
     .collect()
 }
 
-/// `1 critical, 2 high, ...` with each non-zero count in its band's color.
+/// `1 critical, 2 high, ...` with each non-zero count in its rating's color.
 /// The whole line is dim, like the rest of the status tree.
-fn severity_counts(findings: &[Finding]) -> Vec<Element<'static, Text>> {
-    let bands = SeverityBand::ALL.iter().rev();
-    let last = SeverityBand::ALL.len() - 1;
-    bands
+fn severity_counts(matches: &[Match]) -> Vec<Element<'static, Text>> {
+    let ratings = SeverityRating::ALL.iter().rev();
+    let last = SeverityRating::ALL.len() - 1;
+    ratings
         .enumerate()
-        .map(|(i, band)| {
-            let count = findings.iter().filter(|f| f.severity == *band).count();
+        .map(|(i, rating)| {
+            let count = matches.iter().filter(|m| m.severity == *rating).count();
             let separator = if i == last { "" } else { ", " };
             let color = if count == 0 {
                 None
             } else {
-                severity_color(*band)
+                severity_color(*rating)
             };
             element! {
-                Text(content: format!("{count} {}{separator}", band.name()), color: color, weight: Weight::Light)
+                Text(content: format!("{count} {}{separator}", rating.name()), color: color, weight: Weight::Light)
             }
         })
         .collect()
@@ -285,76 +287,76 @@ fn severity_counts(findings: &[Finding]) -> Vec<Element<'static, Text>> {
 // Tables
 // ---------------------------------------------------------------------------
 
-/// Lays `findings` out under `fields`, sorted by `layout.sort_by`.
-fn findings_grid(
-    findings: &[Finding],
-    fields: &[Field],
+/// Lays `matches` out under `columns`, sorted by `layout.sort_by`.
+fn matches_grid(
+    matches: &[Match],
+    columns: &[Column],
     style: OutputStyle,
     layout: &TableLayout,
 ) -> Element<'static, View> {
-    let headers: Vec<&'static str> = fields.iter().flat_map(|field| field.headers()).collect();
-    let mut rows = Vec::with_capacity(findings.len());
-    let mut previous: Option<&Finding> = None;
-    for finding in field::sorted(findings, layout.sort_by) {
+    let headers: Vec<&'static str> = columns.iter().flat_map(|column| column.headers()).collect();
+    let mut rows = Vec::with_capacity(matches.len());
+    let mut previous: Option<&Match> = None;
+    for vuln_match in column::sorted(matches, layout.sort_by) {
         let context = RowContext {
-            repeated_package: previous.is_some_and(|p| p.package == finding.package),
+            repeated_package: previous.is_some_and(|p| p.package == vuln_match.package),
             hyperlinks: style.hyperlinks,
             color: style.color,
-            match_column: fields.contains(&Field::Match),
+            confidence_column: columns.contains(&Column::Confidence),
         };
         rows.push(
-            fields
+            columns
                 .iter()
-                .flat_map(|field| field.cells(finding, context))
+                .flat_map(|column| column.cells(vuln_match, context))
                 .collect(),
         );
-        previous = Some(finding);
+        previous = Some(vuln_match);
     }
     grid(&headers, rows)
 }
 
-fn findings_table(
-    findings: &[Finding],
+fn matches_table(
+    matches: &[Match],
     style: OutputStyle,
     layout: &TableLayout,
 ) -> Option<Element<'static, View>> {
-    if findings.is_empty() {
+    if matches.is_empty() {
         return None;
     }
-    Some(findings_grid(findings, &layout.fields, style, layout))
+    Some(matches_grid(matches, &layout.columns, style, layout))
 }
 
-/// Ignored findings under the same columns, plus why each one is ignored.
+/// Ignored vulnerability matches under the same columns, plus why each one is ignored.
 fn ignored_table(
-    ignored: &[Finding],
+    ignored: &[Match],
     style: OutputStyle,
     layout: &TableLayout,
 ) -> Option<Element<'static, View>> {
     if ignored.is_empty() {
         return None;
     }
-    let mut fields = layout.fields.clone();
-    if !fields.contains(&Field::Ignored) {
-        fields.push(Field::Ignored);
+    let mut columns = layout.columns.clone();
+    if !columns.contains(&Column::Ignored) {
+        columns.push(Column::Ignored);
     }
     Some(section(
         format!("Ignored ({})", ignored.len()),
-        findings_grid(ignored, &fields, style, layout),
+        matches_grid(ignored, &columns, style, layout),
     ))
 }
 
-fn unchecked_table(
-    unchecked: &[AuditPackage],
+fn not_audited_table(
+    not_audited: &[AuditPackage],
     style: OutputStyle,
 ) -> Option<Element<'static, View>> {
-    if unchecked.is_empty() {
+    if not_audited.is_empty() {
         return None;
     }
     let context = RowContext {
         color: style.color,
         ..Default::default()
     };
-    let rows = unchecked
+    let rows = not_audited
         .iter()
         .map(|package| {
             vec![
@@ -368,8 +370,8 @@ fn unchecked_table(
         .collect();
     Some(section(
         format!(
-            "Unchecked ({}) — no vulnerability database for these sources",
-            unchecked.len()
+            "Not audited ({}) — no vulnerability database for these sources",
+            not_audited.len()
         ),
         grid(&["", "Name", "Version", "Source", "Environments"], rows),
     ))
@@ -438,7 +440,7 @@ fn explanation_section(sections: Vec<ExplanationSection>) -> Option<Element<'sta
         .collect();
     Some(element! {
         View(flex_direction: FlexDirection::Column, gap: 1) {
-            Text(content: "How this report works", weight: Weight::Bold)
+            Text(content: "Definitions", weight: Weight::Bold)
             #(sections)
         }
     })
@@ -447,8 +449,8 @@ fn explanation_section(sections: Vec<ExplanationSection>) -> Option<Element<'sta
 fn summary_line(report: &AuditReport) -> Element<'static, View> {
     let summary = &report.summary;
     let details = format!(
-        " ({} audited, {} ignored, {} unchecked)",
-        summary.audited, summary.ignored, summary.unchecked
+        " ({} audited, {} ignored, {} not audited)",
+        summary.audited, summary.ignored, summary.not_audited
     );
     if summary.vulnerable == 0 {
         return element! {
@@ -459,7 +461,7 @@ fn summary_line(report: &AuditReport) -> Element<'static, View> {
         };
     }
     let mut packages: Vec<(&str, &str)> = report
-        .vulnerabilities
+        .matches
         .iter()
         .map(|f| (f.package.name.as_str(), f.package.version.as_str()))
         .collect();

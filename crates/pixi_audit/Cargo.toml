@@ -7,7 +7,7 @@ license.workspace = true
 name = "pixi_audit"
 readme.workspace = true
 repository.workspace = true
-version = "0.1.0"
+version = "0.2.0"
 
 [features]
 default = ["lock"]
@@ -15,12 +15,14 @@ default = ["lock"]
 lock = ["dep:rattler_lock"]
 
 [[example]]
-name = "audit_lockfile"
+name = "audit_lock_file"
 required-features = ["lock"]
 
 [dependencies]
 cvss = { workspace = true }
 futures = { workspace = true }
+jiff = { workspace = true }
+osv_client = { workspace = true }
 osv_protocol = { workspace = true }
 rattler_conda_types = { workspace = true }
 rattler_lock = { workspace = true, optional = true }
@@ -29,13 +31,16 @@ reqwest-middleware = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+threat_feeds = { workspace = true }
+toml = { workspace = true }
 url = { workspace = true }
 uv-normalize = { workspace = true }
 uv-pep440 = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http1", "tokio", "json"] }
-# TLS for the `audit_lockfile` example, which talks to the real API; library
+pixi_audit_test_support = { workspace = true }
+# TLS for the `audit_lock_file` example, which talks to the real API; library
 # consumers bring their own configured client.
 reqwest = { workspace = true, features = ["json", "rustls"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

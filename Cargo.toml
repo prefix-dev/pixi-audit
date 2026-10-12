@@ -13,16 +13,13 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 async-trait = "0.1"
-http = "1"
-# Temporary audience APIs from conda/rattler#2880; replace with a release.
-rattler = { git = "https://github.com/nichmor/rattler", rev = "d1c2712872687819e47d1855b753c1d4ba451148", features = ["cli-tools"] }
-rattler_networking = { git = "https://github.com/nichmor/rattler", rev = "d1c2712872687819e47d1855b753c1d4ba451148" }
 axum = "0.8"
 clap = "4.6"
 console = "0.16"
 cvss = "2.0"
 dirs = "6.0.0"
 futures = "0.3.31"
+http = "1"
 # Same crate pixi uses for HTTP caching. Its middleware is written against
 # crates.io's `reqwest-middleware`, which `[patch.crates-io]` below redirects
 # to the astral fork so the two share one `Middleware` trait.
@@ -34,14 +31,17 @@ http-cache-reqwest = { version = "1.0.0-alpha.8", default-features = false, feat
 iocraft = "0.8.5"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 miette = "7.6.0"
-osv_protocol = { path = "crates/osv_protocol", version = "0.1.0" }
-pixi_audit = { path = "crates/pixi_audit", version = "0.1.0" }
+osv_protocol = { path = "crates/osv_protocol", version = "0.2.0" }
+osv_client = { path = "crates/osv_client", version = "0.2.0" }
+pixi_audit_test_support = { path = "crates/pixi_audit_test_support" }
+pixi_audit = { path = "crates/pixi_audit", version = "0.2.0" }
 # Same version pixi pins, so the `LockFile` type identity unifies when pixi
 # consumes these crates. `rattler_conda_types` must be the version
 # `rattler_lock` depends on, so the `PackageName` inside a lock file is the
 # same type `pixi_audit` exposes.
 rattler_lock = { version = "0.31", default-features = false }
 rattler_conda_types = "0.48"
+rattler_networking = "0.34"
 # Same middleware crate pixi uses (its workspace renames `astral-reqwest-middleware`
 # to `reqwest-middleware`), so the `ClientWithMiddleware` type identity unifies
 # when pixi consumes these crates.
@@ -52,6 +52,7 @@ serde_json = "1.0.139"
 supports-hyperlinks = "3.2"
 tempfile = "3"
 thiserror = "2.0.12"
+threat_feeds = { path = "crates/threat_feeds", version = "0.2.0" }
 tokio = "1.43.0"
 toml = "1.0"
 toml_edit = "0.25"

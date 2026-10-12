@@ -5,7 +5,7 @@ use axum::{Json, Router, extract::Query, extract::State, routing::get};
 use url::Url;
 
 use super::*;
-use crate::test_support::spawn_router;
+use pixi_audit_test_support::{epss_router, spawn_router};
 
 fn client(base_url: Url) -> EpssClient {
     let http = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
@@ -77,14 +77,9 @@ async fn no_cves_means_no_request() {
 
 #[tokio::test]
 async fn numeric_scores_are_accepted_too() {
-    let app = Router::new().route(
-        "/data/v1/epss",
-        get(|| async {
-            Json(serde_json::json!({
-                "data": [{"cve": "CVE-2026-1", "epss": 0.5, "percentile": 0.75, "date": "2026-09-01"}]
-            }))
-        }),
-    );
+    let app = epss_router(vec![serde_json::json!({
+        "cve": "CVE-2026-1", "epss": 0.5, "percentile": 0.75, "date": "2026-09-01"
+    })]);
     let scores = client(spawn_router(app).await)
         .scores(&["CVE-2026-1".to_string()])
         .await
@@ -95,14 +90,9 @@ async fn numeric_scores_are_accepted_too() {
 
 #[tokio::test]
 async fn unparsable_scores_are_an_invalid_response() {
-    let app = Router::new().route(
-        "/data/v1/epss",
-        get(|| async {
-            Json(serde_json::json!({
-                "data": [{"cve": "CVE-2026-1", "epss": "high", "percentile": "0.75", "date": "2026-09-01"}]
-            }))
-        }),
-    );
+    let app = epss_router(vec![serde_json::json!({
+        "cve": "CVE-2026-1", "epss": "high", "percentile": "0.75", "date": "2026-09-01"
+    })]);
     let err = client(spawn_router(app).await)
         .scores(&["CVE-2026-1".to_string()])
         .await
@@ -123,15 +113,18 @@ async fn server_errors_are_reported() {
         .scores(&["CVE-2026-1".to_string()])
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("503"), "unexpected error: {err}");
+    assert!(matches!(
+        err,
+        ThreatFeedError::Status {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
 async fn base_url_with_deep_path_keeps_all_segments() {
-    let app = Router::new().route(
-        "/mirror/data/v1/epss",
-        get(|| async { Json(serde_json::json!({"data": []})) }),
-    );
+    let app = Router::new().nest("/mirror", epss_router(vec![]));
     let base = spawn_router(app).await.join("mirror").unwrap();
     let scores = client(base)
         .scores(&["CVE-2026-1".to_string()])

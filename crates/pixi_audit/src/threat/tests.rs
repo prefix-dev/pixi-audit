@@ -9,8 +9,8 @@ fn epss(probability: f64) -> Vec<EpssScore> {
     }]
 }
 
-fn kev(ransomware: RansomwareCampaignUse) -> Vec<KnownExploited> {
-    vec![KnownExploited {
+fn kev(ransomware: RansomwareCampaignUse) -> Vec<KevEntry> {
+    vec![KevEntry {
         cve: "CVE-2026-1".to_string(),
         vendor_project: "Vendor".to_string(),
         product: "Product".to_string(),
@@ -23,12 +23,7 @@ fn kev(ransomware: RansomwareCampaignUse) -> Vec<KnownExploited> {
     }]
 }
 
-fn risk(
-    severity: SeverityBand,
-    cvss: Option<f64>,
-    epss: &[EpssScore],
-    kev: &[KnownExploited],
-) -> f64 {
+fn risk(severity: SeverityRating, cvss: Option<f64>, epss: &[EpssScore], kev: &[KevEntry]) -> f64 {
     RiskScore::compute(severity, cvss, epss, kev).value()
 }
 
@@ -41,16 +36,16 @@ fn assert_close(actual: f64, expected: f64) {
 
 #[test]
 fn risk_is_epss_times_severity_scaled_to_100() {
-    // No CVSS: severity is the band midpoint alone. High = 7.5 / 10.
-    assert_close(risk(SeverityBand::High, None, &epss(0.5), &[]), 37.5);
-    // With CVSS: the mean of band midpoint and base score, both over 10.
+    // No CVSS: severity is the rating midpoint alone. High = 7.5 / 10.
+    assert_close(risk(SeverityRating::High, None, &epss(0.5), &[]), 37.5);
+    // With CVSS: the mean of rating midpoint and base score, both over 10.
     // Critical (9.0) and CVSS 9.8 => 0.94; times 0.5 => 47.0.
     assert_close(
-        risk(SeverityBand::Critical, Some(9.8), &epss(0.5), &[]),
+        risk(SeverityRating::Critical, Some(9.8), &epss(0.5), &[]),
         47.0,
     );
     // A zero base score is not a real score and is ignored.
-    assert_close(risk(SeverityBand::High, Some(0.0), &epss(0.5), &[]), 37.5);
+    assert_close(risk(SeverityRating::High, Some(0.0), &epss(0.5), &[]), 37.5);
 }
 
 #[test]
@@ -59,44 +54,47 @@ fn risk_uses_the_highest_epss_probability() {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    assert_close(risk(SeverityBand::High, None, &scores, &[]), 52.5);
+    assert_close(risk(SeverityRating::High, None, &scores, &[]), 52.5);
 
     let reversed = scores.into_iter().rev().collect::<Vec<_>>();
-    assert_close(risk(SeverityBand::High, None, &reversed, &[]), 52.5);
+    assert_close(risk(SeverityRating::High, None, &reversed, &[]), 52.5);
 }
 
 #[test]
 fn risk_without_threat_data_is_zero() {
-    assert_close(risk(SeverityBand::Critical, Some(9.8), &[], &[]), 0.0);
+    assert_close(risk(SeverityRating::Critical, Some(9.8), &[], &[]), 0.0);
     assert_eq!(
-        RiskScore::compute(SeverityBand::Critical, None, &[], &[]),
+        RiskScore::compute(SeverityRating::Critical, None, &[], &[]),
         RiskScore::NONE
     );
 }
 
 #[test]
 fn unknown_severity_sits_in_the_middle() {
-    assert_close(risk(SeverityBand::Unknown, None, &epss(1.0), &[]), 50.0);
-    assert_close(risk(SeverityBand::Low, None, &epss(1.0), &[]), 30.0);
-    assert_close(risk(SeverityBand::Medium, None, &epss(1.0), &[]), 50.0);
+    assert_close(risk(SeverityRating::Unknown, None, &epss(1.0), &[]), 50.0);
+    assert_close(risk(SeverityRating::Low, None, &epss(1.0), &[]), 30.0);
+    assert_close(risk(SeverityRating::Medium, None, &epss(1.0), &[]), 50.0);
 }
 
 #[test]
 fn kev_overrides_epss_and_boosts() {
     // Threat becomes 1.0 regardless of (even absent) EPSS, times 1.05.
     let listed = kev(RansomwareCampaignUse::Unknown);
-    assert_close(risk(SeverityBand::Medium, None, &[], &listed), 52.5);
-    assert_close(risk(SeverityBand::Medium, None, &epss(0.01), &listed), 52.5);
+    assert_close(risk(SeverityRating::Medium, None, &[], &listed), 52.5);
+    assert_close(
+        risk(SeverityRating::Medium, None, &epss(0.01), &listed),
+        52.5,
+    );
     // Ransomware use boosts by 1.1 instead.
     let ransomware = kev(RansomwareCampaignUse::Known);
-    assert_close(risk(SeverityBand::Medium, None, &[], &ransomware), 55.0);
+    assert_close(risk(SeverityRating::Medium, None, &[], &ransomware), 55.0);
 }
 
 #[test]
 fn risk_is_capped_at_100() {
     let ransomware = kev(RansomwareCampaignUse::Known);
     assert_close(
-        risk(SeverityBand::Critical, Some(10.0), &[], &ransomware),
+        risk(SeverityRating::Critical, Some(10.0), &[], &ransomware),
         100.0,
     );
 }
@@ -104,35 +102,15 @@ fn risk_is_capped_at_100() {
 #[test]
 fn risk_scores_order_totally() {
     let mut scores = [
-        RiskScore::compute(SeverityBand::Low, None, &epss(0.1), &[]),
+        RiskScore::compute(SeverityRating::Low, None, &epss(0.1), &[]),
         RiskScore::NONE,
-        RiskScore::compute(SeverityBand::Critical, None, &epss(0.9), &[]),
+        RiskScore::compute(SeverityRating::Critical, None, &epss(0.9), &[]),
     ];
     scores.sort();
     let values: Vec<f64> = scores.iter().map(|score| score.value()).collect();
     assert_close(values[0], 0.0);
     assert_close(values[1], 3.0);
     assert_close(values[2], 81.0);
-}
-
-#[test]
-fn ransomware_use_parses_case_insensitively() {
-    assert_eq!(
-        RansomwareCampaignUse::parse("Known"),
-        RansomwareCampaignUse::Known
-    );
-    assert_eq!(
-        RansomwareCampaignUse::parse(" known "),
-        RansomwareCampaignUse::Known
-    );
-    assert_eq!(
-        RansomwareCampaignUse::parse("Unknown"),
-        RansomwareCampaignUse::Unknown
-    );
-    assert_eq!(
-        RansomwareCampaignUse::parse(""),
-        RansomwareCampaignUse::Unknown
-    );
 }
 
 #[test]

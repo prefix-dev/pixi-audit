@@ -1,0 +1,54 @@
+[workspace]
+# pixi-audit ships as a Conda package, not on crates.io, so release-plz reads
+# the released version from git tags instead of a registry.
+git_only = true
+# Tag only when a release PR is merged. Other merges publish dev builds.
+release_always = false
+semver_check = false
+git_tag_name = "v{{ version }}"
+# Tags are opt-in per package. Only pixi_audit_cli gets a GitHub release and a changelog.
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+
+# The library crates ship inside the CLI. Sharing one version group makes a
+# change in any crate bump the CLI, so every user-visible change gets released.
+[[package]]
+name = "pixi_audit_cli"
+version_group = "pixi-audit"
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["pixi_audit", "osv_protocol", "osv_client", "threat_feeds"]
+
+[[package]]
+name = "pixi_audit"
+version_group = "pixi-audit"
+
+[[package]]
+name = "osv_protocol"
+version_group = "pixi-audit"
+
+# Crates added after v0.1.2 can't use the shared `v*` tag: release-plz checks
+# out the latest matching tag to compare against, and v0.1.2 predates them.
+# Their own tags don't match `v*`, so they don't start release.yaml.
+[[package]]
+name = "osv_client"
+version_group = "pixi-audit"
+git_tag_name = "{{ package }}-v{{ version }}"
+git_tag_enable = true
+
+[[package]]
+name = "threat_feeds"
+version_group = "pixi-audit"
+git_tag_name = "{{ package }}-v{{ version }}"
+git_tag_enable = true
+
+# Test-only: skip tag-baseline discovery as well as version updates and releases.
+# Disabling git-only mode also requires disabling its default registry publishing.
+[[package]]
+name = "pixi_audit_test_support"
+release = false
+git_only = false
+publish = false
