@@ -6,11 +6,9 @@ use std::{
 };
 
 use miette::IntoDiagnostic;
-use rattler_networking::{
-    Authentication, AuthenticationMiddleware, AuthenticationStorage, OfflineMiddleware,
-};
+use rattler_networking::{Authentication, AuthenticationMiddleware, AuthenticationStorage};
 use reqwest::{
-    Request, Response, StatusCode,
+    Request, Response,
     header::{AUTHORIZATION, HeaderValue},
 };
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
@@ -147,9 +145,9 @@ fn validate_base_url(base_url: &Url) -> miette::Result<()> {
 }
 
 /// Build a client with optional authentication, without initiating login.
-pub(super) fn build(offline: bool, base_url: &Url) -> miette::Result<ClientWithMiddleware> {
+pub(super) fn build(base_url: &Url) -> miette::Result<ClientWithMiddleware> {
     validate_base_url(base_url)?;
-    let storage = if token_transport_allowed(base_url) && !offline {
+    let storage = if token_transport_allowed(base_url) {
         match AuthenticationStorage::from_env_and_defaults() {
             Ok(storage) => Some(storage),
             Err(_) => {
@@ -160,15 +158,11 @@ pub(super) fn build(offline: bool, base_url: &Url) -> miette::Result<ClientWithM
     } else {
         None
     };
-    let token = if offline {
-        None
-    } else {
-        resolve_basilisk_token(
-            std::env::var(TOKEN_ENV_VAR).ok(),
-            storage.as_ref(),
-            base_url,
-        )?
-    };
+    let token = resolve_basilisk_token(
+        std::env::var(TOKEN_ENV_VAR).ok(),
+        storage.as_ref(),
+        base_url,
+    )?;
     if let Some((_, source)) = &token {
         let via = match source {
             TokenSource::Environment => TOKEN_ENV_VAR,
@@ -176,7 +170,7 @@ pub(super) fn build(offline: bool, base_url: &Url) -> miette::Result<ClientWithM
         };
         eprintln!("Auditing with the Basilisk API token from {via}");
     }
-    Ok(client_builder(offline, base_url, storage, token.map(|(token, _)| token))?.build())
+    Ok(client_builder(base_url, storage, token.map(|(token, _)| token))?.build())
 }
 
 fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) -> bool {
@@ -195,7 +189,7 @@ fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) 
                 if !warned.swap(true, Ordering::Relaxed) {
                     eprintln!(
                         "Warning: Saved prefix.dev login has no Basilisk audience or has an invalid token; \
-                         continuing anonymously. Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASILISK_URL}` to log in again."
+                         continuing anonymously. Run `pixi auth login` to log in again."
                     );
                 }
                 false
@@ -213,7 +207,6 @@ fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) 
 }
 
 fn client_builder(
-    offline: bool,
     base_url: &Url,
     storage: Option<AuthenticationStorage>,
     token: Option<BasiliskToken>,
@@ -225,28 +218,23 @@ fn client_builder(
         .build()
         .into_diagnostic()?;
     let mut builder = ClientBuilder::new(http);
-    if offline {
-        builder = builder.with(OfflineMiddleware);
-    } else if let Some(token) = token
+    if let Some(token) = token
         && token_transport_allowed(base_url)
     {
         builder = builder.with(BasiliskTokenMiddleware(token));
     } else if production_origin(base_url)
         && let Some(storage) = storage
     {
-        builder = builder
-            .with(SharedLogin {
-                authentication: AuthenticationMiddleware::from_auth_storage(storage.clone())
-                    .with_credentials_from(
-                        url::Host::Domain(CREDENTIAL_KEY.to_owned()),
-                        [base_url.origin()],
-                    ),
-                storage,
-                origin: base_url.origin(),
-                warned: AtomicBool::new(false),
-            })
-            // Retry after authentication to avoid reattaching credentials.
-            .with(AnonymousRetry::default());
+        builder = builder.with(SharedLogin {
+            authentication: AuthenticationMiddleware::from_auth_storage(storage.clone())
+                .with_credentials_from(
+                    url::Host::Domain(CREDENTIAL_KEY.to_owned()),
+                    [base_url.origin()],
+                ),
+            storage,
+            origin: base_url.origin(),
+            warned: AtomicBool::new(false),
+        });
     }
     Ok(builder)
 }
@@ -273,42 +261,6 @@ impl Middleware for SharedLogin {
             return next.run(request, extensions).await;
         }
         self.authentication.handle(request, extensions, next).await
-    }
-}
-
-/// Retry authenticated HTTP 401 responses once without credentials.
-#[derive(Default)]
-struct AnonymousRetry {
-    warned: AtomicBool,
-}
-
-#[async_trait::async_trait]
-impl Middleware for AnonymousRetry {
-    async fn handle(
-        &self,
-        request: Request,
-        extensions: &mut http::Extensions,
-        next: Next<'_>,
-    ) -> reqwest_middleware::Result<Response> {
-        let retry = request
-            .headers()
-            .contains_key(AUTHORIZATION)
-            .then(|| request.try_clone())
-            .flatten();
-        let response = next.clone().run(request, extensions).await?;
-        if response.status() == StatusCode::UNAUTHORIZED
-            && let Some(mut retry) = retry
-        {
-            if !self.warned.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "Warning: Basilisk rejected the saved login; retrying anonymously. \
-                     Run `pixi auth login prefix.dev --oauth-audience {DEFAULT_BASILISK_URL}` to log in again."
-                );
-            }
-            retry.headers_mut().remove(AUTHORIZATION);
-            return next.run(retry, extensions).await;
-        }
-        Ok(response)
     }
 }
 

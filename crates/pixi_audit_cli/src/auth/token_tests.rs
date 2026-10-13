@@ -1,5 +1,6 @@
 use super::*;
 use rattler_networking::authentication_storage::backends::memory::MemoryStorage;
+use reqwest::StatusCode;
 use std::sync::{Arc, Mutex};
 
 type Seen = Arc<Mutex<Vec<Option<String>>>>;
@@ -55,7 +56,7 @@ fn capture_client(
     let token = resolve_basilisk_token(env_token.map(str::to_owned), store.as_ref(), url)
         .unwrap()
         .map(|(token, _)| token);
-    let http = client_builder(false, url, store, token)
+    let http = client_builder(url, store, token)
         .unwrap()
         .with(Capture(seen.clone(), status))
         .build();
