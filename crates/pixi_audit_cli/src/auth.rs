@@ -7,7 +7,7 @@ use std::{
 
 use miette::IntoDiagnostic;
 use rattler_networking::{Authentication, AuthenticationMiddleware, AuthenticationStorage};
-use reqwest::{Request, Response, StatusCode, header::AUTHORIZATION};
+use reqwest::{Request, Response};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use url::Url;
 
@@ -101,19 +101,16 @@ fn client_builder(
     if production_origin(base_url)
         && let Some(storage) = storage
     {
-        builder = builder
-            .with(SharedLogin {
-                authentication: AuthenticationMiddleware::from_auth_storage(storage.clone())
-                    .with_credentials_from(
-                        url::Host::Domain(CREDENTIAL_KEY.to_owned()),
-                        [base_url.origin()],
-                    ),
-                storage,
-                origin: base_url.origin(),
-                warned: AtomicBool::new(false),
-            })
-            // Retry after authentication to avoid reattaching credentials.
-            .with(AnonymousRetry::default());
+        builder = builder.with(SharedLogin {
+            authentication: AuthenticationMiddleware::from_auth_storage(storage.clone())
+                .with_credentials_from(
+                    url::Host::Domain(CREDENTIAL_KEY.to_owned()),
+                    [base_url.origin()],
+                ),
+            storage,
+            origin: base_url.origin(),
+            warned: AtomicBool::new(false),
+        });
     }
     Ok(builder)
 }
@@ -140,42 +137,6 @@ impl Middleware for SharedLogin {
             return next.run(request, extensions).await;
         }
         self.authentication.handle(request, extensions, next).await
-    }
-}
-
-/// Retry authenticated HTTP 401 responses once without credentials.
-#[derive(Default)]
-struct AnonymousRetry {
-    warned: AtomicBool,
-}
-
-#[async_trait::async_trait]
-impl Middleware for AnonymousRetry {
-    async fn handle(
-        &self,
-        request: Request,
-        extensions: &mut http::Extensions,
-        next: Next<'_>,
-    ) -> reqwest_middleware::Result<Response> {
-        let retry = request
-            .headers()
-            .contains_key(AUTHORIZATION)
-            .then(|| request.try_clone())
-            .flatten();
-        let response = next.clone().run(request, extensions).await?;
-        if response.status() == StatusCode::UNAUTHORIZED
-            && let Some(mut retry) = retry
-        {
-            if !self.warned.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "Warning: Basilisk rejected the saved login; retrying anonymously. \
-                     Run `pixi auth login` to log in again."
-                );
-            }
-            retry.headers_mut().remove(AUTHORIZATION);
-            return next.run(retry, extensions).await;
-        }
-        Ok(response)
     }
 }
 

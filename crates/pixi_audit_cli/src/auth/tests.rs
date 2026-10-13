@@ -1,8 +1,9 @@
 use super::*;
 use rattler_networking::authentication_storage::backends::file::FileStorage;
+use reqwest::{StatusCode, header::AUTHORIZATION};
 use std::sync::{Arc, Mutex};
 
-struct Capture(Arc<Mutex<Option<Request>>>);
+struct Capture(Arc<Mutex<Option<Request>>>, StatusCode);
 
 #[async_trait::async_trait]
 impl Middleware for Capture {
@@ -12,9 +13,12 @@ impl Middleware for Capture {
         _extensions: &mut http::Extensions,
         _next: Next<'_>,
     ) -> reqwest_middleware::Result<Response> {
-        *self.0.lock().unwrap() = Some(request);
+        assert!(
+            self.0.lock().unwrap().replace(request).is_none(),
+            "unexpected retry"
+        );
         Ok(http::Response::builder()
-            .status(StatusCode::OK)
+            .status(self.1)
             .body("{}")
             .unwrap()
             .into())
@@ -45,19 +49,22 @@ async fn sends_saved_pixi_login_to_basilisk() {
     let mut audit_storage = AuthenticationStorage::empty();
     audit_storage.add_backend(Arc::new(FileStorage::from_path(path).unwrap()));
     let url = Url::parse(DEFAULT_BASILISK_URL).unwrap();
-    let captured = Arc::new(Mutex::new(None));
-    let client = client_builder(&url, Some(audit_storage))
-        .unwrap()
-        .with(Capture(captured.clone()))
-        .build();
+    for status in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
+        let captured = Arc::new(Mutex::new(None));
+        let client = client_builder(&url, Some(audit_storage.clone()))
+            .unwrap()
+            .with(Capture(captured.clone(), status))
+            .build();
 
-    client.post(url.clone()).send().await.unwrap();
+        let response = client.post(url.clone()).send().await.unwrap();
+        assert_eq!(response.status(), status);
 
-    let request = captured.lock().unwrap().take().unwrap();
-    assert_eq!(request.url(), &url);
-    assert_eq!(request.url().host_str(), Some("api.basilisk.prefix.dev"));
-    assert_eq!(
-        request.headers().get(AUTHORIZATION).unwrap(),
-        "Bearer fixture-pixi-access-token"
-    );
+        let request = captured.lock().unwrap().take().unwrap();
+        assert_eq!(request.url(), &url);
+        assert_eq!(request.url().host_str(), Some("api.basilisk.prefix.dev"));
+        assert_eq!(
+            request.headers().get(AUTHORIZATION).unwrap(),
+            "Bearer fixture-pixi-access-token"
+        );
+    }
 }
