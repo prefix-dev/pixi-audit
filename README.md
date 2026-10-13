@@ -35,30 +35,12 @@ pixi audit --environment production --platform linux-64
 
 ### Authenticate in CI with a Basilisk API token
 
-Auditing remains public and does not require login. Generate a user API token
-under **Settings → API tokens** on the Basilisk explorer and expose it as
-`PIXI_AUDIT_TOKEN`:
-
 ```yaml
 # GitHub Actions
 - run: pixi-audit
   env:
     PIXI_AUDIT_TOKEN: ${{ secrets.BASILISK_API_TOKEN }}
 ```
-
-The token is sent as `Authorization: Bearer` to the configured Basilisk origin
-only, never to OSV, EPSS, KEV, or package channels, and only over HTTPS (or
-local HTTP). A value that is not a Basilisk token (`bsk_` followed by 40
-alphanumeric characters) is an error rather than a silent anonymous audit.
-If the server rejects the token with HTTP 401, the audit fails instead of
-retrying anonymously.
-
-Outside CI, store the token with
-`pixi auth login api.basilisk.prefix.dev --token bsk_…`. Only a credential
-stored for the exact audit host with the token shape is used; wildcard
-`*.prefix.dev` channel credentials are never sent. `PIXI_AUDIT_TOKEN` takes
-precedence over a stored API token, and API tokens take precedence over the
-shared Pixi login.
 
 ### Ignore known vulnerability matches
 
