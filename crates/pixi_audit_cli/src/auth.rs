@@ -6,9 +6,7 @@ use std::{
 };
 
 use miette::IntoDiagnostic;
-use rattler_networking::{
-    Authentication, AuthenticationMiddleware, AuthenticationStorage, OfflineMiddleware,
-};
+use rattler_networking::{Authentication, AuthenticationMiddleware, AuthenticationStorage};
 use reqwest::{Request, Response, StatusCode, header::AUTHORIZATION};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use url::Url;
@@ -40,9 +38,9 @@ fn validate_base_url(base_url: &Url) -> miette::Result<()> {
 }
 
 /// Build a client with optional authentication, without initiating login.
-pub(super) fn build(offline: bool, base_url: &Url) -> miette::Result<ClientWithMiddleware> {
+pub(super) fn build(base_url: &Url) -> miette::Result<ClientWithMiddleware> {
     validate_base_url(base_url)?;
-    let storage = if production_origin(base_url) && !offline {
+    let storage = if production_origin(base_url) {
         match AuthenticationStorage::from_env_and_defaults() {
             Ok(storage) => Some(storage),
             Err(_) => {
@@ -53,7 +51,7 @@ pub(super) fn build(offline: bool, base_url: &Url) -> miette::Result<ClientWithM
     } else {
         None
     };
-    Ok(client_builder(offline, base_url, storage)?.build())
+    Ok(client_builder(base_url, storage)?.build())
 }
 
 fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) -> bool {
@@ -90,7 +88,6 @@ fn shared_login_available(storage: &AuthenticationStorage, warned: &AtomicBool) 
 }
 
 fn client_builder(
-    offline: bool,
     base_url: &Url,
     storage: Option<AuthenticationStorage>,
 ) -> miette::Result<ClientBuilder> {
@@ -101,9 +98,7 @@ fn client_builder(
         .build()
         .into_diagnostic()?;
     let mut builder = ClientBuilder::new(http);
-    if offline {
-        builder = builder.with(OfflineMiddleware);
-    } else if production_origin(base_url)
+    if production_origin(base_url)
         && let Some(storage) = storage
     {
         builder = builder

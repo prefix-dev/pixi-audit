@@ -46,7 +46,7 @@ async fn sends_saved_pixi_login_to_basilisk() {
     audit_storage.add_backend(Arc::new(FileStorage::from_path(path).unwrap()));
     let url = Url::parse(DEFAULT_BASILISK_URL).unwrap();
     let captured = Arc::new(Mutex::new(None));
-    let client = client_builder(false, &url, Some(audit_storage))
+    let client = client_builder(&url, Some(audit_storage))
         .unwrap()
         .with(Capture(captured.clone()))
         .build();

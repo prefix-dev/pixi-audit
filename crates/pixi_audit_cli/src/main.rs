@@ -69,10 +69,6 @@ struct Cli {
     /// current directory and its parents for a pixi workspace.
     lock_file: Option<PathBuf>,
 
-    /// Disable network access. Auditing requires online vulnerability data.
-    #[arg(long)]
-    offline: bool,
-
     /// Audit only this environment (repeatable)
     #[arg(long = "environment", value_name = "ENV")]
     environments: Vec<String>,
@@ -419,11 +415,6 @@ fn base_url_from_env(var: &str, default: &str) -> miette::Result<Url> {
 }
 
 async fn run(cli: Cli) -> miette::Result<RunOutcome> {
-    if cli.offline {
-        miette::bail!(
-            "Auditing requires online vulnerability data; network access is disabled by --offline"
-        );
-    }
     let targets = workspace::resolve_targets(cli.lock_file.clone())?;
     let config = match &targets.manifest {
         Some(manifest) => config::load_config(manifest)?,
@@ -449,7 +440,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let osv_url = base_url_from_env(OSV_URL_ENV_VAR, DEFAULT_OSV_URL)?;
     let epss_base_url = base_url_from_env(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?;
     let kev_url = base_url_from_env(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?;
-    let basilisk_http = auth::build(cli.offline, &base_url)?;
+    let basilisk_http = auth::build(&base_url)?;
     let audit_message = format!(
         "Auditing {} against {base_url} and {osv_url} ...",
         targets.lock_file.display()
