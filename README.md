@@ -200,8 +200,7 @@ Override service endpoints with these environment variables:
 | `PIXI_AUDIT_KEV_URL` | `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` |
 
 `PIXI_AUDIT_TOKEN`, or an API token stored for the custom host, can authenticate
-against a custom `PIXI_AUDIT_BASILISK_URL`. The shared production Pixi login is
-never forwarded to custom origins.
+against a custom `PIXI_AUDIT_BASILISK_URL`.
 
 Requests time out after 30 seconds. EPSS and KEV responses are cached in the Pixi cache directory.
 
