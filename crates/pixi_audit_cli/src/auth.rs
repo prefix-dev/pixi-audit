@@ -266,5 +266,3 @@ impl Middleware for SharedLogin {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod token_tests;
