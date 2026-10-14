@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
 issuer: https://token.actions.githubusercontent.com
 # GitHub puts the owner and repository IDs in the subject: <owner>@<id>/<repo>@<id>.
-subject: repo:prefix-dev@111356225/pixi_audit@1315956796:ref:refs/heads/main
+subject: repo:prefix-dev@111356225/pixi-audit@1315956796:ref:refs/heads/main
 
 permissions:
   contents: write

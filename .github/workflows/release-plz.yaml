@@ -10,7 +10,7 @@ permissions:
 jobs:
   release:
     name: Tag release
-    if: github.repository == 'prefix-dev/pixi_audit'
+    if: github.repository == 'prefix-dev/pixi-audit'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,7 +43,7 @@ jobs:
   release-pr:
     name: Update release PR
     needs: release
-    if: github.repository == 'prefix-dev/pixi_audit'
+    if: github.repository == 'prefix-dev/pixi-audit'
     runs-on: ubuntu-latest
     permissions:
       contents: read
