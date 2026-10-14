@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/prefix-dev/pixi-audit/compare/v0.2.0...v0.2.1) - 2026-10-14
+
+### Added
+
+- *(auth)* accept a Basilisk user API token for CI audits ([#43](https://github.com/prefix-dev/pixi-audit/pull/43))
+- *(auth)* reuse Pixi login for optional Basilisk authentication ([#40](https://github.com/prefix-dev/pixi-audit/pull/40))
+
+### Other
+
+- update README and RELEASING with new instructions ([#54](https://github.com/prefix-dev/pixi-audit/pull/54))
+
 ## [0.2.0](https://github.com/prefix-dev/pixi_audit/compare/v0.1.2...v0.2.0) - 2026-10-09
 
 ### Added
