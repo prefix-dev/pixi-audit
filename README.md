@@ -51,6 +51,15 @@ Limit the audit to an environment or platform:
 pixi audit --environment production --platform linux-64
 ```
 
+### Authenticate in CI with a Basilisk API token
+
+```yaml
+# GitHub Actions
+- run: pixi-audit
+  env:
+    PIXI_AUDIT_TOKEN: ${{ secrets.BASILISK_API_TOKEN }}
+```
+
 ### Ignore known vulnerability matches
 
 Ignore an advisory by ID or alias for one run:
@@ -208,6 +217,9 @@ Override service endpoints with these environment variables:
 | `PIXI_AUDIT_OSV_URL` | `https://api.osv.dev` |
 | `PIXI_AUDIT_EPSS_BASE_URL` | `https://api.first.org` |
 | `PIXI_AUDIT_KEV_URL` | `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` |
+
+`PIXI_AUDIT_TOKEN`, or an API token stored for the custom host, can authenticate
+against a custom `PIXI_AUDIT_BASILISK_URL`.
 
 Requests time out after 30 seconds. EPSS and KEV responses are cached in the Pixi cache directory.
 

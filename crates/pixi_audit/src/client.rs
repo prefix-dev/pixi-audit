@@ -6,7 +6,10 @@ use url::Url;
 mod basilisk;
 mod pypi;
 
-pub use basilisk::{BASILISK_URL_ENV_VAR, BasiliskClient, DEFAULT_BASILISK_URL};
+pub use basilisk::{
+    BASILISK_URL_ENV_VAR, BasiliskClient, DEFAULT_BASILISK_URL, TOKEN_ENV_VAR, TOKEN_LENGTH,
+    TOKEN_PREFIX, looks_like_basilisk_token,
+};
 pub use pypi::{DEFAULT_OSV_URL, OSV_URL_ENV_VAR, OsvDevClient};
 
 /// A failed request to a vulnerability database.

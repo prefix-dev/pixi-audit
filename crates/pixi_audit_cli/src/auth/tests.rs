@@ -26,6 +26,33 @@ impl Middleware for Capture {
 }
 
 #[tokio::test]
+async fn sends_api_token_to_basilisk() {
+    let url = Url::parse(DEFAULT_BASILISK_URL).unwrap();
+    let value = format!("bsk_{}", "A".repeat(40));
+    let (token, _) = resolve_basilisk_token(Some(value.clone()), None, &url)
+        .unwrap()
+        .unwrap();
+
+    for status in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
+        let captured = Arc::new(Mutex::new(None));
+        let client = client_builder(&url, None, Some(token.clone()))
+            .unwrap()
+            .with(Capture(captured.clone(), status))
+            .build();
+
+        let response = client.post(url.clone()).send().await.unwrap();
+        assert_eq!(response.status(), status);
+
+        let request = captured.lock().unwrap().take().unwrap();
+        assert_eq!(request.url(), &url);
+        assert_eq!(
+            request.headers().get(AUTHORIZATION).unwrap(),
+            format!("Bearer {value}").as_str()
+        );
+    }
+}
+
+#[tokio::test]
 async fn sends_saved_pixi_login_to_basilisk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("credentials.json");
@@ -51,7 +78,7 @@ async fn sends_saved_pixi_login_to_basilisk() {
     let url = Url::parse(DEFAULT_BASILISK_URL).unwrap();
     for status in [StatusCode::OK, StatusCode::UNAUTHORIZED] {
         let captured = Arc::new(Mutex::new(None));
-        let client = client_builder(&url, Some(audit_storage.clone()))
+        let client = client_builder(&url, Some(audit_storage.clone()), None)
             .unwrap()
             .with(Capture(captured.clone(), status))
             .build();

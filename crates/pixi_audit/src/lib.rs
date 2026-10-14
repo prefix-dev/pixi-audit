@@ -16,7 +16,8 @@ pub mod threat;
 pub use audit::audit;
 pub use client::{
     AuditError, BASILISK_URL_ENV_VAR, BasiliskClient, DEFAULT_BASILISK_URL, DEFAULT_OSV_URL,
-    OSV_URL_ENV_VAR, OsvDevClient,
+    OSV_URL_ENV_VAR, OsvDevClient, TOKEN_ENV_VAR, TOKEN_LENGTH, TOKEN_PREFIX,
+    looks_like_basilisk_token,
 };
 #[cfg(feature = "lock")]
 pub use lock::{LockFileAuditError, audit_lock_file, collect_packages};
