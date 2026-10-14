@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "osv_client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "astral-reqwest-middleware",
  "axum",
@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "osv_protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2492,7 +2492,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pixi_audit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "astral-reqwest-middleware",
  "axum",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "pixi_audit_cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "astral-reqwest-middleware",
  "async-trait",
@@ -3869,7 +3869,7 @@ dependencies = [
 
 [[package]]
 name = "threat_feeds"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "astral-reqwest-middleware",
  "axum",
