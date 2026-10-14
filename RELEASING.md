@@ -1,6 +1,6 @@
 # Releasing
 
-Dev builds and releases publish to `PREFIX_CHANNEL` (for example, `prefix-dev/prefix-labs`). Uploads start only after builds pass for `linux-64`, `osx-64`, `osx-arm64`, and `win-64`. Nothing goes to crates.io.
+Dev builds and releases publish to the channel set by `PREFIX_CHANNEL`. The public packages are on [prefix-labs](https://prefix.dev/channels/@prefix-dev/prefix-labs/packages/pixi-audit), whose channel path is `prefix-dev/prefix-labs`. Uploads start only after builds pass for `linux-64`, `osx-64`, `osx-arm64`, and `win-64`. Nothing goes to crates.io.
 
 ## Publish a release
 
@@ -8,7 +8,7 @@ Dev builds and releases publish to `PREFIX_CHANNEL` (for example, `prefix-dev/pr
 2. Review that PR and its CI results, then merge it when ready to ship.
 3. The **Tag release** job creates the tags and GitHub release. The `v<version>` tag starts the **Release** workflow, which publishes the packages.
 
-No local commands are needed. If the PR or tags are missing, check the **Update release PR** or **Tag release** job. Release-plz runs on pushes to `main`, with no **Run workflow** button.
+You do not need to run local commands. If the PR or tags are missing, check the **Update release PR** or **Tag release** job. Release-plz runs on pushes to `main`, with no **Run workflow** button.
 
 ## Dev builds
 
@@ -24,13 +24,13 @@ Release tags must match the CLI version and point to a commit on `main`. The wor
 
 ### Without a release PR
 
-Run `pixi exec release-plz update` in a Git checkout, review the version bumps and changelog, and merge them into `main`. Check out the merged commit and create all three tags, using the version from its manifests:
+Run `pixi exec release-plz update` in a Git checkout, review the version bumps and changelog, and merge them into `main`. Check out the merged commit and create all three tags, using the version from its manifests. For example, for version `0.2.0`:
 
 ```console
-git tag v0.1.3
-git tag osv_client-v0.1.3
-git tag threat_feeds-v0.1.3
-git push origin v0.1.3 osv_client-v0.1.3 threat_feeds-v0.1.3
+git tag v0.2.0
+git tag osv_client-v0.2.0
+git tag threat_feeds-v0.2.0
+git push origin v0.2.0 osv_client-v0.2.0 threat_feeds-v0.2.0
 ```
 
 ## Setup
