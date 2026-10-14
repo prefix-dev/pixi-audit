@@ -19,6 +19,7 @@ use reqwest_middleware::ClientWithMiddleware;
 use url::Url;
 
 mod annotations;
+mod auth;
 mod config;
 mod fix;
 mod ignore;
@@ -410,7 +411,7 @@ fn base_url_from_env(var: &str, default: &str) -> miette::Result<Url> {
     let raw = std::env::var(var).unwrap_or_else(|_| default.to_string());
     Url::parse(&raw)
         .into_diagnostic()
-        .wrap_err_with(|| format!("invalid {var} value '{raw}'"))
+        .wrap_err_with(|| format!("invalid {var} value"))
 }
 
 async fn run(cli: Cli) -> miette::Result<RunOutcome> {
@@ -439,6 +440,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let osv_url = base_url_from_env(OSV_URL_ENV_VAR, DEFAULT_OSV_URL)?;
     let epss_base_url = base_url_from_env(EPSS_BASE_URL_ENV_VAR, DEFAULT_EPSS_BASE_URL)?;
     let kev_url = base_url_from_env(KEV_URL_ENV_VAR, DEFAULT_KEV_URL)?;
+    let basilisk_http = auth::build(&base_url)?;
     let audit_message = format!(
         "Auditing {} against {base_url} and {osv_url} ...",
         targets.lock_file.display()
@@ -452,7 +454,7 @@ async fn run(cli: Cli) -> miette::Result<RunOutcome> {
     let http = reqwest_middleware::ClientBuilder::new(http_client.clone()).build();
     let threat_http = threat_http_client(http_client);
     let auditor = Auditor {
-        client: BasiliskClient::new(http.clone(), base_url),
+        client: BasiliskClient::new(basilisk_http, base_url),
         osv_client: OsvDevClient::new(http, osv_url),
         epss_client: EpssClient::new(threat_http.clone(), epss_base_url),
         kev_client: KevClient::new(threat_http, kev_url),

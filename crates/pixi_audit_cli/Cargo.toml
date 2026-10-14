@@ -16,15 +16,18 @@ name = "pixi-audit"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 console = { workspace = true }
 dirs = { workspace = true }
+http = { workspace = true }
 http-cache-reqwest = { workspace = true }
 iocraft = { workspace = true }
 jiff = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 pixi_audit = { workspace = true }
 rattler_conda_types = { workspace = true }
+rattler_networking = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 reqwest-middleware = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }

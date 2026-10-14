@@ -12,12 +12,14 @@ repository = "https://github.com/prefix-dev/pixi_audit"
 rust-version = "1.95"
 
 [workspace.dependencies]
+async-trait = "0.1"
 axum = "0.8"
 clap = "4.6"
 console = "0.16"
 cvss = "2.0"
 dirs = "6.0.0"
 futures = "0.3.31"
+http = "1"
 # Same crate pixi uses for HTTP caching. Its middleware is written against
 # crates.io's `reqwest-middleware`, which `[patch.crates-io]` below redirects
 # to the astral fork so the two share one `Middleware` trait.
@@ -39,6 +41,7 @@ pixi_audit = { path = "crates/pixi_audit", version = "0.2.0" }
 # same type `pixi_audit` exposes.
 rattler_lock = { version = "0.31", default-features = false }
 rattler_conda_types = "0.48"
+rattler_networking = "0.34"
 # Same middleware crate pixi uses (its workspace renames `astral-reqwest-middleware`
 # to `reqwest-middleware`), so the `ClientWithMiddleware` type identity unifies
 # when pixi consumes these crates.
