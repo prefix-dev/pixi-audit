@@ -1,0 +1,109 @@
+name: Build package
+
+# Builds and smoke-tests the pixi-audit Conda package for every published
+# platform. Called by CI for pull requests and by the release workflow, so
+# both build the same way. Each package is saved as a `package-<platform>`
+# artifact.
+
+on:
+  workflow_call:
+    inputs:
+      build-number:
+        description: Conda build number of the packages.
+        required: false
+        type: string
+        default: "0"
+      dev-sources:
+        description: Restore the `dev-sources` artifact with the dev version before building.
+        required: false
+        type: boolean
+        default: false
+      package-version:
+        description: Expected Conda package version; empty skips the check.
+        required: false
+        type: string
+        default: ""
+      cli-version:
+        description: Expected `pixi-audit --version` version; empty skips the check.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: linux-64
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
+          - runner: macos-15-intel
+            target: osx-64
+          - runner: macos-15
+            target: osx-arm64
+          - runner: windows-latest
+            target: win-64
+          - runner: windows-11-arm
+            target: win-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Restore dev sources
+        if: inputs.dev-sources
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dev-sources
+          path: .
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.81.0
+          run-install: false
+
+      - name: Build package
+        shell: bash
+        run: >-
+          pixi publish
+          --path pixi.toml
+          --target-platform ${{ matrix.target }}
+          --build-number ${{ inputs.build-number }}
+          --build-dir "$RUNNER_TEMP/pixi-build"
+          --target-dir dist
+          --clean
+
+      - name: Verify package
+        shell: bash
+        env:
+          EXPECTED_CLI_VERSION: ${{ inputs.cli-version }}
+          EXPECTED_VERSION: ${{ inputs.package-version }}
+        run: |
+          shopt -s nullglob
+          packages=(dist/*.conda)
+          if (( ${#packages[@]} != 1 )); then
+            echo "Expected one package, found ${#packages[@]}." >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_VERSION" && $(basename "${packages[0]}") != "pixi-audit-${EXPECTED_VERSION}-"*.conda ]]; then
+            echo "Package version does not match $EXPECTED_VERSION." >&2
+            exit 1
+          fi
+          ACTUAL_VERSION=$(pixi exec --spec "${packages[0]}" pixi-audit --version)
+          if [[ -n "$EXPECTED_CLI_VERSION" && "$ACTUAL_VERSION" != "pixi-audit $EXPECTED_CLI_VERSION" ]]; then
+            echo "Binary version $ACTUAL_VERSION does not match $EXPECTED_CLI_VERSION." >&2
+            exit 1
+          fi
+          echo "Built and tested ${packages[0]} ($ACTUAL_VERSION)"
+
+      - name: Save package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*.conda
+          if-no-files-found: error
+          retention-days: 1
