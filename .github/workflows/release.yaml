@@ -147,12 +147,16 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: linux-64
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
           - runner: macos-15-intel
             target: osx-64
           - runner: macos-15
             target: osx-arm64
           - runner: windows-latest
             target: win-64
+          - runner: windows-11-arm
+            target: win-arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -235,8 +239,8 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           packages=(dist/package-*/*.conda)
-          if (( ${#packages[@]} != 4 )); then
-            echo "Expected four packages, found ${#packages[@]}." >&2
+          if (( ${#packages[@]} != 6 )); then
+            echo "Expected six packages, found ${#packages[@]}." >&2
             exit 1
           fi
 

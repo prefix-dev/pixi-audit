@@ -1,6 +1,6 @@
 # Releasing
 
-Dev builds and releases publish to the channel set by `PREFIX_CHANNEL`. The public packages are on [prefix-labs](https://prefix.dev/channels/@prefix-dev/prefix-labs/packages/pixi-audit), whose channel path is `prefix-dev/prefix-labs`. Uploads start only after builds pass for `linux-64`, `osx-64`, `osx-arm64`, and `win-64`. Nothing goes to crates.io.
+Dev builds and releases publish to the channel set by `PREFIX_CHANNEL`. The public packages are on [prefix-labs](https://prefix.dev/channels/@prefix-dev/prefix-labs/packages/pixi-audit), whose channel path is `prefix-dev/prefix-labs`. Uploads start only after builds pass for `linux-64`, `linux-aarch64`, `osx-64`, `osx-arm64`, `win-64`, and `win-arm64`. Nothing goes to crates.io.
 
 ## Publish a release
 
