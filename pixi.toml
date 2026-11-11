@@ -1,6 +1,6 @@
 [workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+platforms = ["linux-64", "linux-aarch64", "osx-64", "osx-arm64", "win-64", "win-arm64"]
 preview = ["pixi-build"]
 
 [tasks]
@@ -28,10 +28,15 @@ name = "pixi-build-rust"
 
 [package.build.config]
 binaries = ["pixi-audit"]
-env = { CARGO_PROFILE_RELEASE_LTO = "thin", CARGO_PROFILE_RELEASE_STRIP = "symbols" }
+# aws-lc-sys needs clang-cl for aarch64-pc-windows-msvc. Its per-target CC takes
+# precedence over the `CC=cl.exe` set by the conda MSVC activation.
+env = { CARGO_PROFILE_RELEASE_LTO = "thin", CARGO_PROFILE_RELEASE_STRIP = "symbols", AWS_LC_SYS_CC_aarch64_pc_windows_msvc = "clang-cl" }
 
 [package.build-dependencies]
 rust = "1.95.*"
+
+[package.build-dependencies."if(host_platform == 'win-arm64')"]
+clang = "*"
 
 [dev]
 pixi-audit = { path = "." }
