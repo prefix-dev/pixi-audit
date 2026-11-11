@@ -77,28 +77,14 @@ jobs:
           --target-dir dist
           --clean
 
+      # --frozen: dev builds rewrite the package version in pixi.toml, which
+      # makes pixi.lock look stale even though the verify environment is unchanged.
       - name: Verify package
         shell: bash
         env:
           EXPECTED_CLI_VERSION: ${{ inputs.cli-version }}
           EXPECTED_VERSION: ${{ inputs.package-version }}
-        run: |
-          shopt -s nullglob
-          packages=(dist/*.conda)
-          if (( ${#packages[@]} != 1 )); then
-            echo "Expected one package, found ${#packages[@]}." >&2
-            exit 1
-          fi
-          if [[ -n "$EXPECTED_VERSION" && $(basename "${packages[0]}") != "pixi-audit-${EXPECTED_VERSION}-"*.conda ]]; then
-            echo "Package version does not match $EXPECTED_VERSION." >&2
-            exit 1
-          fi
-          ACTUAL_VERSION=$(pixi exec --spec "${packages[0]}" pixi-audit --version)
-          if [[ -n "$EXPECTED_CLI_VERSION" && "$ACTUAL_VERSION" != "pixi-audit $EXPECTED_CLI_VERSION" ]]; then
-            echo "Binary version $ACTUAL_VERSION does not match $EXPECTED_CLI_VERSION." >&2
-            exit 1
-          fi
-          echo "Built and tested ${packages[0]} ($ACTUAL_VERSION)"
+        run: pixi run --frozen -e verify verify-package dist "$EXPECTED_VERSION" "$EXPECTED_CLI_VERSION"
 
       - name: Save package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
