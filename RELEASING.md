@@ -51,6 +51,8 @@ Tagging runs before release-PR updates. Only PR updates share a concurrency grou
 
 CI runs `release-plz release --dry-run` and `release-plz update` with the same pinned action as the release workflow. These check release configuration and version/changelog generation before merging, using a read-only token. They do not publish, push tags, or open PRs.
 
+Pull requests also build and smoke-test the package on every platform with `build-package.yaml`, the same workflow the release uses. The packages are kept as `package-<platform>` artifacts for a day, so you can download and try a PR build.
+
 ## Attestations
 
 `pixi upload prefix --generate-attestation` signs each `.conda` package with a CEP-27 Sigstore attestation. prefix.dev stores it with the package and shows it on the package page, and Sigstore's transparency log records it. Search [search.sigstore.dev](https://search.sigstore.dev) for the package's SHA-256.

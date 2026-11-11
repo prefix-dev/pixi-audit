@@ -138,80 +138,14 @@ jobs:
           retention-days: 1
 
   build:
-    name: Build ${{ matrix.target }}
     needs: metadata
     if: needs.metadata.outputs.kind != 'skip'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            target: linux-64
-          - runner: ubuntu-24.04-arm
-            target: linux-aarch64
-          - runner: macos-15-intel
-            target: osx-64
-          - runner: macos-15
-            target: osx-arm64
-          - runner: windows-latest
-            target: win-64
-          - runner: windows-11-arm
-            target: win-arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Restore dev sources
-        if: needs.metadata.outputs.kind == 'dev'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: dev-sources
-          path: .
-      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
-        with:
-          pixi-version: v0.81.0
-          run-install: false
-
-      - name: Build package
-        shell: bash
-        run: >-
-          pixi publish
-          --path pixi.toml
-          --target-platform ${{ matrix.target }}
-          --build-number ${{ needs.metadata.outputs.build-number }}
-          --build-dir "$RUNNER_TEMP/pixi-build"
-          --target-dir dist
-          --clean
-
-      - name: Verify package
-        shell: bash
-        env:
-          EXPECTED_CLI_VERSION: ${{ needs.metadata.outputs.cli-version }}
-          EXPECTED_VERSION: ${{ needs.metadata.outputs.package-version }}
-        run: |
-          shopt -s nullglob
-          packages=(dist/*.conda)
-          if (( ${#packages[@]} != 1 )); then
-            echo "Expected one package, found ${#packages[@]}." >&2
-            exit 1
-          fi
-          if [[ $(basename "${packages[0]}") != "pixi-audit-${EXPECTED_VERSION}-"*.conda ]]; then
-            echo "Package version does not match $EXPECTED_VERSION." >&2
-            exit 1
-          fi
-          ACTUAL_VERSION=$(pixi exec --spec "${packages[0]}" pixi-audit --version)
-          if [[ "$ACTUAL_VERSION" != "pixi-audit $EXPECTED_CLI_VERSION" ]]; then
-            echo "Binary version $ACTUAL_VERSION does not match $EXPECTED_CLI_VERSION." >&2
-            exit 1
-          fi
-          echo "Built and tested ${packages[0]}"
-
-      - name: Save package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: package-${{ matrix.target }}
-          path: dist/*.conda
-          if-no-files-found: error
-          retention-days: 1
+    uses: ./.github/workflows/build-package.yaml
+    with:
+      build-number: ${{ needs.metadata.outputs.build-number }}
+      dev-sources: ${{ needs.metadata.outputs.kind == 'dev' }}
+      package-version: ${{ needs.metadata.outputs.package-version }}
+      cli-version: ${{ needs.metadata.outputs.cli-version }}
 
   publish:
     name: Publish to ${{ needs.metadata.outputs.channel }}

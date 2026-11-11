@@ -40,3 +40,16 @@ clang = "*"
 
 [dev]
 pixi-audit = { path = "." }
+
+# Checks a package built with `pixi publish`. Kept out of the default
+# environment so it doesn't build pixi-audit from source first.
+[feature.verify.dependencies]
+python = ">=3.12"
+
+[feature.verify.tasks.verify-package]
+cmd = "python scripts/verify_package.py '{{ dist }}' --package-version '{{ package_version }}' --cli-version '{{ cli_version }}'"
+args = ["dist", { arg = "package_version", default = "" }, { arg = "cli_version", default = "" }]
+description = "Check the version and binary of the package built into `dist`"
+
+[environments]
+verify = { features = ["verify"], no-default-feature = true }
