@@ -7,7 +7,7 @@ use crate::{
         CondaForgeBuild, MatchConfidence, MatchedIdentity, MatchedIdentityKind, OtherEcosystemFix,
         PackageName, UpstreamRelease,
     },
-    types::{OsvAffected, OsvVulnerability},
+    types::{OsvAffected, OsvSeverity, OsvVulnerability},
 };
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +168,44 @@ fn purl_key(purl: &str) -> String {
         .to_lowercase()
 }
 
+fn matching_affected<'a>(
+    doc: &'a OsvVulnerability,
+    package: &'a PackageName,
+    ecosystem: &'a str,
+    rule: CrossEcosystemRule,
+) -> impl Iterator<Item = (&'a OsvAffected, Option<&'a str>)> {
+    doc.affected.iter().filter_map(move |affected| {
+        let entry_name = affected.package.as_ref().and_then(|p| p.name.as_deref());
+        let other_ecosystem = affected
+            .package
+            .as_ref()
+            .and_then(|p| p.ecosystem.as_deref())
+            .filter(|entry| !entry.eq_ignore_ascii_case(ecosystem));
+        let accepted = match other_ecosystem {
+            // An entry naming no package applies to the queried one.
+            None => entry_name.is_none_or(|name| package.matches(name)),
+            Some(_) => rule.accepts(affected, package),
+        };
+        accepted.then_some((affected, other_ecosystem))
+    })
+}
+
+/// Document-wide severity plus severity belonging to the matched package.
+pub(crate) fn severities<'a>(
+    doc: &'a OsvVulnerability,
+    package: &'a PackageName,
+    ecosystem: &'a str,
+) -> impl Iterator<Item = &'a OsvSeverity> {
+    let rule = basilisk_match(doc, package, ecosystem)
+        .map_or(CrossEcosystemRule::Nothing, |matched| {
+            CrossEcosystemRule::for_match(Some(&matched))
+        });
+    doc.severity.iter().chain(
+        matching_affected(doc, package, ecosystem, rule)
+            .flat_map(|(affected, _)| affected.severity.iter()),
+    )
+}
+
 /// Fixed versions for one package from an OSV document, split by origin.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct FixedVersions {
@@ -240,17 +278,11 @@ fn release_fixed_events(affected: &OsvAffected) -> impl Iterator<Item = &str> {
 
 /// Fixed versions for `package` from an OSV document, split by origin.
 ///
-/// Standard OSV `fixed` events retain their generic behavior: entries in the
-/// queried ecosystem (or entries naming no package) are same-ecosystem fixes.
-/// Package names match under the ecosystem's own normalization, so an
-/// advisory spelling `ruamel.yaml` matches a PyPI query for `ruamel-yaml`.
+/// Entries in the queried ecosystem, or naming no package, contribute
+/// same-ecosystem fixes. Names use the ecosystem's normalization rules.
 ///
-/// Entries in other ecosystems contribute other-ecosystem fixes only when
-/// [`CrossEcosystemRule`] admits them: a same-name entry for plain OSV
-/// documents and for matches basilisk evaluated, the entry whose purl
-/// basilisk matched through when it recorded one, and nothing for a CPE
-/// match. Basilisk's own fix metadata is considered only for conda-forge
-/// queries on entries that explicitly match both the package and ecosystem.
+/// Cross-ecosystem fixes follow [`CrossEcosystemRule`]. Basilisk metadata applies
+/// only to conda-forge entries explicitly naming the queried package.
 pub(crate) fn fixed_versions(
     doc: &OsvVulnerability,
     package: &PackageName,
@@ -258,24 +290,7 @@ pub(crate) fn fixed_versions(
 ) -> FixedVersions {
     let rule = CrossEcosystemRule::for_match(basilisk_match(doc, package, ecosystem).as_ref());
     let mut fixes = FixedVersions::default();
-    for affected in &doc.affected {
-        let entry_name = affected.package.as_ref().and_then(|p| p.name.as_deref());
-        let entry_ecosystem = affected
-            .package
-            .as_ref()
-            .and_then(|p| p.ecosystem.as_deref());
-        let other_ecosystem =
-            entry_ecosystem.filter(|entry| !entry.eq_ignore_ascii_case(ecosystem));
-
-        let accepted = match other_ecosystem {
-            // An entry naming no package applies to the queried one.
-            None => entry_name.is_none_or(|name| package.matches(name)),
-            Some(_) => rule.accepts(affected, package),
-        };
-        if !accepted {
-            continue;
-        }
-
+    for (affected, other_ecosystem) in matching_affected(doc, package, ecosystem, rule) {
         for fixed in release_fixed_events(affected) {
             match other_ecosystem {
                 None => fixes.push_same_ecosystem(fixed),

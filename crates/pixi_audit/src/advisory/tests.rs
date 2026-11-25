@@ -429,6 +429,10 @@ fn pypi_names_match_under_pep_503_normalization() {
         "id": "PYSEC-2026-2",
         "affected": [{
             "package": {"ecosystem": "PyPI", "name": "Ruamel.YAML"},
+            "severity": [{
+                "type": "CVSS_V3",
+                "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+            }],
             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "0.18.7"}]}]
         }]
     }))
@@ -441,6 +445,10 @@ fn pypi_names_match_under_pep_503_normalization() {
     assert_eq!(fixed, vec!["0.18.7"]);
     assert!(other_ecosystem.is_empty());
     assert!(upstream_releases.is_empty());
+    assert_eq!(
+        severities(&doc, &pypi_name("ruamel_yaml"), "PyPI").count(),
+        1
+    );
 
     // Conda names only fold case; `ruamel.yaml` and `ruamel-yaml` differ.
     let FixedVersions {
@@ -448,6 +456,10 @@ fn pypi_names_match_under_pep_503_normalization() {
         ..
     } = fixed_versions(&doc, &conda_name("ruamel-yaml"), "PyPI");
     assert!(fixed.is_empty());
+    assert_eq!(
+        severities(&doc, &conda_name("ruamel-yaml"), "PyPI").count(),
+        0
+    );
 }
 
 fn on_npm(version: &str) -> OtherEcosystemFix {
@@ -527,6 +539,53 @@ fn libpq_shaped_doc(basilisk: serde_json::Value) -> OsvVulnerability {
         ]
     }))
     .unwrap()
+}
+
+#[test]
+fn affected_severity_respects_basilisk_package_identity() {
+    let critical = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H";
+    let medium = "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N";
+    for (metadata, expected) in [
+        (
+            serde_json::json!({
+                "applicability": "evaluated",
+                "matched_identity": {
+                    "kind": "purl",
+                    "value": "pkg:npm/pg-native@3.0.0?arch=x86"
+                }
+            }),
+            vec![critical],
+        ),
+        (
+            serde_json::json!({
+                "applicability": "evaluated",
+                "matched_identity": {
+                    "kind": "cpe",
+                    "value": "cpe:2.3:a:postgresql:libpq:*:*:*:*:*:*:*:*"
+                }
+            }),
+            vec![],
+        ),
+        (
+            serde_json::json!({"applicability": "evaluated"}),
+            vec![medium],
+        ),
+        (serde_json::json!({"applicability": "unevaluated"}), vec![]),
+    ] {
+        let mut doc = libpq_shaped_doc(metadata.clone());
+        for (affected, score) in doc.affected.iter_mut().zip([critical, medium]) {
+            affected.severity.push(OsvSeverity {
+                kind: "CVSS_V3".to_string(),
+                score: score.to_string(),
+                source: None,
+            });
+        }
+        let name = conda_name("libpq");
+        let scores: Vec<_> = severities(&doc, &name, "conda-forge")
+            .map(|severity| severity.score.as_str())
+            .collect();
+        assert_eq!(scores, expected, "metadata: {metadata}");
+    }
 }
 
 #[test]

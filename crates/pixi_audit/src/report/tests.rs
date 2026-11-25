@@ -153,6 +153,7 @@ fn severity(kind: &str, score: &str) -> crate::types::OsvSeverity {
     crate::types::OsvSeverity {
         kind: kind.to_string(),
         score: score.to_string(),
+        source: None,
     }
 }
 
@@ -271,4 +272,21 @@ fn label_channels_belong_to_their_channel() {
         PackageEcosystem::from_channel_url(Some("https://conda.anaconda.org/bioconda/label/main")),
         PackageEcosystem::Other("bioconda".to_string())
     );
+}
+
+#[test]
+fn unrelated_origins_are_not_conda_forge() {
+    for channel in [
+        "https://private.example/conda-forge",
+        "https://conda.anaconda.org.evil.example/conda-forge",
+        "https://prefix.dev/private/conda-forge",
+        "http://conda.anaconda.org/conda-forge",
+        "https://conda.anaconda.org:8443/conda-forge/label/main",
+    ] {
+        assert_eq!(
+            PackageEcosystem::from_channel_url(Some(channel)),
+            PackageEcosystem::Other("conda-forge".to_string()),
+            "{channel}"
+        );
+    }
 }

@@ -58,7 +58,6 @@ impl EpssClient {
 
 #[derive(Deserialize)]
 struct EpssResponse {
-    #[serde(default)]
     data: Vec<EpssRecord>,
 }
 

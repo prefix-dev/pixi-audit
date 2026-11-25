@@ -104,6 +104,39 @@ async fn unparsable_scores_are_an_invalid_response() {
 }
 
 #[tokio::test]
+async fn missing_data_is_an_invalid_response() {
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"message": "unrelated response"}),
+    ] {
+        let app = Router::new()
+            .route(
+                "/data/v1/epss",
+                get(|State(body): State<serde_json::Value>| async move { Json(body) }),
+            )
+            .with_state(body);
+        let err = client(spawn_router(app).await)
+            .scores(&["CVE-2026-1".to_string()])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ThreatFeedError::InvalidResponse { .. }),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_empty_data_is_accepted() {
+    let app = epss_router(vec![]);
+    let scores = client(spawn_router(app).await)
+        .scores(&["CVE-2026-1".to_string()])
+        .await
+        .unwrap();
+    assert!(scores.is_empty());
+}
+
+#[tokio::test]
 async fn server_errors_are_reported() {
     let app = Router::new().route(
         "/data/v1/epss",

@@ -11,7 +11,7 @@ use url::Url;
 use super::*;
 use crate::{
     CondaForgeBuild, IgnoreScope, MatchConfidence, MatchedIdentity, MatchedIdentityKind,
-    OtherEcosystemFix, UpstreamRelease,
+    OtherEcosystemFix, SeverityRating, UpstreamRelease,
 };
 use crate::{
     client::BasiliskClient,
@@ -514,6 +514,65 @@ fn plain_ignored_match_has_permanent_mode_and_it_serializes() {
     assert!(vuln_json.get("ignore_mode").is_none());
 }
 
+#[test]
+fn affected_package_severity_is_scored_without_top_level_severity() {
+    let mut doc = vuln_doc();
+    doc["affected"][0]["severity"] = doc.as_object_mut().unwrap().remove("severity").unwrap();
+    let report = assemble_fixture(doc, packages(), IgnoreSpec::default()).unwrap();
+    assert_eq!(report.matches.len(), 1);
+    assert_eq!(report.matches[0].severity, SeverityRating::Critical);
+    assert_eq!(report.matches[0].cvss_base_score, Some(9.8));
+}
+
+#[test]
+fn unrelated_affected_packages_do_not_contribute_severity() {
+    let mut doc = vuln_doc();
+    let critical = doc.as_object_mut().unwrap().remove("severity").unwrap();
+    doc["affected"][0]["severity"] = serde_json::json!([{
+        "type": "CVSS_V3",
+        "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N"
+    }]);
+    doc["affected"].as_array_mut().unwrap().extend([
+        serde_json::json!({
+            "package": {"ecosystem": "conda-forge", "name": "unrelated"},
+            "severity": critical
+        }),
+        serde_json::json!({
+            "package": {"ecosystem": "PyPI", "name": "unrelated"},
+            "severity": critical
+        }),
+    ]);
+    let report = assemble_fixture(doc, packages(), IgnoreSpec::default()).unwrap();
+    assert_eq!(report.matches[0].severity, SeverityRating::Medium);
+    assert_eq!(report.matches[0].cvss_base_score, Some(5.3));
+}
+
+#[test]
+fn top_level_and_matched_package_severity_are_combined() {
+    let mut doc = vuln_doc();
+    doc["affected"][0]["severity"] = serde_json::json!([{
+        "type": "CVSS_V3",
+        "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N"
+    }]);
+    let report = assemble_fixture(doc, packages(), IgnoreSpec::default()).unwrap();
+    assert_eq!(report.matches[0].severity, SeverityRating::Critical);
+    assert!((report.matches[0].cvss_base_score.unwrap() - 7.55).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn non_ascii_advisory_identifiers_do_not_break_cve_extraction() {
+    let mut doc = vuln_doc();
+    doc["id"] = serde_json::json!("ABCé-1");
+    doc["aliases"] = serde_json::json!(["ABCé-2", "cVe-2026-1234"]);
+    let base = spawn_mock_serving(doc).await;
+    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+        .await
+        .unwrap();
+    assert_eq!(report.matches.len(), 1);
+    assert_eq!(report.matches[0].id, "ABCé-1");
+    assert_eq!(report.matches[0].cve_ids(), ["CVE-2026-1234"]);
+}
+
 #[tokio::test]
 async fn audit_reports_match_and_not_audited() {
     let base = spawn_mock().await;
@@ -718,25 +777,33 @@ async fn spawn_broken_details_mock(status: axum::http::StatusCode) -> Url {
 }
 
 #[tokio::test]
-async fn missing_detail_document_degrades_to_id_only_match() {
-    // The querybatch index can briefly reference an id whose document is
-    // not yet served (404). The vulnerability match must still be reported — never
-    // dropped — just without severity/summary detail.
+async fn missing_detail_document_fails_the_audit_for_each_database() {
     let base = spawn_broken_details_mock(axum::http::StatusCode::NOT_FOUND).await;
-    let report = audit(&test_client(base), packages(), IgnoreSpec::default())
+    for ecosystem in [PackageEcosystem::CondaForge, PackageEcosystem::Pypi] {
+        let package = AuditPackage {
+            name: match ecosystem {
+                PackageEcosystem::Pypi => pypi_name("openssl"),
+                _ => conda_name("openssl"),
+            },
+            version: Some("3.1.0".to_string()),
+            ecosystem,
+            environments: vec!["default".to_string()],
+        };
+        let err = super::audit(
+            &test_client(base.clone()),
+            &test_osv_client(base.clone()),
+            vec![package],
+            IgnoreSpec::default(),
+            ThreatSources::default(),
+        )
         .await
-        .unwrap();
-
-    assert_eq!(report.matches.len(), 2);
-    let vuln_match = &report.matches[0];
-    assert_eq!(vuln_match.id, "BSLK-GONE");
-    assert_eq!(vuln_match.severity, SeverityRating::Unknown);
-    assert_eq!(vuln_match.summary, None);
-    assert!(vuln_match.fixed_versions.is_empty());
+        .unwrap_err();
+        assert!(err.to_string().contains("404"), "unexpected error: {err}");
+    }
 }
 
 #[tokio::test]
-async fn other_detail_fetch_errors_still_fail_the_audit() {
+async fn server_detail_fetch_errors_fail_the_audit() {
     let base = spawn_broken_details_mock(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
     let err = audit(&test_client(base), packages(), IgnoreSpec::default())
         .await

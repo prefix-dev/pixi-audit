@@ -9,7 +9,7 @@ homepage = "https://github.com/prefix-dev/pixi_audit"
 license = "BSD-3-Clause"
 readme = "README.md"
 repository = "https://github.com/prefix-dev/pixi_audit"
-rust-version = "1.95"
+rust-version = "1.98"
 
 [workspace.dependencies]
 async-trait = "0.1"
@@ -20,9 +20,6 @@ cvss = "2.0"
 dirs = "6.0.0"
 futures = "0.3.31"
 http = "1"
-# Same crate pixi uses for HTTP caching. Its middleware is written against
-# crates.io's `reqwest-middleware`, which `[patch.crates-io]` below redirects
-# to the astral fork so the two share one `Middleware` trait.
 http-cache-reqwest = { version = "1.0.0-alpha.8", default-features = false, features = [
   "manager-cacache",
   "reqwest-middleware",
@@ -35,15 +32,10 @@ osv_protocol = { path = "crates/osv_protocol", version = "0.2.2" }
 osv_client = { path = "crates/osv_client", version = "0.2.2" }
 pixi_audit_test_support = { path = "crates/pixi_audit_test_support" }
 pixi_audit = { path = "crates/pixi_audit", version = "0.2.2" }
-# Keep these versions aligned with pixi for a shared `LockFile` type.
-# `rattler_conda_types` must match the version `rattler_lock` depends on,
-# so the `PackageName` inside a lock file is the same type `pixi_audit` exposes.
-rattler_lock = { version = "0.34", default-features = false }
-rattler_conda_types = "0.57"
+# Public package types must match Pixi and rattler_lock.
+rattler_lock = { version = "0.34.15", default-features = false }
+rattler_conda_types = "0.58"
 rattler_networking = "0.34"
-# Same middleware crate pixi uses (its workspace renames `astral-reqwest-middleware`
-# to `reqwest-middleware`), so the `ClientWithMiddleware` type identity unifies
-# when pixi consumes these crates.
 reqwest = { version = "0.13", default-features = false }
 reqwest-middleware = { package = "astral-reqwest-middleware", version = "0.5" }
 serde = "1.0.218"
@@ -56,11 +48,9 @@ tokio = "1.43.0"
 toml = "1.0"
 toml_edit = "0.25"
 url = "2.5"
-uv-normalize = "0.0.67"
-uv-pep440 = "0.0.67"
+uv-normalize = "0.0.99"
+uv-pep440 = "0.0.99"
 
 [patch.crates-io]
-# Redirect crates.io's `reqwest-middleware` to a shim that re-exports
-# `astral-reqwest-middleware`, so `http-cache-reqwest`'s middleware plugs
-# into the same `ClientWithMiddleware` the rest of the workspace uses.
+# Unify http-cache-reqwest's middleware trait with Astral's fork.
 reqwest-middleware = { path = "patches/reqwest_middleware_shim" }

@@ -14,19 +14,17 @@ use matches::MatchGroups;
 use crate::{
     advisory::{
         BasiliskMatch, FixedVersions, basilisk_advisory_url, basilisk_match, fixed_versions,
-        pypi_advisory_url,
+        pypi_advisory_url, severities,
     },
     client::{AuditError, BasiliskClient, OsvDevClient},
     report::{
         AuditPackage, AuditReport, FixAvailability, IgnoreMode, IgnoreRule, IgnoreSpec, Match,
-        MatchConfidence, PackageEcosystem, PackageId, SeverityRating, SortKey,
-        mean_cvss_base_score,
+        MatchConfidence, PackageEcosystem, PackageId, SortKey, severity_summary,
     },
     threat::{RiskScore, ThreatDataStatus, ThreatSourceStatus, ThreatSources},
     types::{BatchResult, OsvQuery, OsvVulnerability, QueryPackage},
 };
 
-/// How many `GET /v1/vulns/{id}` requests to keep in flight.
 const MAX_CONCURRENT_DETAIL_FETCHES: usize = 16;
 
 /// The vulnerability database a package is checked against, together with
@@ -45,22 +43,12 @@ enum Database {
 impl Database {
     const ALL: [Database; 2] = [Database::Basilisk, Database::Pypi];
 
-    /// The database that answers for `ecosystem`, if any.
     fn for_ecosystem(ecosystem: &PackageEcosystem) -> Option<Self> {
         match ecosystem {
             PackageEcosystem::CondaForge => Some(Database::Basilisk),
             PackageEcosystem::Pypi => Some(Database::Pypi),
-            // No database answers for other channels or source packages.
             PackageEcosystem::Other(_) => None,
         }
-    }
-
-    /// Basilisk's batch index can briefly reference an id whose document
-    /// is not served yet, so a 404 degrades to an id-only vulnerability match with
-    /// unknown severity. Any other failure, and any PyPI failure, aborts
-    /// the audit: a security audit must never silently drop vulnerability matches.
-    fn tolerates_missing_document(self) -> bool {
-        matches!(self, Database::Basilisk)
     }
 
     fn summary(self, doc: &OsvVulnerability) -> Option<String> {
@@ -111,7 +99,6 @@ impl Database {
     }
 }
 
-/// The clients behind each [`Database`].
 struct Databases<'a> {
     basilisk: &'a BasiliskClient,
     pypi: &'a OsvDevClient,
@@ -126,9 +113,7 @@ impl Databases<'_> {
     }
 }
 
-/// A package that will be queried, with the exact identity sent to its
-/// database. Only packages with a version in a supported ecosystem are
-/// planned; everything else is reported as not audited.
+/// A versioned package in a supported ecosystem, with its database query identity.
 struct PlannedQuery<'a> {
     package: &'a AuditPackage,
     database: Database,
@@ -152,9 +137,7 @@ impl PlannedQuery<'_> {
     }
 }
 
-/// Decides whether and how `package` is queried. A version-less package is
-/// never queried: a version-less OSV query matches every version ever
-/// affected.
+/// Versionless OSV queries match every affected version, so they are never sent.
 fn plan_query(package: &AuditPackage) -> Option<PlannedQuery<'_>> {
     let version = package.version.clone()?;
     let database = Database::for_ecosystem(&package.ecosystem)?;
@@ -212,20 +195,8 @@ async fn fetch_documents(
 ) -> Result<HashMap<(Database, String), OsvVulnerability>, AuditError> {
     futures::stream::iter(references)
         .map(|(database, id)| async move {
-            match databases.client(database).get_vuln(&id).await {
-                Ok(doc) => Ok(((database, id), doc)),
-                Err(osv_client::Error::Status { status, .. })
-                    if database.tolerates_missing_document()
-                        && status == reqwest::StatusCode::NOT_FOUND =>
-                {
-                    let doc = OsvVulnerability {
-                        id: id.clone(),
-                        ..Default::default()
-                    };
-                    Ok(((database, id), doc))
-                }
-                Err(err) => Err(err.into()),
-            }
+            let doc = databases.client(database).get_vuln(&id).await?;
+            Ok::<_, AuditError>(((database, id), doc))
         })
         .buffer_unordered(MAX_CONCURRENT_DETAIL_FETCHES)
         .try_collect()
@@ -236,13 +207,9 @@ async fn fetch_documents(
 /// (vulnerability ids or aliases, case-insensitive), and attaches EPSS and
 /// KEV data from `threat` to every vulnerability match.
 ///
-/// There is deliberately no partial-report mode: any request failure aborts
-/// the audit as a whole. See [`Database::tolerates_missing_document`] for the
-/// one exception.
-///
-/// Threat data only ranks vulnerability matches, so it degrades instead: a source that
-/// cannot be fetched is recorded in the report's [`ThreatDataStatus`] and
-/// the vulnerability matches are reported without it.
+/// A failed vulnerability lookup aborts the audit without a partial report.
+/// Threat-feed failures only disable that source's ranking data and are recorded
+/// in [`ThreatDataStatus`].
 pub async fn audit(
     client: &BasiliskClient,
     osv_client: &OsvDevClient,
@@ -296,7 +263,6 @@ pub async fn audit(
     Ok(report)
 }
 
-/// Assembles vulnerability matches and ignores after all database documents are fetched.
 fn assemble_report(
     planned: &[PlannedQuery<'_>],
     results: &[BatchResult],
@@ -319,13 +285,18 @@ fn assemble_report(
             }
             let fixes = query.database.fixed_versions(doc, package);
             let basilisk_match = query.database.basilisk_match(doc, package);
+            let (severity, cvss_base_score) = severity_summary(severities(
+                doc,
+                &package.name,
+                package.ecosystem.osv_ecosystem(),
+            ));
             let vuln_match = Match {
                 package: query.id.clone(),
                 environments: package.environments.clone(),
                 id: doc.id.clone(),
                 aliases: doc.aliases.clone(),
-                severity: SeverityRating::from_severities(&doc.severity),
-                cvss_base_score: mean_cvss_base_score(&doc.severity),
+                severity,
+                cvss_base_score,
                 fixed_versions: fixes.same_ecosystem,
                 other_ecosystem_fixes: fixes.other_ecosystem,
                 upstream_releases: fixes.upstream_releases,
