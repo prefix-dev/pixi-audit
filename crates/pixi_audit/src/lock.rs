@@ -23,11 +23,8 @@ pub enum LockFileAuditError {
     /// silently produce a clean-looking audit.
     #[error("the lock file contains no environment named '{name}'")]
     UnknownEnvironment { name: String },
-    /// A filter named a platform no selected environment contains.
     #[error("the selected environments contain no platform named '{name}'")]
     UnknownPlatform { name: String },
-    /// A locked package name that its own ecosystem rejects. Lock files
-    /// written by pixi never contain one.
     #[error(transparent)]
     InvalidPackageName(#[from] InvalidPackageName),
     #[error(transparent)]
@@ -71,9 +68,7 @@ pub fn collect_packages(
         }
     }
 
-    // (name, version, ecosystem) -> environment names. Keyed on the enum, so
-    // e.g. a hypothetical channel literally named "PyPI" cannot collide with
-    // the real PyPI ecosystem.
+    // Preserve ecosystem identity even when a channel name matches an OSV ecosystem.
     type DedupKey = (PackageName, Option<String>, PackageEcosystem);
     let mut dedup: BTreeMap<DedupKey, BTreeSet<String>> = BTreeMap::new();
 
@@ -101,7 +96,18 @@ pub fn collect_packages(
                     LockedPackage::Pypi(pypi) => (
                         PackageName::pypi(pypi.name().as_ref())?,
                         pypi.version().map(ToString::to_string),
-                        PackageEcosystem::Pypi,
+                        match pypi.location().inner().as_url() {
+                            Some(url)
+                                if pypi.as_wheel().is_some()
+                                    && url.scheme() == "https"
+                                    && url.host_str() == Some("files.pythonhosted.org")
+                                    && url.port_or_known_default() == Some(443)
+                                    && url.path().starts_with("/packages/") =>
+                            {
+                                PackageEcosystem::Pypi
+                            }
+                            _ => PackageEcosystem::Other("non-PyPI source".to_string()),
+                        },
                     ),
                 };
                 dedup
@@ -144,9 +150,6 @@ mod tests {
     use super::*;
     use crate::test_support::{basilisk_client, osv_client as test_osv_client, spawn_router};
 
-    /// A small but realistic lock file: two environments sharing an openssl
-    /// build from conda-forge, plus a bioconda package and a PyPI wheel in
-    /// `default` only.
     const FIXTURE: &str = r#"version: 6
 environments:
   default:
@@ -203,8 +206,6 @@ packages:
             .iter()
             .filter(|p| p.name.as_str() == "openssl")
             .collect();
-        // Same (name, version, ecosystem) across platforms and environments
-        // collapses into one entry listing both environments.
         assert_eq!(openssl.len(), 1);
         assert_eq!(openssl[0].version.as_deref(), Some("3.1.0"));
         assert_eq!(openssl[0].ecosystem, PackageEcosystem::CondaForge);
@@ -231,6 +232,32 @@ packages:
     }
 
     #[test]
+    fn non_public_python_sources_are_not_pypi() {
+        let public_url = "https://files.pythonhosted.org/packages/py3/r/requests/requests-2.32.0-py3-none-any.whl";
+        for source in [
+            "https://private.example/requests-2.32.0-py3-none-any.whl",
+            "https://files.pythonhosted.org.evil.example/packages/requests.whl",
+            "http://files.pythonhosted.org/packages/requests.whl",
+            "https://files.pythonhosted.org:8443/packages/requests.whl",
+            "git+https://github.com/example/requests.git#1234567890123456789012345678901234567890",
+            "./requests",
+        ] {
+            let contents = FIXTURE.replace(public_url, source);
+            let lock = LockFile::from_str_with_base_directory(&contents, None).unwrap();
+            let packages = collect_packages(&lock, &[], &[]).unwrap();
+            let requests = packages
+                .iter()
+                .find(|package| package.name.as_str() == "requests")
+                .unwrap();
+            assert_eq!(
+                requests.ecosystem,
+                PackageEcosystem::Other("non-PyPI source".to_string()),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn environment_filter_limits_collection() {
         let packages = collect_packages(&fixture(), &["prod".to_string()], &[]).unwrap();
         assert_eq!(packages.len(), 1);
@@ -248,8 +275,6 @@ packages:
 
     #[test]
     fn unknown_environment_filter_is_an_error() {
-        // A misspelled environment must not silently produce an empty (i.e.
-        // clean-looking) audit.
         let err = collect_packages(&fixture(), &["pord".to_string()], &[]).unwrap_err();
         assert!(
             matches!(&err, LockFileAuditError::UnknownEnvironment { name } if name == "pord"),
@@ -287,8 +312,6 @@ packages:
         assert!(matches!(err, LockFileAuditError::EmptyLockFile));
     }
 
-    /// End to end: lock file in, audit report out, against a mock server
-    /// where openssl 3.1.0 has one advisory and everything else is clean.
     #[tokio::test]
     async fn audits_a_lock_file_end_to_end() {
         use axum::{

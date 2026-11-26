@@ -40,7 +40,10 @@ impl PackageEcosystem {
         let channel = trimmed
             .rsplit_once("/label/")
             .map_or(trimmed, |(channel, _label)| channel);
-        if channel.ends_with("/conda-forge") {
+        if matches!(
+            channel,
+            "https://conda.anaconda.org/conda-forge" | "https://prefix.dev/conda-forge"
+        ) {
             PackageEcosystem::CondaForge
         } else {
             let name = channel.rsplit('/').next().unwrap_or("unknown");
@@ -76,10 +79,6 @@ impl Serialize for PackageEcosystem {
 ///
 /// Versions from different ecosystems are incomparable. No total ordering is
 /// defined: callers must handle `partial_cmp` returning `None`.
-///
-/// Parsing is explicit so callers can reuse a parsed value across comparisons.
-/// This type does not change the string representation of versions in reports
-/// or manifests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackageVersion {
     Conda(rattler_conda_types::Version),
@@ -289,17 +288,7 @@ impl SeverityRating {
     /// `CVSS_V3.1` (OSV and NVD sources), `CVSS_V4`, and `CVSS_V2.0`.
     /// Ratings follow basilisk: critical >= 9.0, high >= 7.0, medium >= 4.0.
     pub fn from_severities(severities: &[OsvSeverity]) -> Self {
-        severities
-            .iter()
-            .filter_map(parse_base_score)
-            .map(|(version, score)| match version {
-                CvssVersion::V3 | CvssVersion::V4 => Self::from_score(score),
-                // CVSS v2's qualitative scale has no critical rating
-                // (high is 7.0-10.0), so cap the mapping there.
-                CvssVersion::V2 => Self::from_score(score).min(SeverityRating::High),
-            })
-            .max()
-            .unwrap_or(SeverityRating::Unknown)
+        severity_summary(severities).0
     }
 
     fn from_score(score: f64) -> Self {
@@ -336,21 +325,30 @@ fn parse_base_score(severity: &OsvSeverity) -> Option<(CvssVersion, f64)> {
     }
 }
 
-/// The mean CVSS base score across the entries whose vectors parse, or
-/// `None` when there is none. A zero score is not a valid base score and
-/// is left out so it cannot drag the mean down.
+/// Mean positive CVSS base score, or `None` if no positive score parses.
 pub fn mean_cvss_base_score(severities: &[OsvSeverity]) -> Option<f64> {
-    let scores: Vec<f64> = severities
-        .iter()
-        .filter_map(parse_base_score)
-        .map(|(_, score)| score)
-        .filter(|score| *score > 0.0)
-        .collect();
-    if scores.is_empty() {
-        None
-    } else {
-        Some(scores.iter().sum::<f64>() / scores.len() as f64)
+    severity_summary(severities).1
+}
+
+pub(crate) fn severity_summary<'a>(
+    severities: impl IntoIterator<Item = &'a OsvSeverity>,
+) -> (SeverityRating, Option<f64>) {
+    let mut rating = SeverityRating::Unknown;
+    let mut total = 0.0;
+    let mut count = 0;
+    for (version, score) in severities.into_iter().filter_map(parse_base_score) {
+        let entry_rating = match version {
+            CvssVersion::V3 | CvssVersion::V4 => SeverityRating::from_score(score),
+            // CVSS v2's qualitative scale has no critical rating.
+            CvssVersion::V2 => SeverityRating::from_score(score).min(SeverityRating::High),
+        };
+        rating = rating.max(entry_rating);
+        if score > 0.0 {
+            total += score;
+            count += 1;
+        }
     }
+    (rating, (count > 0).then(|| total / f64::from(count)))
 }
 
 impl std::fmt::Display for SeverityRating {
@@ -759,7 +757,7 @@ impl Match {
     pub fn cve_ids(&self) -> Vec<String> {
         let mut cves: Vec<String> = std::iter::once(&self.id)
             .chain(&self.aliases)
-            .filter(|id| id.len() > 4 && id[..4].eq_ignore_ascii_case("CVE-"))
+            .filter(|id| id.len() > 4 && id.as_bytes()[..4].eq_ignore_ascii_case(b"CVE-"))
             .map(|id| id.to_ascii_uppercase())
             .collect();
         cves.sort();

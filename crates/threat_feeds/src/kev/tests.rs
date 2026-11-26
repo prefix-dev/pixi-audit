@@ -115,3 +115,28 @@ async fn malformed_feed_is_an_invalid_response() {
         "unexpected error: {err}"
     );
 }
+
+#[tokio::test]
+async fn missing_vulnerabilities_is_an_invalid_response() {
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({"message": "unrelated response"}),
+    ] {
+        let app = kev_router(body);
+        let url = spawn_router(app).await.join("kev.json").unwrap();
+        let err = client(url).catalog().await.unwrap_err();
+        assert!(
+            matches!(err, ThreatFeedError::InvalidResponse { .. }),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_empty_vulnerabilities_is_accepted() {
+    let app = kev_router(serde_json::json!({"vulnerabilities": []}));
+    let url = spawn_router(app).await.join("kev.json").unwrap();
+    let catalog = client(url).catalog().await.unwrap();
+    assert!(catalog.is_empty());
+    assert_eq!(catalog.date_released(), None);
+}

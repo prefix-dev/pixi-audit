@@ -207,7 +207,9 @@ Rules can also specify `ecosystem`, `version`, or `up-to-version`. Keep dates qu
 
 ## Coverage
 
-The audit checks each package once across the selected environments and platforms and skips withdrawn advisories. It reports packages from channels other than conda-forge and source dependencies as not audited, not safe.
+The audit checks each package once across the selected environments and platforms and skips withdrawn advisories. Conda coverage requires conda-forge on `conda.anaconda.org` or `prefix.dev`; PyPI coverage requires an HTTPS artifact under `files.pythonhosted.org/packages/`. Other channels, private mirrors, and Git/path dependencies are reported as not audited, not safe.
+
+A failed vulnerability lookup, including a missing advisory document, aborts the audit rather than producing a partial report. Malformed or unavailable EPSS/KEV feeds only disable that source's risk enrichment and produce a warning.
 
 Override service endpoints with these environment variables:
 

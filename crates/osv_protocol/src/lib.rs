@@ -1,22 +1,14 @@
 //! Serde types for the [OSV](https://ossf.github.io/osv-schema/) vulnerability
 //! database wire format: queries, batch responses, and vulnerability documents.
 //!
-//! This models the OSV API surface with an open `String` ecosystem instead of
-//! the upstream [`osv`](https://crates.io/crates/osv) crate's closed enum, so
-//! it can represent ecosystems that crate can't (e.g. `conda-forge`). Every
-//! type derives both `Serialize` and `Deserialize` so the same definitions can
-//! be shared between OSV clients (which serialize queries and deserialize
-//! responses) and OSV-compatible servers (which do the reverse).
+//! Ecosystems are strings so OSV-compatible services can use names such as
+//! `conda-forge`, which the upstream `osv` crate's closed enum cannot represent.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Deserializes a JSON array while treating `null` like an omitted field.
-///
-/// Some OSV producers emit nullable arrays even though the OSV schema models
-/// these fields as optional arrays. Treating both representations as empty
-/// keeps clients interoperable without weakening the element types.
+/// Treat nullable arrays from OSV producers like omitted fields.
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -120,8 +112,7 @@ pub struct OsvVulnerability {
     pub references: Vec<OsvReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_specific: Option<serde_json::Value>,
-    /// OSV fields this crate does not model (`related`, `credits`, ...),
-    /// preserved so documents round-trip losslessly.
+    /// Additional OSV fields preserved during serialization.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -131,12 +122,20 @@ pub struct OsvSeverity {
     #[serde(rename = "type")]
     pub kind: String,
     pub score: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsvAffected {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<OsvAffectedPackage>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub severity: Vec<OsvSeverity>,
     #[serde(
         default,
         deserialize_with = "deserialize_null_default",
@@ -151,8 +150,7 @@ pub struct OsvAffected {
     pub versions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_specific: Option<serde_json::Value>,
-    /// Unmodeled OSV fields (`severity`, `ecosystem_specific`, ...),
-    /// preserved so documents round-trip losslessly.
+    /// Additional OSV fields preserved during serialization.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -171,6 +169,10 @@ pub struct OsvAffectedPackage {
 pub struct OsvRange {
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_specific: Option<serde_json::Value>,
     #[serde(
         default,
         deserialize_with = "deserialize_null_default",
@@ -187,6 +189,8 @@ pub struct OsvEvent {
     pub fixed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_affected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +267,7 @@ mod tests {
             "references": null,
             "affected": [{
                 "package": {"ecosystem": "PyPI", "name": "bleach"},
+                "severity": null,
                 "ranges": null,
                 "versions": null
             }]
@@ -272,6 +277,7 @@ mod tests {
         assert!(vuln.aliases.is_empty());
         assert!(vuln.severity.is_empty());
         assert!(vuln.references.is_empty());
+        assert!(vuln.affected[0].severity.is_empty());
         assert!(vuln.affected[0].ranges.is_empty());
         assert!(vuln.affected[0].versions.is_empty());
     }
@@ -317,7 +323,6 @@ mod tests {
             "evaluated"
         );
 
-        // Round-tripping must not lose the new fields.
         let round_tripped = serde_json::to_value(&vuln).unwrap();
         assert_eq!(round_tripped["withdrawn"], "2026-02-01T00:00:00Z");
         assert_eq!(round_tripped["schema_version"], "1.6.0");
@@ -330,9 +335,6 @@ mod tests {
 
     #[test]
     fn unmodeled_fields_round_trip_via_catch_all() {
-        // OSV fields we don't model yet (credits, related, severity on an
-        // affected entry, ...) must survive a deserialize/serialize cycle so
-        // an OSV-compatible server built on these types is lossless.
         let json = serde_json::json!({
             "id": "CVE-2026-1",
             "related": ["CVE-2026-2"],
@@ -346,6 +348,42 @@ mod tests {
         let vuln: OsvVulnerability = serde_json::from_value(json.clone()).unwrap();
         let round_tripped = serde_json::to_value(&vuln).unwrap();
         assert_eq!(round_tripped, json);
+    }
+
+    #[test]
+    fn affected_severity_and_nested_range_fields_round_trip() {
+        let json = serde_json::json!({
+            "id": "CVE-2026-1234",
+            "affected": [{
+                "package": {"ecosystem": "PyPI", "name": "pillow"},
+                "severity": [{
+                    "type": "CVSS_V3",
+                    "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                    "source": "NVD"
+                }],
+                "ranges": [{
+                    "type": "GIT",
+                    "repo": "https://github.com/python-pillow/Pillow",
+                    "database_specific": {"source": "upstream", "confidence": 0.9},
+                    "events": [{"introduced": "0"}, {"limit": "deadbeef"}]
+                }]
+            }]
+        });
+        let doc: OsvVulnerability = serde_json::from_value(json.clone()).unwrap();
+        let affected = &doc.affected[0];
+        assert_eq!(affected.severity[0].kind, "CVSS_V3");
+        assert!(!affected.extra.contains_key("severity"));
+        let range = &affected.ranges[0];
+        assert_eq!(
+            range.repo.as_deref(),
+            Some("https://github.com/python-pillow/Pillow")
+        );
+        assert_eq!(
+            range.database_specific.as_ref().unwrap()["source"],
+            "upstream"
+        );
+        assert_eq!(range.events[1].limit.as_deref(), Some("deadbeef"));
+        assert_eq!(serde_json::to_value(doc).unwrap(), json);
     }
 
     #[test]

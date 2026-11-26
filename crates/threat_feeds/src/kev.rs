@@ -106,7 +106,6 @@ impl From<RawCatalog> for KevCatalog {
 struct RawCatalog {
     #[serde(default)]
     date_released: Option<String>,
-    #[serde(default)]
     vulnerabilities: Vec<RawEntry>,
 }
 
